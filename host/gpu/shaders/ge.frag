@@ -1,0 +1,47 @@
+#version 450
+
+layout(location = 0) in vec2 frag_texcoord;
+layout(location = 1) in vec4 frag_color;
+layout(location = 0) out vec4 out_color;
+
+layout(set = 0, binding = 0) uniform sampler2D guest_texture;
+
+layout(push_constant) uniform Push {
+    mat4 transform;
+    vec4 viewport;
+    vec4 texture_params; // x: texture enabled, y: texture function, z: alpha ref, w: alpha func
+    vec4 uv_transform;
+} push;
+
+void main() {
+    vec4 color = frag_color;
+    if (push.texture_params.x > 0.5) {
+        vec4 texel = texture(guest_texture, frag_texcoord);
+        int function = int(push.texture_params.y + 0.5);
+        if (function == 0) {          // modulate
+            color *= texel;
+        } else if (function == 1) {   // decal
+            color = vec4(mix(color.rgb, texel.rgb, texel.a), color.a);
+        } else if (function == 2) {   // blend
+            color = vec4(mix(color.rgb, texel.rgb, texel.rgb), color.a * texel.a);
+        } else {                      // replace and everything else
+            color = texel;
+        }
+    }
+
+    // PSP alpha test, evaluated per fragment.
+    int alpha_function = int(push.texture_params.w + 0.5);
+    float reference = push.texture_params.z / 255.0;
+    float alpha = color.a;
+    bool passed = true;
+    if (alpha_function == 1) passed = false;                     // never
+    else if (alpha_function == 2) passed = abs(alpha - reference) < 0.002;
+    else if (alpha_function == 3) passed = abs(alpha - reference) >= 0.002;
+    else if (alpha_function == 4) passed = alpha < reference;
+    else if (alpha_function == 5) passed = alpha <= reference;
+    else if (alpha_function == 6) passed = alpha > reference;
+    else if (alpha_function == 7) passed = alpha >= reference;
+    if (!passed) discard;
+
+    out_color = color;
+}
