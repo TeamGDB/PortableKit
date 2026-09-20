@@ -443,6 +443,179 @@ void register_callbacks_and_timers(HleRegistrar &hle) {
     });
 }
 
+
+// Lightweight mutexes.
+//
+// A lightweight mutex lives in a work area the game owns, so that an
+// uncontended lock can be taken in user space without entering the kernel.
+// This game imports all of the calls, so every lock comes through here and the
+// work area is bookkeeping rather than the source of truth: the mutex itself
+// is an ordinary kernel mutex, found by the work area's address.
+//
+// The fields are still written where the PSP's SceLwMutexWorkarea documents
+// them, for any code that reads them without calling. That layout is taken
+// from the public description of the structure and has not been checked
+// against what this game does with it.
+namespace lwmutex {
+
+constexpr std::uint32_t kLockLevel = 0u;
+constexpr std::uint32_t kLockThread = 4u;
+constexpr std::uint32_t kAttributes = 8u;
+constexpr std::uint32_t kWaitingThreads = 12u;
+constexpr std::uint32_t kUid = 16u;
+
+std::map<std::uint32_t, SceUID> &by_work_area() {
+    static std::map<std::uint32_t, SceUID> table;
+    return table;
+}
+
+void write_state(psprecomp::GuestMemory &memory, std::uint32_t work_area, const Mutex &mutex) {
+    memory.store32(work_area + kLockLevel, as_unsigned(mutex.lock_count));
+    memory.store32(work_area + kLockThread, as_unsigned(mutex.owner));
+    memory.store32(work_area + kWaitingThreads, static_cast<std::uint32_t>(mutex.waiters.size()));
+}
+
+// The kernel mutex behind a work area, or null when the game never created one.
+Mutex *find(std::uint32_t work_area, SceUID &uid) {
+    const auto entry = by_work_area().find(work_area);
+    if (entry == by_work_area().end()) return nullptr;
+    uid = entry->second;
+    const auto found = kernel().mutexes.find(uid);
+    return found != kernel().mutexes.end() ? &found->second : nullptr;
+}
+
+} // namespace lwmutex
+
+// Runs a function on a stack of its own and returns what it returned.
+//
+// A game calls this when it is about to recurse deeper than its thread's stack
+// allows: the kernel takes a block of the size asked for, moves sp into it,
+// calls entry(argument), then puts sp back. Stubbing it out returns without
+// running entry at all, which for this game meant module_start finished
+// without ever creating the game's main thread.
+void register_stack_extension(HleRegistrar &hle) {
+    hle.add("ThreadManForUser", "sceKernelExtendThreadStack", [](Runtime &, AllegrexContext &ctx) {
+        const std::uint32_t size = arg(ctx, 0);
+        const std::uint32_t entry = arg(ctx, 1);
+        const std::uint32_t argument = arg(ctx, 2);
+        if (entry == 0u) {
+            kernel().finish(ctx, error::kIllegalEntry);
+            return;
+        }
+        const std::int32_t block = kernel().allocate_block("ExtendStack", 1u, (size + 255u) & ~std::uint32_t{255u}, 0u);
+        const MemoryBlock *memory_block = block >= 0 ? kernel().find_block(block) : nullptr;
+        const std::uint32_t saved_sp = ctx.gpr[29];
+        if (memory_block != nullptr) {
+            // The stack grows down from the top of the block, aligned as the
+            // ABI wants it.
+            ctx.set_gpr(29, (memory_block->address + memory_block->size) & ~std::uint32_t{15u});
+        }
+        kernel().call_guest(ctx, entry, {argument, 0u, 0u, 0u},
+                            [saved_sp, block](AllegrexContext &returned, std::uint32_t result) {
+                                returned.set_gpr(29, saved_sp);
+                                if (block >= 0) (void)kernel().free_block(block);
+                                kernel().finish(returned, result);
+                            });
+    });
+}
+
+void register_lightweight_mutexes(HleRegistrar &hle) {
+    hle.add("ThreadManForUser", "sceKernelCreateLwMutex", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t work_area = arg(ctx, 0);
+        const SceUID uid = kernel().allocate_uid();
+        Mutex mutex{read_cstring(rt.memory(), arg(ctx, 1), 32u), arg(ctx, 2), 0, as_signed(arg(ctx, 3)), {}};
+        if (mutex.lock_count > 0) mutex.owner = kernel().current_uid();
+        kernel().mutexes[uid] = std::move(mutex);
+        lwmutex::by_work_area()[work_area] = uid;
+        rt.memory().store32(work_area + lwmutex::kAttributes, arg(ctx, 2));
+        rt.memory().store32(work_area + lwmutex::kUid, as_unsigned(uid));
+        lwmutex::write_state(rt.memory(), work_area, kernel().mutexes[uid]);
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("ThreadManForUser", "sceKernelDeleteLwMutex", [](Runtime &, AllegrexContext &ctx) {
+        const std::uint32_t work_area = arg(ctx, 0);
+        SceUID uid = 0;
+        Mutex *mutex = lwmutex::find(work_area, uid);
+        if (mutex == nullptr) {
+            kernel().finish(ctx, error::kMutexNotFound);
+            return;
+        }
+        kernel().cancel_waiters(mutex->waiters, error::kWaitDelete);
+        kernel().mutexes.erase(uid);
+        lwmutex::by_work_area().erase(work_area);
+        kernel().finish(ctx, 0u);
+    });
+
+    // Locking and unlocking are exported by Kernel_Library, because on a PSP
+    // the uncontended case never leaves user space.
+    const auto lock = [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t work_area = arg(ctx, 0);
+        const std::int32_t count = as_signed(arg(ctx, 1));
+        SceUID uid = 0;
+        Mutex *mutex = lwmutex::find(work_area, uid);
+        if (mutex == nullptr) {
+            kernel().finish(ctx, error::kMutexNotFound);
+            return;
+        }
+        if (count <= 0) {
+            kernel().finish(ctx, error::kIllegalCount);
+            return;
+        }
+        if (mutex->lock_count == 0) {
+            mutex->owner = kernel().current_uid();
+            mutex->lock_count = count;
+            lwmutex::write_state(rt.memory(), work_area, *mutex);
+            kernel().finish(ctx, 0u);
+            return;
+        }
+        if (mutex->owner == kernel().current_uid()) {
+            if ((mutex->attributes & kMutexAttrRecursive) == 0u) {
+                kernel().finish(ctx, error::kMutexRecursiveNotAllowed);
+                return;
+            }
+            mutex->lock_count += count;
+            lwmutex::write_state(rt.memory(), work_area, *mutex);
+            kernel().finish(ctx, 0u);
+            return;
+        }
+        mutex->waiters.push_back(kernel().current_uid());
+        lwmutex::write_state(rt.memory(), work_area, *mutex);
+        WaitState wait{};
+        wait.type = WaitType::Mutex;
+        wait.object = uid;
+        wait.value = static_cast<std::uint32_t>(count);
+        wait.timeout_address = arg(ctx, 2);
+        kernel().block(ctx, wait, 0u);
+    };
+    hle.add("Kernel_Library", "sceKernelLockLwMutex", lock);
+    hle.add("Kernel_Library", "sceKernelLockLwMutexCB", lock);
+    hle.add("Kernel_Library", "sceKernelUnlockLwMutex", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t work_area = arg(ctx, 0);
+        const std::int32_t count = as_signed(arg(ctx, 1));
+        SceUID uid = 0;
+        Mutex *mutex = lwmutex::find(work_area, uid);
+        if (mutex == nullptr) {
+            kernel().finish(ctx, error::kMutexNotFound);
+            return;
+        }
+        if (count <= 0) {
+            kernel().finish(ctx, error::kIllegalCount);
+            return;
+        }
+        if (mutex->lock_count < count) {
+            kernel().finish(ctx, error::kMutexUnlockUnderflow);
+            return;
+        }
+        mutex->lock_count -= count;
+        if (mutex->lock_count == 0) {
+            mutex->owner = 0;
+            kernel().release_mutex_waiters(uid);
+        }
+        lwmutex::write_state(rt.memory(), work_area, *mutex);
+        kernel().finish(ctx, 0u);
+    });
+}
+
 void register_kernel_library(HleRegistrar &hle) {
     hle.add("Kernel_Library", "sceKernelCpuSuspendIntr", [](Runtime &, AllegrexContext &ctx) {
         const bool was_enabled = kernel().interrupts_enabled();
@@ -470,6 +643,8 @@ void register_threadman(HleRegistrar &hle) {
     register_semaphores(hle);
     register_event_flags(hle);
     register_mutexes(hle);
+    register_lightweight_mutexes(hle);
+    register_stack_extension(hle);
     register_callbacks_and_timers(hle);
     register_kernel_library(hle);
 }
