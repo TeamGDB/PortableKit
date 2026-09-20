@@ -6,6 +6,16 @@ proxy for the generated units (section 5). Tools: Ninja 1.13.2 and CMake
 4.3.3 (both Homebrew), Apple clang 21, an 8-core Mac with 8 GB of memory.
 `ccache` 4.14 was installed with Homebrew to take the measurements.
 
+This page is a record of an investigation, so its numbers, file paths and
+target names are the ones that were measured: the first port's
+(`MHP3rdNative`, `out/mhp3rd`, `profiles/mhp3rd/CMakeLists.txt`, 89 generated
+units and 355 overlays). The framework has since moved out of that repository
+and the build files it names are now `cmake/PortableKit.cmake` and a profile's
+own `CMakeLists.txt`. Everything the page says about Ninja, the job pool, the
+build lock and where incremental state goes is unchanged by that move; the
+names are left as they were measured rather than rewritten into a build that
+was never run.
+
 ## Summary
 
 | Observed failure | Root cause | Confidence |
