@@ -616,6 +616,131 @@ struct alignas(16) AllegrexContext {
         write_vfpu_vector_with_destination_prefix(result, destination_register, destination_length);
     }
 
+    // Packs integers back down to bytes, halfwords or 16-bit colours: the
+    // other direction from vx2i, so the result is narrower than the source.
+    // These run on raw bit patterns, and the source prefix only swizzles.
+    //
+    // vi2uc: a quad of signed integers to one word of four unsigned bytes. A
+    // negative element becomes 0; otherwise the byte is bits 30..23, which is
+    // the top eight bits of a value known to be positive.
+    void execute_vfpu_vi2uc(std::uint32_t destination_register, std::uint32_t source_register,
+                            std::uint32_t source_length) noexcept {
+        if (source_length == 0u || source_length > 4u) return;
+        float source[4]{};
+        read_vfpu_vector(source, source_register, source_length);
+        apply_vfpu_source_prefix(source, source_length, 0u);
+        std::uint32_t packed = 0u;
+        for (std::uint32_t lane = 0u; lane < source_length; ++lane) {
+            const auto value = std::bit_cast<std::int32_t>(source[lane]);
+            const std::uint32_t byte =
+                value < 0 ? 0u : (static_cast<std::uint32_t>(value) >> 23u) & 0xFFu;
+            packed |= byte << (lane * 8u);
+        }
+        const float result[1]{std::bit_cast<float>(packed)};
+        write_vfpu_vector_with_destination_prefix(result, destination_register, 1u);
+    }
+
+    // vi2s: the top sixteen bits of each source element, two elements per
+    // destination word, so a quad becomes a pair. No clamping; vi2us is the
+    // clamping variant and no game has needed it yet.
+    void execute_vfpu_vi2s(std::uint32_t destination_register, std::uint32_t source_register,
+                           std::uint32_t source_length) noexcept {
+        if (source_length == 0u || source_length > 4u) return;
+        float source[4]{};
+        read_vfpu_vector(source, source_register, source_length);
+        apply_vfpu_source_prefix(source, source_length, 0u);
+        const std::uint32_t destination_length = (source_length + 1u) / 2u;
+        float result[4]{};
+        for (std::uint32_t lane = 0u; lane < destination_length; ++lane) {
+            const std::uint32_t low = std::bit_cast<std::uint32_t>(source[lane * 2u]) >> 16u;
+            const std::uint32_t high =
+                lane * 2u + 1u < source_length
+                    ? std::bit_cast<std::uint32_t>(source[lane * 2u + 1u]) & 0xFFFF0000u
+                    : 0u;
+            result[lane] = std::bit_cast<float>(low | high);
+        }
+        write_vfpu_vector_with_destination_prefix(result, destination_register, destination_length);
+    }
+
+    // vt5650: packed 8888 colours to 5650, two per destination word, so a quad
+    // becomes a pair. Red keeps five bits, green six, blue five. There is no
+    // destination prefix for this one.
+    void execute_vfpu_vt5650(std::uint32_t destination_register, std::uint32_t source_register,
+                             std::uint32_t source_length) noexcept {
+        if (source_length == 0u || source_length > 4u) return;
+        float source[4]{};
+        read_vfpu_vector(source, source_register, source_length);
+        apply_vfpu_source_prefix(source, source_length, 0u);
+        const auto to_5650 = [](std::uint32_t colour) {
+            return ((colour >> 3u) & 0x1Fu) | ((colour >> 5u) & 0x7E0u) | ((colour >> 8u) & 0xF800u);
+        };
+        const std::uint32_t destination_length = (source_length + 1u) / 2u;
+        float result[4]{};
+        for (std::uint32_t lane = 0u; lane < destination_length; ++lane) {
+            const std::uint32_t low = to_5650(std::bit_cast<std::uint32_t>(source[lane * 2u]));
+            const std::uint32_t high =
+                lane * 2u + 1u < source_length
+                    ? to_5650(std::bit_cast<std::uint32_t>(source[lane * 2u + 1u]))
+                    : 0u;
+            result[lane] = std::bit_cast<float>(low | (high << 16u));
+        }
+        write_vfpu_vector(result, destination_register, destination_length);
+    }
+
+    // The VFPU's random generator.
+    //
+    // Its state lives in the control registers RCX0..RCX7 and the hardware's
+    // own sequence is not documented anywhere this project can use. What is
+    // here is this project's own generator over those same eight registers: it
+    // is deterministic, it is seeded the same way on every run, and it is not
+    // the sequence a PSP produces. A game that draws from it gets different
+    // random numbers than it would on hardware, which changes what it looks
+    // like but not whether it works.
+    //
+    // vrnds, which seeds the state from a register, is not implemented because
+    // no game has been seen to use it; a game that does would need the
+    // hardware's own algorithm for its results to mean anything.
+    [[nodiscard]] std::uint32_t next_vfpu_random() noexcept {
+        constexpr std::uint32_t kFirstStateRegister = 8u;
+        std::uint32_t *state = vfpu_ctrl.data() + kFirstStateRegister;
+        if ((state[0] | state[1] | state[2] | state[3]) == 0u) {
+            // An arbitrary non-zero start, so the first draw is not zero.
+            state[0] = 0x9E3779B9u;
+            state[1] = 0x243F6A88u;
+            state[2] = 0xB7E15162u;
+            state[3] = 0x85EBCA6Bu;
+        }
+        // xorshift128, which is small, has a long period and needs no tables.
+        std::uint32_t t = state[3];
+        const std::uint32_t s = state[0];
+        state[3] = state[2];
+        state[2] = state[1];
+        state[1] = s;
+        t ^= t << 11u;
+        t ^= t >> 8u;
+        state[0] = t ^ s ^ (s >> 19u);
+        return state[0];
+    }
+
+    // mode 1: vrndi, a full-range 32-bit pattern in each element.
+    // mode 2: vrndf1, a float in [1.0, 2.0).
+    // mode 3: vrndf2, a float in [2.0, 4.0).
+    void execute_vfpu_vrnd(std::uint32_t destination_register, std::uint32_t length,
+                           std::uint32_t mode) noexcept {
+        if (length == 0u || length > 4u) return;
+        float result[4]{};
+        for (std::uint32_t lane = 0u; lane < length; ++lane) {
+            const std::uint32_t bits = next_vfpu_random();
+            if (mode == 1u) {
+                result[lane] = std::bit_cast<float>(bits);
+            } else {
+                const std::uint32_t exponent = mode == 2u ? 127u : 128u;
+                result[lane] = std::bit_cast<float>((exponent << 23u) | (bits & 0x7FFFFFu));
+            }
+        }
+        write_vfpu_vector_with_destination_prefix(result, destination_register, length);
+    }
+
     template <std::uint32_t DestinationScalarRegister, std::uint32_t SourceRegister,
               std::uint32_t TargetRegister, std::uint32_t Length>
     PSPRECOMP_CONTEXT_FORCEINLINE void execute_vfpu_vdot_ct() noexcept {

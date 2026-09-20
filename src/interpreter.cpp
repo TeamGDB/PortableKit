@@ -436,6 +436,18 @@ bool execute_simple(Runtime &rt, AllegrexContext &ctx, const DecodedInstruction 
     case OpcodeKind::Vh2f:
         ctx.execute_vfpu_vh2f(vfpu_vd(d.word), vfpu_vs(d.word), vfpu_length(d.word));
         break;
+    case OpcodeKind::Vi2x:
+        if (((d.word >> 16u) & 31u) == 28u)
+            ctx.execute_vfpu_vi2uc(vfpu_vd(d.word), vfpu_vs(d.word), vfpu_length(d.word));
+        else
+            ctx.execute_vfpu_vi2s(vfpu_vd(d.word), vfpu_vs(d.word), vfpu_length(d.word));
+        break;
+    case OpcodeKind::Vt5650:
+        ctx.execute_vfpu_vt5650(vfpu_vd(d.word), vfpu_vs(d.word), vfpu_length(d.word));
+        break;
+    case OpcodeKind::Vrnd:
+        ctx.execute_vfpu_vrnd(vfpu_vd(d.word), vfpu_length(d.word), (d.word >> 16u) & 31u);
+        break;
     case OpcodeKind::Vx2i:
         ctx.execute_vfpu_vx2i(vfpu_vd(d.word), vfpu_vs(d.word), vfpu_length(d.word),
                               (d.word >> 16u) & 3u);

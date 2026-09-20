@@ -304,6 +304,19 @@ DecodedInstruction decode_allegrex(std::uint32_t word) {
         if (group == 3u) {
             d.kind = OpcodeKind::Vcst;
             d.mnemonic = "vcst";
+        } else if (group == 1u && operation >= 1u && operation <= 3u) {
+            // The VFPU's random generator: vrndi fills with raw 32-bit
+            // patterns, vrndf1 and vrndf2 with floats in [1,2) and [2,4).
+            d.kind = OpcodeKind::Vrnd;
+            static constexpr const char *names[3]{"vrndi", "vrndf1", "vrndf2"};
+            d.mnemonic = names[operation - 1u];
+        } else if (group == 1u && (operation == 28u || operation == 31u)) {
+            // Packing back down: the other direction from vx2i.
+            d.kind = OpcodeKind::Vi2x;
+            d.mnemonic = operation == 28u ? "vi2uc" : "vi2s";
+        } else if (group == 2u && operation == 27u) {
+            d.kind = OpcodeKind::Vt5650;
+            d.mnemonic = "vt5650";
         } else if (group == 1u && operation == 18u) {
             d.kind = OpcodeKind::Vf2h;
             d.mnemonic = "vf2h";
