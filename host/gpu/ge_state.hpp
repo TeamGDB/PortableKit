@@ -221,6 +221,11 @@ public:
     [[nodiscard]] std::uint64_t draw_count() const noexcept { return draw_count_; }
     [[nodiscard]] std::uint64_t vertex_count() const noexcept { return vertex_count_; }
     [[nodiscard]] std::uint64_t unhandled_command_count() const noexcept { return unhandled_commands_; }
+    // Every GE command the state machine ignored, with how often and the first
+    // value seen, printed once at the end of a run. This is the answer to
+    // "what does this game ask of the hardware that the renderer does not
+    // do", and it is the game's own answer rather than a reading of the code.
+    static void report_ignored_commands();
 
 private:
     // Resolves a display-list address operand against BASE and OFFSET_ADDR.

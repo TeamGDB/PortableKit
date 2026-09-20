@@ -11,6 +11,7 @@
 #include "profile.hpp"
 #include "install/installer.hpp"
 #include "install/user_data.hpp"
+#include "gpu/ge_state.hpp"
 #include "kernel/kernel.hpp"
 
 #include "psprecomp/common.hpp"
@@ -385,6 +386,7 @@ int main(int argc, char **argv) {
         if (portablekit::install::restart_requested_on_exit()) return portablekit::install::restart(argv);
         std::cout << portablekit::kernel().describe_threads() << "\n";
         runtime.report_hle_histogram();
+        portablekit::gpu::GeState::report_ignored_commands();
         return runtime.stop_reason().empty() ? 0 : 4;
     } catch (const std::exception &e) {
         portablekit::adhoc_shutdown();

@@ -699,14 +699,32 @@ bool find_vram_copy(std::uint32_t address, std::uint32_t &source, std::uint32_t 
 // <prefix>_TRACE_FB_TEXTURES also lists the commands the GE state ignores, with
 // the first few values of each, so copies the renderer never sees (block
 // transfers, for example) show up next to the textures that read their result.
+namespace {
+struct IgnoredCommand {
+    std::uint64_t count{};
+    std::uint32_t first_value{};
+};
+std::map<std::uint32_t, IgnoredCommand> &ignored_commands() {
+    static std::map<std::uint32_t, IgnoredCommand> commands;
+    return commands;
+}
+} // namespace
+
 void GeState::trace_unhandled(std::uint32_t command, std::uint32_t data) {
+    IgnoredCommand &entry = ignored_commands()[command];
+    if (entry.count == 0u) entry.first_value = data;
+    ++entry.count;
     static const bool trace = portablekit::env("TRACE_FB_TEXTURES") != nullptr;
-    if (!trace) return;
-    static std::map<std::uint32_t, std::uint32_t> seen;
-    std::uint32_t &count = seen[command];
-    if (count >= 4u) return;
-    ++count;
+    if (!trace || entry.count > 4u) return;
     std::cout << "[fbtex] unhandled GE command 0x" << std::hex << command << " data=0x" << data << std::dec << "\n";
+}
+
+void GeState::report_ignored_commands() {
+    if (ignored_commands().empty()) return;
+    std::cout << "GE commands ignored: " << ignored_commands().size() << " distinct\n";
+    for (const auto &[command, entry] : ignored_commands())
+        std::cout << "  0x" << std::hex << command << std::dec << " x" << entry.count << " first=0x" << std::hex
+                  << entry.first_value << std::dec << "\n";
 }
 
 void GeState::draw_primitive(const GuestMemory &memory, std::uint32_t data) {
