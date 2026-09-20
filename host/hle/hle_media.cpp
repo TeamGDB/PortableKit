@@ -76,6 +76,9 @@ struct MediaState {
     std::map<std::uint32_t, GeList> ge_lists;
     std::uint32_t next_ge_list{1u};
     std::array<AudioChannel, 8> audio{};
+    // The Output2 channel, reserved through sceAudioOutput2Reserve rather than
+    // chosen by the guest. -1 when it has not been reserved.
+    std::int32_t output2_channel{-1};
     gpu::GeState ge;
 #if defined(PORTABLEKIT_HAS_RENDERER)
     std::unique_ptr<gpu::VulkanRenderer> renderer;
@@ -515,6 +518,65 @@ void register_audio(HleRegistrar &hle) {
     });
     hle.add("sceAudio", "sceAudioOutputPannedBlocking", audio_output);
     hle.try_add("sceAudio", "sceAudioOutputPanned", audio_output);
+    // sceAudioOutputBlocking(channel, volume, buffer): the same output with one
+    // volume for both sides.
+    hle.add("sceAudio", "sceAudioOutputBlocking", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t channel = arg(ctx, 0);
+        const std::uint32_t volume = arg(ctx, 1);
+        const std::uint32_t buffer = arg(ctx, 2);
+        ctx.set_gpr(4, channel);
+        ctx.set_gpr(5, volume);
+        ctx.set_gpr(6, volume);
+        ctx.set_gpr(7, buffer);
+        audio_output(rt, ctx);
+    });
+
+    // Output2 is a single stereo channel a game reserves once and then feeds,
+    // instead of picking a channel of its own. It is the same output
+    // underneath, and the same pacing: the blocking form returns once the
+    // previous buffer has drained, which is what stops a game's audio thread
+    // from spinning at a priority above everything else.
+    hle.add("sceAudio", "sceAudioOutput2Reserve", [](Runtime &, AllegrexContext &ctx) {
+        auto &channels = media().audio;
+        std::int32_t channel = media().output2_channel;
+        if (channel < 0) {
+            for (std::size_t i = 0; i < channels.size(); ++i) {
+                if (!channels[i].reserved) {
+                    channel = static_cast<std::int32_t>(i);
+                    break;
+                }
+            }
+        }
+        if (channel < 0) {
+            kernel().finish(ctx, 0x80260002u);
+            return;
+        }
+        // Output2 is always stereo 16-bit; format 0 is the stereo pair.
+        channels[static_cast<std::size_t>(channel)] = AudioChannel{true, arg(ctx, 0), 0u, 0u, 0u};
+        media().output2_channel = channel;
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("sceAudio", "sceAudioOutput2Release", [](Runtime &, AllegrexContext &ctx) {
+        if (media().output2_channel >= 0) {
+            media().audio[static_cast<std::size_t>(media().output2_channel)].reserved = false;
+            media().output2_channel = -1;
+        }
+        kernel().finish(ctx, 0u);
+    });
+    // sceAudioOutput2OutputBlocking(volume, buffer).
+    hle.add("sceAudio", "sceAudioOutput2OutputBlocking", [](Runtime &rt, AllegrexContext &ctx) {
+        if (media().output2_channel < 0) {
+            kernel().finish(ctx, 0x80260002u);
+            return;
+        }
+        const std::uint32_t volume = arg(ctx, 0);
+        const std::uint32_t buffer = arg(ctx, 1);
+        ctx.set_gpr(4, static_cast<std::uint32_t>(media().output2_channel));
+        ctx.set_gpr(5, volume);
+        ctx.set_gpr(6, volume);
+        ctx.set_gpr(7, buffer);
+        audio_output(rt, ctx);
+    });
 
     hle.add("sceSasCore", "__sceSasInit", [](Runtime &, AllegrexContext &ctx) {
         audio::sas_core(arg(ctx, 0)).init(arg(ctx, 1), arg(ctx, 2), arg(ctx, 3));
