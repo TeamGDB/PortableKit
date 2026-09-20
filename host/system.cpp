@@ -99,6 +99,13 @@ void install_system(Runtime &runtime, const psprecomp::Elf32Image &elf, const Pr
         register_logging_stub(runtime, import);
         ++stubbed;
     }
+    // Without a corpus there is nothing at the import stubs, so the
+    // interpreter would run their own two instructions and carry on with
+    // whatever was in v0. Bind them, which costs an AOT build nothing.
+    std::size_t bound_stubs = 0u;
+    for (const auto &import : imports)
+        if (runtime.register_import_stub(import.stub_address, import.library, import.nid)) ++bound_stubs;
+    if (bound_stubs != 0u) std::cout << "Import stubs: " << bound_stubs << " bound for interpretation\n";
     std::cout << "HLE imports: " << imports.size() << " total, " << hle.count() << " implemented, " << stubbed
               << " logging stubs" << (strict ? " (strict mode)" : "") << "\n";
 

@@ -15,6 +15,7 @@
 
 #include "psprecomp/common.hpp"
 #include "psprecomp/elf32.hpp"
+#include "psprecomp/interpreter.hpp"
 #include "psprecomp/runtime.hpp"
 #include "psprecomp/sha256.hpp"
 
@@ -361,8 +362,16 @@ int main(int argc, char **argv) {
                   << "Entry:      " << psprecomp::hex32(elf.runtime_entry(load_base)) << "\n"
                   << "Functions:  " << runtime.function_count() << "\n";
         if (runtime.function_count() == 0u) {
-            std::cout << "No generated functions are linked. Run scripts/generate.sh and rebuild.\n";
-            return 3;
+            if (!psprecomp::interpreter_fallback_enabled()) {
+                std::cout << "No recompiled code is linked, and the interpreter is off "
+                             "(PSPRECOMP_NO_INTERPRETER). Generate the corpus and rebuild.\n";
+                return 3;
+            }
+            // Bringing a new game up: the interpreter runs it while its code is
+            // still being recompiled, which is how the system calls, graphics
+            // features and instructions it needs are found without waiting
+            // hours for the corpus. It is roughly twenty times slower.
+            std::cout << "No recompiled code is linked; running under the interpreter.\n";
         }
 
         runtime.run(elf.runtime_entry(load_base), configured_max_dispatches());

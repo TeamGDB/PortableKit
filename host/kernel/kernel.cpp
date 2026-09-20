@@ -90,7 +90,8 @@ void Kernel::install(Runtime &runtime, std::uint32_t gp, std::uint32_t image_end
 
     free_ranges_.clear();
     const std::uint32_t user_start = align_up(image_end, 0x1000u);
-    free_ranges_.push_back(FreeRange{user_start, kUserMemoryEnd - user_start});
+    const std::uint32_t user_end = psprecomp::GuestMemory::kPhysicalBase + runtime.memory().size();
+    free_ranges_.push_back(FreeRange{user_start, user_end - user_start});
 
     runtime.register_function(kThreadExitStub, &native_thread_exit, "portablekit_thread_exit");
     runtime.register_function(kInterruptReturnStub, &native_interrupt_return, "portablekit_interrupt_return");

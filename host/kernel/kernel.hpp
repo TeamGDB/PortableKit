@@ -76,7 +76,10 @@ inline constexpr std::uint32_t kBootArgumentAddress = 0x08100000u;
 inline constexpr std::uint32_t kInterruptStackTop = 0x08200000u;
 inline constexpr std::uint32_t kVolatileMemoryBase = 0x08400000u;
 inline constexpr std::uint32_t kVolatileMemorySize = 0x00400000u;
-inline constexpr std::uint32_t kUserMemoryEnd = 0x0C000000u;
+// The end of the user partition is the end of guest RAM: 0x0A000000 on a
+// console with 32 MiB, 0x0C000000 with 64 MiB. It is read from the memory the
+// runtime was given rather than fixed, because the two are not the same
+// console and a stack allocated past the end faults on first use.
 
 inline constexpr std::uint64_t kVBlankPeriodUs = 16'683u;
 inline constexpr std::uint64_t kHostWaitPollUs = 1'000u;

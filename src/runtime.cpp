@@ -505,6 +505,45 @@ void Runtime::register_hle(std::string library, std::uint32_t nid, HleFunction f
     hle_[std::move(library)][nid] = std::move(function);
 }
 
+namespace {
+
+struct ImportStub {
+    std::string library;
+    std::uint32_t nid{};
+};
+
+// Addresses are the executable's, so one table per process is enough, and a
+// plain function pointer is all Runtime::register_function takes.
+std::unordered_map<std::uint32_t, ImportStub> &import_stubs() {
+    static std::unordered_map<std::uint32_t, ImportStub> table;
+    return table;
+}
+
+void call_import_stub(Runtime &rt, AllegrexContext &ctx) {
+    const auto found = import_stubs().find(ctx.pc);
+    if (found == import_stubs().end()) {
+        rt.stop("No import bound at " + hex32(ctx.pc));
+        return;
+    }
+    const auto caller = capture_runtime_execution_context();
+    const std::uint32_t stub_pc = ctx.pc;
+    const std::uint32_t return_address = ctx.gpr[31];
+    rt.invoke_import(found->second.library, found->second.nid, ctx);
+    // The call may have switched threads or taken an interrupt, in which case
+    // it has already decided where execution goes next.
+    if (!rt.stopped() && runtime_execution_context_matches(caller) && ctx.pc == stub_pc)
+        ctx.pc = return_address;
+}
+
+} // namespace
+
+bool Runtime::register_import_stub(std::uint32_t address, std::string library, std::uint32_t nid) {
+    if (address == 0u || has_function(address)) return false;
+    import_stubs()[address] = ImportStub{library, nid};
+    register_function(address, &call_import_stub, library + "::" + hex32(nid));
+    return true;
+}
+
 bool Runtime::has_function(std::uint32_t address) const { return lookup_function(address) != nullptr; }
 std::size_t Runtime::function_count() const noexcept { return functions_.size(); }
 

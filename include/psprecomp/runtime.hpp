@@ -92,6 +92,13 @@ public:
 
     void register_function(std::uint32_t address, RecompiledFunction function, std::string name);
     void register_hle(std::string library, std::uint32_t nid, HleFunction function);
+    // Binds a PSP import stub's address, so a jump to it calls the HLE and
+    // returns. Recompiled code never jumps to a stub -- the recompiler turns
+    // each call into a direct HLE call and registers its own wrapper there --
+    // but the interpreter does, and a game with no corpus yet is all
+    // interpreter. Returns false when the address already has a function, so
+    // an AOT build keeps the wrapper its own code registered.
+    bool register_import_stub(std::uint32_t address, std::string library, std::uint32_t nid);
     [[nodiscard]] bool has_function(std::uint32_t address) const;
     [[nodiscard]] std::size_t function_count() const noexcept;
 
