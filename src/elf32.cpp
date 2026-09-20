@@ -337,12 +337,32 @@ std::vector<PspRelocationSite> Elf32Image::relocation_sites(std::uint32_t load_b
     return sites;
 }
 
-std::optional<PspModuleInfo> Elf32Image::find_module_info(const GuestMemory &memory, std::uint32_t load_base) const {
+std::uint32_t Elf32Image::module_info_address(std::uint32_t load_base) const {
     const auto section_it = std::find_if(sections_.begin(), sections_.end(), [](const ElfSection &section) {
         return section.name == ".rodata.sceModuleInfo" || section.name == ".sceModuleInfo";
     });
-    if (section_it == sections_.end() || section_it->size < sizeof(ModuleInfo32)) return std::nullopt;
-    const std::uint32_t addr = section_runtime_address(*section_it, load_base);
+    if (section_it != sections_.end() && section_it->size >= sizeof(ModuleInfo32))
+        return section_runtime_address(*section_it, load_base);
+
+    // Many disc executables are stripped of their section names, so there is
+    // no ".rodata.sceModuleInfo" to look for. The PSP's own loader does not
+    // use one: it takes p_paddr of the first loadable segment as the file
+    // offset of the module info. The top bit is a flag, not part of the
+    // offset.
+    for (std::size_t i = 0; i < segments_.size(); ++i) {
+        const ElfSegment &segment = segments_[i];
+        if (segment.type != kPtLoad) continue;
+        const std::uint64_t offset = segment.paddr & 0x7FFFFFFFu;
+        if (offset < segment.offset || offset + sizeof(ModuleInfo32) > segment.offset + segment.file_size) break;
+        return segment_runtime_address(i, load_base) +
+               static_cast<std::uint32_t>(offset - segment.offset);
+    }
+    return 0u;
+}
+
+std::optional<PspModuleInfo> Elf32Image::find_module_info(const GuestMemory &memory, std::uint32_t load_base) const {
+    const std::uint32_t addr = module_info_address(load_base);
+    if (addr == 0u) return std::nullopt;
     if (!memory.contains(addr, sizeof(ModuleInfo32))) return std::nullopt;
 
     char name[28]{};

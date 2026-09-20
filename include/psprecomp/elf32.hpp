@@ -108,6 +108,11 @@ public:
     [[nodiscard]] std::vector<PspRelocationSite> relocation_sites(
         std::uint32_t load_base = kDefaultPspUserLoadBase) const;
 
+    // Where the PSP module info sits once the image is loaded, or 0 when the
+    // executable has none. Named sections are used when they survive; a disc
+    // executable stripped of them is read the way the PSP's own loader reads
+    // it, through p_paddr of the first loadable segment.
+    [[nodiscard]] std::uint32_t module_info_address(std::uint32_t load_base = kDefaultPspUserLoadBase) const;
     [[nodiscard]] std::optional<PspModuleInfo> find_module_info(
         const GuestMemory &memory, std::uint32_t load_base = kDefaultPspUserLoadBase) const;
     [[nodiscard]] std::vector<PspImport> scan_imports(const GuestMemory &memory,
