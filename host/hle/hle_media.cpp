@@ -305,6 +305,36 @@ void register_display_ctrl(HleRegistrar &hle) {
     });
 }
 
+// Waiting for the display to start its vertical blank, which is how a game
+// paces its frame loop. Without these the loop spins: a stub returns at once,
+// the game draws again, and nothing else ever gets the processor.
+void register_vblank_waits(HleRegistrar &hle) {
+    const auto wait_for_vblank = [](Runtime &, AllegrexContext &ctx) {
+        WaitState wait{};
+        wait.type = WaitType::VBlank;
+        kernel().block(ctx, wait, 0u);
+    };
+    hle.add("sceDisplay", "sceDisplayWaitVblankStart", wait_for_vblank);
+    // The CB forms also run the thread's pending callbacks. The kernel runs
+    // them at the next scheduling point either way, so they wait the same.
+    hle.add("sceDisplay", "sceDisplayWaitVblankStartCB", wait_for_vblank);
+    // MultiCB waits for that many vblanks. One is the common case and the only
+    // one seen so far; more than one waits once here and is a known
+    // approximation rather than a silent one.
+    hle.add("sceDisplay", "sceDisplayWaitVblankStartMultiCB", [](Runtime &, AllegrexContext &ctx) {
+        if (arg(ctx, 0) > 1u)
+            log_once("sceDisplayWaitVblankStartMultiCB",
+                     "[display] sceDisplayWaitVblankStartMultiCB waits one vblank, not " +
+                         std::to_string(arg(ctx, 0)));
+        WaitState wait{};
+        wait.type = WaitType::VBlank;
+        kernel().block(ctx, wait, 0u);
+    });
+    hle.add("sceDisplay", "sceDisplayGetVcount", [](Runtime &, AllegrexContext &ctx) {
+        kernel().finish(ctx, static_cast<std::uint32_t>(kernel().vblank_count()));
+    });
+}
+
 void register_ge(HleRegistrar &hle) {
     hle.add("sceGe_user", "sceGeEdramGetAddr", [](Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, kEdramBase); });
     hle.add("sceGe_user", "sceGeEdramGetSize", [](Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, kEdramSize); });
@@ -559,6 +589,7 @@ void initialize_renderer() {
 void register_media(HleRegistrar &hle) {
     initialize_renderer();
     register_display_ctrl(hle);
+    register_vblank_waits(hle);
     register_ge(hle);
     register_audio(hle);
 }
