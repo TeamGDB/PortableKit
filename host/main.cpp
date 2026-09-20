@@ -93,17 +93,17 @@ std::uint64_t configured_max_dispatches() {
 
 std::string usage() {
     const std::string app = portablekit::game().app_name;
-    const std::string pad(app.size(), ' ');
     return "usage: " + app + " [game_dir]\n"
            "       " + app + " --install [image.iso [--in-place]]\n"
            "       " + app + " --adhoc-server [port]\n"
-    "  game_dir        play from a directory holding EBOOT.ELF, disc.iso and ms0/\n"
-    "  --install       run the setup again on screen, then play\n"
-    "  --install image set up from image.iso without the setup screens, then exit\n"
-    "  --in-place      use the image where it is instead of copying it\n"
-    "  --adhoc-server  run only the ad hoc server that Network > Host a session\n"
-    "                  starts, on TCP port (default 27312) and the next one up,\n"
-    "                  announced on the local network, until Ctrl+C\n";
+           "  game_dir        play from a directory holding EBOOT.ELF, disc.iso and ms0/\n"
+           "  --install       run the setup again on screen, then play\n"
+           "  --install image set up from image.iso without the setup screens, then exit\n"
+           "  --in-place      use the image where it is instead of copying it\n"
+           "  --adhoc-server  run only the ad hoc server that Network > Host a session\n"
+           "                  starts, on TCP port (default 27312) and the next one up,\n"
+           "                  announced on the local network, until Ctrl+C\n";
+}
 
 struct Options {
     std::optional<std::filesystem::path> game_dir;
