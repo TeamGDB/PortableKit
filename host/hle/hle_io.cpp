@@ -28,6 +28,32 @@ constexpr std::uint32_t kInvalidArgument = 0x80010016u;
 constexpr std::uint32_t kReadOnly = 0x8001001Eu;
 } // namespace io_error
 
+// The two UMD device commands that start and finish a read-ahead. What they
+// mean was taken from the caller in one game's executable, which is the only
+// description of them this project has:
+//
+//   start: input is four words, {0, first sector, 0, sector count}; the
+//          four-byte output is left for the driver to fill. The game keeps
+//          that word and passes it, and nothing else, to the wait below, so
+//          it is the identity of the request. The game treats a negative
+//          result as failure and retries; it never inspects the word itself.
+//   wait:  input is that word alone, and there is no output. The game tests
+//          the result with "greater than zero" and, while it is positive,
+//          asks again the next frame; at zero or below it considers the
+//          request finished and stops. So a positive result means "still
+//          outstanding", and zero means "nothing left to do". Here the
+//          image is a host file and the range was there before it was
+//          asked for, so the answer is always zero.
+//
+// Neither command names a destination for the data, and no read of the
+// sectors follows in the game that issues them, which is what a read-ahead
+// into the drive's own cache looks like rather than a transfer. **This is
+// not what blocks that game**: the framework answered zero to everything
+// before these were implemented, which the game already read as "finished",
+// and it goes to exactly the same place either way.
+constexpr std::uint32_t kDiscReadAheadStart = 0x01F300A5u;
+constexpr std::uint32_t kDiscReadAheadWait = 0x01F300A7u;
+
 constexpr std::uint32_t kOpenWrite = 0x0002u;
 constexpr std::uint32_t kOpenAppend = 0x0100u;
 constexpr std::uint32_t kOpenCreate = 0x0200u;
@@ -50,11 +76,22 @@ struct OpenFile {
     std::unique_ptr<std::fstream> host;
 };
 
+// A read-ahead the game asked the drive for: a range of sectors it wants in
+// the drive's cache before it reads them. Nothing is copied anywhere — the
+// request names no destination — so all that is kept is what was asked for,
+// and the identity the two halves of the request are joined by.
+struct DiscReadAhead {
+    std::uint32_t lba{};
+    std::uint32_t sectors{};
+};
+
 struct IoState {
     std::unique_ptr<IsoImage> disc;
     std::filesystem::path memory_stick;
     std::map<std::uint32_t, OpenFile> files;
     std::uint32_t next_fd{3u};
+    std::map<std::uint32_t, DiscReadAhead> read_ahead;
+    std::uint32_t next_read_ahead{1u};
 };
 
 IoState &io() {
@@ -458,6 +495,56 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
         case 0x02425823u: // fatms inserted
             if (output != 0u && output_length >= 4u) memory.store32(output, 1u);
             break;
+        // A pair of commands on the UMD device that ask the drive to read a
+        // range of sectors ahead of the game reading them. What each one is
+        // for was read out of the game's own code around the call, not
+        // guessed: see the comment on kDiscReadAhead below.
+        case kDiscReadAheadStart:
+        case kDiscReadAheadWait: {
+            if (split_path(device).device != Device::Disc) {
+                kernel().finish(ctx, io_error::kDeviceNotFound);
+                return;
+            }
+            const std::uint32_t input_length = arg(ctx, 3);
+            if (command == kDiscReadAheadStart) {
+                if (input == 0u || input_length < 16u || output == 0u || output_length < 4u) {
+                    kernel().finish(ctx, io_error::kInvalidArgument);
+                    return;
+                }
+                DiscReadAhead request;
+                request.lba = memory.load32(input + 4u);
+                request.sectors = memory.load32(input + 12u);
+                const std::uint32_t id = io().next_read_ahead++;
+                io().read_ahead.emplace(id, request);
+                memory.store32(output, id);
+                if (trace_io())
+                    std::cerr << "[io] " << device << " read ahead " << request.sectors
+                              << " sectors from " << request.lba << " -> id " << id << "\n";
+                kernel().finish(ctx, 0u);
+                return;
+            }
+            if (input == 0u || input_length < 4u) {
+                kernel().finish(ctx, io_error::kInvalidArgument);
+                return;
+            }
+            const std::uint32_t id = memory.load32(input);
+            const auto found = io().read_ahead.find(id);
+            if (found == io().read_ahead.end()) {
+                std::cerr << "[io] " << device << " asked to wait for read ahead " << id
+                          << ", which was never started\n";
+                kernel().finish(ctx, io_error::kInvalidArgument);
+                return;
+            }
+            // Nothing is outstanding: the image is a host file, so the range
+            // was already there when it was asked for. Zero is what says so —
+            // see the comment on kDiscReadAheadWait.
+            if (trace_io())
+                std::cerr << "[io] " << device << " read ahead " << id << " of " << found->second.sectors
+                          << " sectors from " << found->second.lba << " has nothing outstanding\n";
+            io().read_ahead.erase(found);
+            kernel().finish(ctx, 0u);
+            return;
+        }
         case 0x02425818u: { // free space: input holds a pointer to the info block
             const std::uint32_t info = input != 0u ? memory.load32(input) : 0u;
             if (info != 0u) {
