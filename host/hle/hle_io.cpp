@@ -408,6 +408,29 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
         std::filesystem::rename(host_path(from.path), host_path(to.path), ec);
         kernel().finish(ctx, ec ? io_error::kFileNotFound : 0u);
     });
+    // sceIoIoctl(fd, command, in, in_size, out, out_size). What a game asks of
+    // a file this way is device-specific and undocumented here, so nothing is
+    // guessed at: every call is reported once with the buffer the game filled
+    // in, which is how the command should be worked out.
+    hle.add("IoFileMgrForUser", "sceIoIoctl", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t fd = arg(ctx, 0);
+        const std::uint32_t command = arg(ctx, 1);
+        const std::uint32_t input = arg(ctx, 2);
+        const std::uint32_t input_size = arg(ctx, 3);
+        const auto found = io().files.find(fd);
+        std::string description = "[io] ioctl fd=" + std::to_string(fd) + " " +
+                                  (found != io().files.end() ? found->second.path : std::string("?")) +
+                                  " cmd=" + psprecomp::hex32(command) + " in=" + std::to_string(input_size) +
+                                  " bytes";
+        if (input != 0u && input_size != 0u && input_size <= 64u) {
+            description += ":";
+            for (std::uint32_t i = 0; i < input_size; ++i)
+                description += " " + psprecomp::hex32(rt.memory().load8(input + i)).substr(8u);
+        }
+        log_once("ioctl-" + psprecomp::hex32(command), description + " (unhandled, returning 0)");
+        kernel().finish(ctx, 0u);
+    });
+
     hle.add("IoFileMgrForUser", "sceIoDevctl", [](Runtime &rt, AllegrexContext &ctx) {
         const std::string device = read_cstring(rt.memory(), arg(ctx, 0), 64u);
         const std::uint32_t command = arg(ctx, 1);
@@ -449,9 +472,21 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
             }
             break;
         }
-        default:
-            log_once("devctl:" + device + psprecomp::hex32(command),
-                     "[io] devctl " + device + " cmd=" + psprecomp::hex32(command) + " (unhandled, returning 0)");
+        default: {
+            // Report the buffers too: what a device is being asked for is
+            // usually legible in what the game sends and how much room it
+            // leaves for the answer.
+            const std::uint32_t input_length = arg(ctx, 3);
+            std::string description = "[io] devctl " + device + " cmd=" + psprecomp::hex32(command) +
+                                      " in=" + std::to_string(input_length) + " out=" +
+                                      std::to_string(output_length);
+            if (input != 0u && input_length != 0u && input_length <= 64u) {
+                description += " sent:";
+                for (std::uint32_t i = 0; i < input_length; ++i)
+                    description += " " + psprecomp::hex32(memory.load8(input + i)).substr(8u);
+            }
+            log_once("devctl:" + device + psprecomp::hex32(command), description + " (unhandled, returning 0)");
+        }
             break;
         }
         kernel().finish(ctx, 0u);

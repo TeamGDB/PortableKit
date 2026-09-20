@@ -333,6 +333,65 @@ DialogLifecycle &msg_dialog() {
 
 // With no dialog UI, every message is answered at once as if the player
 // pressed confirm: "OK" for a notice, "Yes" for a question. The text is
+// The shell's game-data install dialog.
+//
+// On a PSP this copies data from the disc to the memory stick while showing a
+// progress bar. Nothing is copied here yet: the dialog runs its life cycle and
+// reports success, so a game that waits for it gets on with its start-up
+// instead of polling for ever.
+//
+// That is a real difference from hardware, and a game that then reads what it
+// believes it installed will not find it. It says so once, and
+// <prefix>_TRACE_SAVEDATA dumps the parameter block, which is how the
+// structure's layout should be established - by reading what the game puts
+// there, not by recalling it.
+DialogLifecycle &gamedata_dialog() {
+    static DialogLifecycle dialog;
+    return dialog;
+}
+
+void register_gamedata_install(HleRegistrar &hle) {
+    hle.add("sceUtility", "sceUtilityGamedataInstallInitStart", [](Runtime &rt, AllegrexContext &ctx) {
+        auto &memory = rt.memory();
+        const std::uint32_t params = arg(ctx, 0);
+        log_once("gamedata-install",
+                 "[gamedata] the game asked the shell to install its data; the dialog reports success but "
+                 "nothing has been copied, so anything the game expects to find installed is not there");
+        if (portablekit::env("TRACE_SAVEDATA") != nullptr && params != 0u) {
+            const std::uint32_t size = memory.load32(params + dialog_common::kSizeOffset);
+            std::cout << "[gamedata] InitStart params=" << psprecomp::hex32(params) << " size=" << size << "\n";
+            for (std::uint32_t offset = 0u; offset < std::min<std::uint32_t>(size, 0x100u); offset += 16u) {
+                std::cout << "[gamedata]   +" << psprecomp::hex32(offset) << " ";
+                for (std::uint32_t i = 0u; i < 16u; ++i)
+                    std::cout << psprecomp::hex32(memory.load8(params + offset + i)).substr(8u) << " ";
+                std::cout << "\n";
+            }
+        }
+        if (params != 0u) memory.store32(params + dialog_common::kResultOffset, 0u);
+        gamedata_dialog().start();
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("sceUtility", "sceUtilityGamedataInstallUpdate", [](Runtime &, AllegrexContext &ctx) {
+        (void)gamedata_dialog().poll();
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("sceUtility", "sceUtilityGamedataInstallGetStatus", [](Runtime &, AllegrexContext &ctx) {
+        kernel().finish(ctx, gamedata_dialog().poll());
+    });
+    hle.add("sceUtility", "sceUtilityGamedataInstallShutdownStart", [](Runtime &, AllegrexContext &ctx) {
+        if (!gamedata_dialog().active()) {
+            kernel().finish(ctx, kErrorUtilityInvalidStatus);
+            return;
+        }
+        (void)gamedata_dialog().shutdown();
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("sceUtility", "sceUtilityGamedataInstallAbort", [](Runtime &, AllegrexContext &ctx) {
+        (void)gamedata_dialog().shutdown();
+        kernel().finish(ctx, 0u);
+    });
+}
+
 // logged so the conversation can be followed.
 void register_msg_dialog(HleRegistrar &hle) {
     hle.add("sceUtility", "sceUtilityMsgDialogInitStart", [](Runtime &rt, AllegrexContext &ctx) {
@@ -379,6 +438,7 @@ void register_msg_dialog(HleRegistrar &hle) {
 void register_utility(HleRegistrar &hle, const std::filesystem::path &memory_stick) {
     register_osk(hle);
     register_msg_dialog(hle);
+    register_gamedata_install(hle);
     register_savedata(hle, memory_stick);
 }
 
