@@ -1,70 +1,67 @@
-# PSPRecomp profile guide
+# Writing a profile
 
-A profile contains everything that is specific to one PSP title. The framework root contains only reusable Allegrex, ELF/PRX, memory, runtime and code-generation infrastructure.
+A profile is everything specific to one PSP title. It lives in the game's own repository, not here, and it should be a file of constants and a four-line `CMakeLists.txt`. If it has to be more than that, something belongs in the framework that is not there yet.
 
-## Recommended layout
+## The layout
 
 ```text
-profiles/<id>/
-  CMakeLists.txt
-  README.md
-  config/          Profile configuration and analysis inputs
-  data/            Redistributable profile data generated from compatible sources
-  generated/       AOT C++ corpus, generated locally from the user's executable; ignored by Git
-  host/            HLE, bootstrap, renderer/audio/input integration and patches
-  scripts/         Current build, run and benchmark entry points
-  tests/           Profile-specific regression tests
-  tools/           Profile-specific generation or conversion helpers
-  third_party/     Dependencies and their license notices
-  progress/        Local notes and scratch output; ignored by Git
+<game>/
+  CMakeLists.txt        Four lines: add PortableKit, call portablekit_add_game()
+  portablekit/          The framework, as a submodule
+  host/<game>_profile.cpp   The profile: one definition of portablekit::game()
+  config/nids.csv       Optional: NIDs this game imports that the framework does not name
+  host/                 Optional: per-game HLE and patches, reached through the profile's hooks
+  generated/            The AOT corpus, generated from the player's executable; never committed
+  overlays/             One directory per recompiled code overlay; never committed
+  game/                 The player's own files; never committed
+  docs/                 Compatibility, testing and release pages for this port
 ```
 
-Do not put commercial executables, disc images, game assets, decrypted EBOOTs, captures made from copyrighted assets, or local analysis dumps in the repository.
+Nothing derived from the game belongs in the repository: no disc image, no executable, no generated code, no captures of the game's own art, no saves.
 
-## 1. Start from a game executable you are allowed to analyze
+## The build
 
-Keep local inputs under `profiles/<id>/game` or another ignored directory. PSPRecomp expects an ELF/PRX input that the generic analyzer can read. Decryption/extraction is deliberately outside the framework.
+```cmake
+cmake_minimum_required(VERSION 3.20)
+project(Tenkawa VERSION 0.1.0 LANGUAGES CXX)
 
-## 2. Analyze the executable
+add_subdirectory(portablekit)
 
-Build the framework tools and run `psp_analyze` against the local executable. Keep function maps and temporary analysis output under the profile's ignored `analysis` directory until they are ready to become stable profile inputs.
-
-## 3. Generate AOT code
-
-Use the root `psp_recomp` when ordinary PSPRecomp lowering is sufficient. If a title needs verified, address-specific lowering, keep that code in a profile tool rather than hardcoding the address in `tools/codegen_main.cpp` or `src/runtime.cpp`.
-
-## 4. Implement the host profile
-
-Profile host code owns title-specific HLE behavior, bootstrap rules, display/audio/input integration and compatibility patches. Register guest replacements through `Runtime::register_function()` and PSP imports through `Runtime::register_hle()`.
-
-For heavily measured guest leaves, a profile may register a native implementation with `Runtime::register_native_fast_path()`. Generated profile code can enter it through `Runtime::invoke_native_fast_path()`. The native implementation stays in the profile; the reusable runtime contains no game address.
-
-## 5. Add CMake integration
-
-Each profile supplies `profiles/<id>/CMakeLists.txt`. The root build adds only the profile selected through `-DPSPRECOMP_PROFILE=<id>`. A profile may define its own executable, generators, tests, renderer dependencies and post-build packaging.
-
-A clean framework build must continue to work with:
-
-```bash
-cmake -S . -B out/framework -DPSPRECOMP_PROFILE=""
-cmake --build out/framework
+portablekit_add_game(TenkawaNative
+    PROFILE_DIR "${CMAKE_CURRENT_SOURCE_DIR}"
+    SOURCES host/tenkawa_profile.cpp)
 ```
 
-## 6. Keep generated code reproducible, and out of the repository
+`portablekit_add_game()` does the rest: the corpus, the renderer and its shaders, the version header, FFmpeg, the NID table, the overlay modules, the stack size and the output directory. `SOURCES` are the profile's own host sources, relative to `PROFILE_DIR`; one of them must define `portablekit::game()`.
 
-Recompiled code is a translation of the game's own executable, so it is derived from copyrighted material and must not be committed. Every user generates it from their own copy. Make that reproducible by documenting:
+## The profile
 
-- the executable identity and hash the profile expects;
-- stable function-map and configuration inputs;
-- the exact generator command;
-- any deterministic post-generation passes.
+`portablekit::GameProfile` in [`host/profile.hpp`](../host/profile.hpp) is the whole interface, and its comments say what each field is for. The rule for what belongs in it: **a value the framework needs but cannot derive from the executable it was given.** Anything the ELF already says — its entry point, its segments, its imports — is read from the ELF, not declared.
 
-Generated C++ may contain game addresses because it belongs to the profile. Reusable root code should not.
+Read the values off the player's own disc rather than recalling them:
 
-## 7. Keep progress material out of the public tree
+| Field | Where it comes from |
+| --- | --- |
+| `disc_id`, `game_title` | `PSP_GAME/PARAM.SFO` |
+| `encrypted_executable_sha256` | `sha256` of `PSP_GAME/SYSDIR/EBOOT.BIN` |
+| `executable_sha256` | `sha256` of what the installer decrypts it to |
+| `decryption_tag` | The word at offset 0xD0 of `EBOOT.BIN` |
+| `decryption_key` | The published key table's entry for that tag |
+| `load_base`, `guest_ram_bytes` | The ELF's program headers |
+| `overlay_slots` | The executable's section table, inside the load image's BSS |
+| `save_game_name`, `save_folders` | The paths the executable itself contains |
 
-Use `profiles/<id>/progress` for local notes and one-off benchmark results. The root `.gitignore` excludes every profile's `progress` directory. Build and run scripts should have stable names.
+Two fields are hooks rather than values. `register_extra_hle` adds calls this game makes that the framework does not implement, or replaces one it gets wrong for this game. `patch_loaded_image` is for per-game fixes with no better home. Both may be null, and a profile that needs neither is the goal.
 
-## 8. License boundaries
+## Generated code stays out of the repository
 
-Keep third-party notices with the profile component that needs them. Do not copy source from a project whose license is incompatible with the intended distribution model. Behavioral observations, hardware specifications and independently written implementations should be documented separately from copied third-party source.
+Recompiled code is a translation of the game's own executable, so it is derived from copyrighted material. Every player generates it from their own copy. Make that reproducible by documenting the executable identity and hash the profile expects, the exact generator command, and any deterministic pass that follows it.
+
+## Where to put a fix
+
+When the port needs a change, ask which repository it belongs in.
+
+- It names the game, its addresses, its folders or its behaviour — the profile.
+- It is true of the PSP, of a file format, or of any game that makes the same call — the framework.
+
+A profile that grows its own kernel, its own renderer changes or its own copies of framework code has found a missing seam. Add the seam instead.
