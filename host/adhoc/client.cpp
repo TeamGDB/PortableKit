@@ -1,3 +1,4 @@
+#include "../profile.hpp"
 #include "adhoc/client.hpp"
 
 #include "adhoc/sockets.hpp"
@@ -153,7 +154,7 @@ LogBuffer &log_buffer() {
 
 std::atomic<bool> &tracing_flag() {
     static std::atomic<bool> flag{[] {
-        const char *text = std::getenv("MHP3RD_TRACE_ADHOC");
+        const char *text = portablekit::env("TRACE_ADHOC");
         return text != nullptr && *text != '\0' && std::strcmp(text, "0") != 0;
     }()};
     return flag;
@@ -1193,7 +1194,7 @@ std::filesystem::path Client::save_log(const std::filesystem::path &dir) const {
         }
         return "?";
     };
-    out << "Yakumo ad hoc log\n\n";
+    out << portablekit::game().project_name << " ad hoc log\n\n";
     out << "server: " << (d.server.empty() ? "(none)" : d.server) << " -> "
         << (d.server_address.empty() ? "-" : d.server_address) << "\n";
     out << "state: " << state(d.state) << ", failed attempts " << d.failed_attempts << ", reconnects " << d.reconnects

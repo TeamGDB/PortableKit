@@ -12,6 +12,7 @@
 //
 // Without FFmpeg, movies are skipped: the stream calls report that no data
 // is left, and the game treats the movie as finished.
+#include "../profile.hpp"
 #include "hle_common.hpp"
 
 #include "audio/atrac_decoder.hpp"
@@ -76,7 +77,7 @@ inline constexpr std::uint32_t kSize = 0x14u;
 enum class StreamType : std::uint32_t { Avc = 0u, Atrac = 1u, Pcm = 2u };
 
 bool trace_mpeg() {
-    static const bool enabled = std::getenv("MHP3RD_TRACE_MPEG") != nullptr;
+    static const bool enabled = portablekit::env("TRACE_MPEG") != nullptr;
     return enabled;
 }
 

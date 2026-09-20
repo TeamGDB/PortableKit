@@ -1,3 +1,4 @@
+#include "../profile.hpp"
 #include "ui/input_script.hpp"
 
 #include "ui/layer.hpp"
@@ -42,7 +43,7 @@ struct State {
     std::vector<Release> releases;
     // Strings handed to SDL events must outlive them.
     std::deque<std::string> strings;
-    // MHP3RD_INPUT_LIVE: a file whose appended lines are read as they come.
+    // <prefix>_INPUT_LIVE: a file whose appended lines are read as they come.
     std::string live_path;
     std::streamoff live_offset{};
 };
@@ -118,7 +119,7 @@ void run(const Step &step) {
         event.drop.data = s.strings.emplace_back(step.argument).c_str();
         SDL_PushEvent(&event);
     } else if (step.action == "shot") {
-        const char *dir = std::getenv("MHP3RD_SCREENSHOT_DIR");
+        const char *dir = portablekit::env("SCREENSHOT_DIR");
         const std::string name = step.argument.empty() ? "frame_" + std::to_string(s.frame) : step.argument;
         Layer::get().renderer().capture_window((dir != nullptr ? std::string(dir) : std::string(".")) + "/" + name +
                                                ".bmp");
@@ -182,7 +183,7 @@ void attach() {
     if (s.attached) return;
     s.attached = true;
     bool uses_pad = false;
-    if (const char *live = std::getenv("MHP3RD_INPUT_LIVE"); live != nullptr && *live != '\0') {
+    if (const char *live = portablekit::env("INPUT_LIVE"); live != nullptr && *live != '\0') {
         s.live_path = live;
         // Only what is appended after start-up counts.
         std::ifstream file(s.live_path, std::ios::binary | std::ios::ate);
@@ -190,7 +191,7 @@ void attach() {
         uses_pad = true;
         std::cout << "[script] reading live input from " << s.live_path << std::endl;
     }
-    if (const char *text = std::getenv("MHP3RD_INPUT_SCRIPT"); text != nullptr) {
+    if (const char *text = portablekit::env("INPUT_SCRIPT"); text != nullptr) {
         std::stringstream list(text);
         std::string item;
         while (std::getline(list, item, ';')) {
@@ -219,7 +220,7 @@ void attach_pad(State &s) {
     desc.axis_mask = (1u << SDL_GAMEPAD_AXIS_COUNT) - 1u;
     desc.button_mask = (1u << SDL_GAMEPAD_BUTTON_COUNT) - 1u;
     // The renderer gives the game this pad over a real one by its name.
-    desc.name = "Yakumo input script";
+    desc.name = kInputScriptName;
     const SDL_JoystickID id = SDL_AttachVirtualJoystick(&desc);
     if (id == 0) {
         std::cout << "[script] cannot attach a virtual gamepad: " << SDL_GetError() << std::endl;

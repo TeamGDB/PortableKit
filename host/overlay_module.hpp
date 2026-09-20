@@ -1,6 +1,6 @@
 #pragma once
 
-// ABI between MHP3rdNative and the recompiled overlay libraries it loads at run
+// ABI between the port and the recompiled overlay libraries it loads at run
 // time. One library holds one corpus: keeping them out of the executable means
 // a new overlay costs a compile of its own sources and nothing else.
 //
@@ -40,17 +40,17 @@ struct OverlayModuleInfo {
 
 // Only the library defines these; the host resolves them by name and uses the
 // declarations for the types alone.
-#if defined(MHP3RD_OVERLAY_MODULE)
+#if defined(PORTABLEKIT_OVERLAY_MODULE)
 #if defined(_WIN32)
-#define MHP3RD_OVERLAY_EXPORT __declspec(dllexport)
+#define PORTABLEKIT_OVERLAY_EXPORT __declspec(dllexport)
 #else
-#define MHP3RD_OVERLAY_EXPORT __attribute__((visibility("default")))
+#define PORTABLEKIT_OVERLAY_EXPORT __attribute__((visibility("default")))
 #endif
 #else
-#define MHP3RD_OVERLAY_EXPORT
+#define PORTABLEKIT_OVERLAY_EXPORT
 #endif
 
 extern "C" {
-MHP3RD_OVERLAY_EXPORT const portablekit::OverlayModuleInfo *mhp3rd_overlay_info();
-MHP3RD_OVERLAY_EXPORT void mhp3rd_register_overlay(psprecomp::Runtime &runtime);
+PORTABLEKIT_OVERLAY_EXPORT const portablekit::OverlayModuleInfo *portablekit_overlay_info();
+PORTABLEKIT_OVERLAY_EXPORT void portablekit_register_overlay(psprecomp::Runtime &runtime);
 }

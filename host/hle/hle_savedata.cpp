@@ -10,6 +10,7 @@
 // No save-data UI is drawn: modes that would show a list act as if the player
 // confirmed the first entry. Every mode, the failures included, reports QUIT
 // after a few polls; see utility_dialog.hpp.
+#include "../profile.hpp"
 #include "hle_common.hpp"
 #include "utility_dialog.hpp"
 
@@ -108,7 +109,7 @@ SavedataState &state() {
 }
 
 bool trace_savedata() {
-    static const bool enabled = std::getenv("MHP3RD_TRACE_SAVEDATA") != nullptr;
+    static const bool enabled = portablekit::env("TRACE_SAVEDATA") != nullptr;
     return enabled;
 }
 

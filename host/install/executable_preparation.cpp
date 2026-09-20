@@ -3,6 +3,10 @@
 // executable header ("~PSP") and of the PSP's AES-based crypto engine; see
 // executable_preparation.hpp for what it accepts.
 //
+// The tag at 0xD0 selects a key; the framework knows the layout and the
+// engine's fixed keys, and the profile supplies the key its release's tag
+// selects (GameProfile::decryption_tag and decryption_key).
+//
 // The file is an 0x150-byte header followed by the executable, encrypted with
 // AES-128 in CBC mode under a per-file key. The header keeps that key wrapped
 // twice: under the engine's fixed decryption key, and inside header fields that
@@ -10,7 +14,7 @@
 
 #include "install/executable_preparation.hpp"
 
-#include "install/game_identity.hpp"
+#include "profile.hpp"
 
 #include "psprecomp/common.hpp"
 #include "psprecomp/sha256.hpp"
@@ -37,12 +41,8 @@ constexpr std::size_t kFileTypeOffset = 0x7Cu;        // 9: UMD game executable
 constexpr std::size_t kPayloadSizeOffset = 0xB0u;     // size of the encrypted payload
 constexpr std::size_t kTagOffset = 0xD0u;
 
-constexpr std::uint32_t kSupportedTag = 0xD9160BF0u;
 constexpr std::uint8_t kUmdGameExecutable = 9u;
 
-// Key selected by kSupportedTag, from the public PSP key tables.
-constexpr Block kTagKey = {0x83, 0x83, 0xF1, 0x37, 0x53, 0xD0, 0xBE, 0xFC,
-                           0x8D, 0xA7, 0x32, 0x52, 0x46, 0x0A, 0xC2, 0xC2};
 // Crypto-engine key slot 0x5D (plain AES decryption, command 7), which this tag
 // uses for the header.
 constexpr Block kHeaderKey = {0x11, 0x5A, 0x5D, 0x20, 0xD5, 0x3A, 0x8D, 0xD3,
@@ -86,9 +86,10 @@ void append(std::vector<std::uint8_t> &out, std::span<const std::uint8_t> header
 // The tag key, repeated over nine blocks that each carry their own index in
 // their first byte, decrypted with the header key.
 std::vector<std::uint8_t> derive_mask() {
+    const Block &tag_key = game().decryption_key;
     std::vector<std::uint8_t> mask;
     for (std::uint8_t index = 0; index < 9u; ++index) {
-        Block block = kTagKey;
+        Block block = tag_key;
         block[0] = index;
         mask.insert(mask.end(), block.begin(), block.end());
     }
@@ -121,14 +122,14 @@ Block unwrap_payload_key(std::span<const std::uint8_t> header) {
 
 std::vector<std::uint8_t> prepare_executable(std::span<const std::uint8_t> eboot_bin,
                                              const std::function<void(std::uint64_t, std::uint64_t)> &progress) {
-    if (psprecomp::sha256_bytes(eboot_bin) != kEncryptedExecutableSha256)
-        throw psprecomp::Error("EBOOT.BIN is not the supported executable of " + std::string(kGameTitle) + " (" +
-                               kDiscIdDisplay + ")");
+    if (psprecomp::sha256_bytes(eboot_bin) != game().encrypted_executable_sha256)
+        throw psprecomp::Error("EBOOT.BIN is not the supported executable of " + std::string(game().game_title) + " (" +
+                               game().disc_id_display + ")");
 
     // The hash already pins the file; these checks document the one layout
     // handled here.
     if (eboot_bin.size() < kHeaderSize || std::memcmp(eboot_bin.data() + kMagicOffset, "~PSP", 4u) != 0 ||
-        read_le32(eboot_bin, kTagOffset) != kSupportedTag || eboot_bin[kFileTypeOffset] != kUmdGameExecutable ||
+        read_le32(eboot_bin, kTagOffset) != game().decryption_tag || eboot_bin[kFileTypeOffset] != kUmdGameExecutable ||
         (eboot_bin[kAttributesOffset] & 1u) != 0u)
         throw psprecomp::Error("EBOOT.BIN has an unexpected header");
     const std::uint32_t size = read_le32(eboot_bin, kPayloadSizeOffset);
@@ -152,7 +153,7 @@ std::vector<std::uint8_t> prepare_executable(std::span<const std::uint8_t> eboot
     }
     executable.resize(size);
 
-    if (psprecomp::sha256_bytes(executable) != kExecutableSha256)
+    if (psprecomp::sha256_bytes(executable) != game().executable_sha256)
         throw psprecomp::Error("The prepared executable does not match the supported one");
     return executable;
 }

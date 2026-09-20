@@ -18,7 +18,8 @@ inline constexpr const char *kExecutableFile = "EBOOT.ELF";
 inline constexpr const char *kCopiedImageFile = "disc.iso";
 inline constexpr const char *kSettingsFile = "settings.ini";
 
-// MHP3RD_DATA_DIR when set, otherwise SDL_GetPrefPath("Yakumo", "MHP3rd")
+// <prefix>_DATA_DIR when set, otherwise SDL_GetPrefPath() with the names the
+// profile gives (data_organization, data_application)
 // (or the same location computed by hand in a build without SDL). SDL creates
 // the directory if it does not exist yet.
 [[nodiscard]] std::filesystem::path user_data_directory();

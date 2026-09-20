@@ -1,3 +1,4 @@
+#include "../profile.hpp"
 #include "texture_decode.hpp"
 
 #include <algorithm>
@@ -257,8 +258,8 @@ std::uint64_t texture_key(const GuestMemory &memory, const TextureState &texture
                                           : texture.width * texture.height / 2u;
     // Resolve the texture once; this runs for every textured draw.
     if (const std::uint8_t *data = memory.raw_pointer(texture.address, static_cast<std::size_t>(size) + 3u)) {
-        // MHP3RD_SAMPLED_TEXTURE_KEYS=1 samples small textures too, as before.
-        static const bool sampled = std::getenv("MHP3RD_SAMPLED_TEXTURE_KEYS") != nullptr;
+        // <prefix>_SAMPLED_TEXTURE_KEYS=1 samples small textures too, as before.
+        static const bool sampled = portablekit::env("SAMPLED_TEXTURE_KEYS") != nullptr;
         if (size <= kFullKeyBytes && !sampled) {
             // Small textures are read whole: the game's text atlas gains one
             // glyph at a time, and a sample misses most of them. Four

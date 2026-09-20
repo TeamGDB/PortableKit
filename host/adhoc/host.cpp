@@ -1,6 +1,7 @@
 // Hosting an ad hoc session from the game: the built-in server, announced on
 // the local network, with this instance's own client connected to it over
 // the loopback address.
+#include "../profile.hpp"
 #include "adhoc/client.hpp"
 #include "adhoc/discovery.hpp"
 #include "adhoc/server.hpp"
@@ -15,7 +16,7 @@ namespace {
 
 // The product code other players see in the announcement. Players of the
 // game's PSP release log in with the same one.
-constexpr const char *kProduct = "ULJM05800";
+
 constexpr std::size_t kRecentAddresses = 5u;
 
 struct HostState {
@@ -68,7 +69,7 @@ bool adhoc_host_start() {
         adhoc::Discovery::get().start_announcing(config.adhocctl_port, [server] {
             adhoc::Announcement info;
             info.name = adhoc_player_name();
-            info.product = kProduct;
+            info.product = portablekit::game().adhoc_product_code;
             info.players = static_cast<unsigned>(server->status().players.size());
             return info;
         });

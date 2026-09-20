@@ -1,3 +1,4 @@
+#include "profile.hpp"
 #include "system.hpp"
 
 #include "app_paths.hpp"
@@ -7,7 +8,7 @@
 #include "adhoc/server.hpp"
 #include "adhoc/session.hpp"
 
-#include "install/game_identity.hpp"
+#include "profile.hpp"
 #include "install/installer.hpp"
 #include "install/user_data.hpp"
 #include "kernel/kernel.hpp"
@@ -56,11 +57,11 @@ constexpr EmbeddedNid kEmbeddedNids[] = {
 // never gets here.
 void ensure_main_stack(char **argv) {
     constexpr rlim_t kWanted = 64ull * 1024u * 1024u;
-    constexpr const char *kMarker = "MHP3RD_STACK_RAISED";
+    const std::string marker = portablekit::env_name("STACK_RAISED");
     rlimit limit{};
     if (getrlimit(RLIMIT_STACK, &limit) != 0) return;
     if (limit.rlim_cur == RLIM_INFINITY || limit.rlim_cur >= kWanted) return;
-    if (std::getenv(kMarker) != nullptr) return;
+    if (std::getenv(marker.c_str()) != nullptr) return;
     const rlim_t target = limit.rlim_max == RLIM_INFINITY || limit.rlim_max >= kWanted ? kWanted : limit.rlim_max;
     if (target <= limit.rlim_cur) {
         std::cerr << "warning: the stack is limited to " << (limit.rlim_cur >> 20) << " MiB and cannot be raised to 64 MiB\n";
@@ -68,7 +69,7 @@ void ensure_main_stack(char **argv) {
     }
     limit.rlim_cur = target;
     if (setrlimit(RLIMIT_STACK, &limit) != 0) return;
-    setenv(kMarker, "1", 1);
+    setenv(marker.c_str(), "1", 1);
     // Through the resolved path: executing /proc/self/exe itself would rename
     // the process to "exe".
     const std::filesystem::path self = portablekit::executable_path();
@@ -90,10 +91,12 @@ std::uint64_t configured_max_dispatches() {
     return static_cast<std::uint64_t>(parsed);
 }
 
-constexpr const char *kUsage =
-    "usage: MHP3rdNative [game_dir]\n"
-    "       MHP3rdNative --install [image.iso [--in-place]]\n"
-    "       MHP3rdNative --adhoc-server [port]\n"
+std::string usage() {
+    const std::string app = portablekit::game().app_name;
+    const std::string pad(app.size(), ' ');
+    return "usage: " + app + " [game_dir]\n"
+           "       " + app + " --install [image.iso [--in-place]]\n"
+           "       " + app + " --adhoc-server [port]\n"
     "  game_dir        play from a directory holding EBOOT.ELF, disc.iso and ms0/\n"
     "  --install       run the setup again on screen, then play\n"
     "  --install image set up from image.iso without the setup screens, then exit\n"
@@ -191,7 +194,7 @@ std::filesystem::path installed_memory_stick(const std::filesystem::path &data_d
 std::optional<GameFiles> locate_game(const Options &options) {
     namespace install = portablekit::install;
     if (options.game_dir) return files_in_game_directory(*options.game_dir);
-    if (const char *dir = std::getenv("MHP3RD_GAME_DIR"); dir != nullptr && *dir != '\0')
+    if (const char *dir = portablekit::env("GAME_DIR"); dir != nullptr && *dir != '\0')
         return files_in_game_directory(dir);
 
     const std::filesystem::path checkout_game_dir = checkout_game_directory();
@@ -209,13 +212,15 @@ std::optional<GameFiles> locate_game(const Options &options) {
                     return files;
                 }
                 const std::string where = install::path_to_utf8(installed->disc_image);
+                const std::string project = portablekit::game().project_name;
+                const std::string app = portablekit::game().app_name;
                 const std::string message =
                     installed->image_copied
-                        ? "The copy of the disc image Yakumo made is missing:\n" + where +
-                              "\n\nSet up again to restore it (MHP3rdNative --install)."
-                        : "The disc image Yakumo was set up with is no longer at:\n" + where +
+                        ? "The copy of the disc image " + project + " made is missing:\n" + where +
+                              "\n\nSet up again to restore it (" + app + " --install)."
+                        : "The disc image " + project + " was set up with is no longer at:\n" + where +
                               "\n\nPut it back there, or set up again to choose where it is now "
-                              "(MHP3rdNative --install).";
+                              "(" + app + " --install).";
                 if (!install::report_problem("Disc image not found", message, true)) return std::nullopt;
                 run_setup = true;
                 continue;
@@ -228,8 +233,8 @@ std::optional<GameFiles> locate_game(const Options &options) {
         if (!ui) {
             std::cerr << "No game data found in " << install::path_to_utf8(data_dir)
                       << (checkout_game_dir.empty() ? std::string() : " or " + checkout_game_dir.string()) << ".\n"
-                      << "Set up from your disc image of " << install::kGameTitle << " (" << install::kDiscIdDisplay
-                      << ") with:\n  MHP3rdNative --install /path/to/image.iso\n";
+                      << "Set up from your disc image of " << portablekit::game().game_title << " (" << portablekit::game().disc_id_display
+                      << ") with:\n  " << portablekit::game().app_name << " --install /path/to/image.iso\n";
             return std::nullopt;
         }
         if (!install::run_installer(*ui, data_dir)) return std::nullopt;
@@ -248,7 +253,7 @@ int install_from_command_line(const Options &options) {
         std::cerr << "Setup failed: " << e.what() << "\n";
         return 1;
     }
-    std::cout << "Game data is ready in " << install::path_to_utf8(data_dir) << ". Start MHP3rdNative to play.\n";
+    std::cout << "Game data is ready in " << install::path_to_utf8(data_dir) << ". Start " << portablekit::game().app_name << " to play.\n";
     return 0;
 }
 
@@ -264,7 +269,7 @@ int run_adhoc_server(int argc, char **argv) {
     if (argc > 2) {
         const unsigned long port = std::strtoul(argv[2], nullptr, 10);
         if (port < 1024u || port > 65534u) {
-            std::cerr << "MHP3rdNative: --adhoc-server takes a port from 1024 to 65534\n";
+            std::cerr << portablekit::game().app_name << ": --adhoc-server takes a port from 1024 to 65534\n";
             return 2;
         }
         config.adhocctl_port = static_cast<std::uint16_t>(port);
@@ -275,13 +280,14 @@ int run_adhoc_server(int argc, char **argv) {
         return 1;
     }
     std::string name = local_host_name();
-    if (name.empty()) name = "Yakumo server";
+    if (name.empty()) name = std::string(portablekit::game().project_name) + " server";
     Discovery::get().start_announcing(config.adhocctl_port, [&server, name] {
         Announcement info;
         info.name = name;
         const ServerStatus status = server.status();
         info.players = static_cast<unsigned>(status.players.size());
-        info.product = status.players.empty() ? "ULJM05800" : status.players.front().product;
+        info.product = status.players.empty() ? portablekit::game().adhoc_product_code
+                                             : status.players.front().product.c_str();
         return info;
     });
     const std::string suffix =
@@ -314,10 +320,10 @@ int main(int argc, char **argv) {
             options = parse_options(argc, argv);
         } catch (const UsageError &e) {
             if (*e.what() == '\0') {
-                std::cout << kUsage;
+                std::cout << usage();
                 return 0;
             }
-            std::cerr << "MHP3rdNative: " << e.what() << "\n" << kUsage;
+            std::cerr << portablekit::game().app_name << ": " << e.what() << "\n" << usage();
             return 2;
         }
         if (options.install_image) return install_from_command_line(options);
@@ -332,31 +338,34 @@ int main(int argc, char **argv) {
             throw psprecomp::Error("Missing " + executable.string() + " (run scripts/prepare_game.sh)");
 
         const std::string sha256 = psprecomp::sha256_file(executable);
-        if (sha256 != portablekit::install::kExecutableSha256)
+        if (sha256 != portablekit::game().executable_sha256)
             std::cerr << "warning: unsupported executable hash " << sha256 << "\n";
 
         const psprecomp::Elf32Image elf = psprecomp::Elf32Image::from_file(executable);
-        if (elf.required_ram_size(portablekit::kLoadBase) != portablekit::kGuestRamBytes)
-            throw psprecomp::Error("Executable does not match the 64 MiB MHP3rd HD layout");
+        const std::uint32_t load_base = portablekit::game().load_base;
+        const std::uint32_t ram_bytes = portablekit::game().guest_ram_bytes;
+        if (elf.required_ram_size(load_base) > ram_bytes)
+            throw psprecomp::Error("The executable needs more than the " + std::to_string(ram_bytes >> 20) +
+                                   " MiB of guest memory this profile declares");
 
-        psprecomp::Runtime runtime(portablekit::kGuestRamBytes);
+        psprecomp::Runtime runtime(ram_bytes);
         for (const EmbeddedNid &entry : kEmbeddedNids) runtime.nids().add(entry.library, entry.nid, entry.name);
-        (void)elf.load_and_relocate(runtime.memory(), portablekit::kLoadBase);
+        (void)elf.load_and_relocate(runtime.memory(), load_base);
         psprecomp::register_generated_functions(runtime);
-        portablekit::install_profile(runtime, elf, paths);
+        portablekit::install_system(runtime, elf, paths);
 
-        std::cout << "MHP3rdNative PSP bootstrap\n"
+        std::cout << portablekit::game().app_name << " PSP bootstrap\n"
                   << "Executable: " << executable.string() << "\n"
                   << "SHA-256:    " << sha256 << "\n"
                   << "Disc image: " << (paths.disc_image.empty() ? "<none>" : paths.disc_image.string()) << "\n"
-                  << "Entry:      " << psprecomp::hex32(elf.runtime_entry(portablekit::kLoadBase)) << "\n"
+                  << "Entry:      " << psprecomp::hex32(elf.runtime_entry(load_base)) << "\n"
                   << "Functions:  " << runtime.function_count() << "\n";
         if (runtime.function_count() == 0u) {
             std::cout << "No generated functions are linked. Run scripts/generate.sh and rebuild.\n";
             return 3;
         }
 
-        runtime.run(elf.runtime_entry(portablekit::kLoadBase), configured_max_dispatches());
+        runtime.run(elf.runtime_entry(load_base), configured_max_dispatches());
         std::cout << "Runtime stopped: " << runtime.stop_reason() << "\n";
         // Quit from the menu, a closed window or the game ending: the network
         // threads stop here, while everything they use still exists.
@@ -370,7 +379,7 @@ int main(int argc, char **argv) {
         return runtime.stop_reason().empty() ? 0 : 4;
     } catch (const std::exception &e) {
         portablekit::adhoc_shutdown();
-        std::cerr << "MHP3rdNative error: " << e.what() << "\n";
+        std::cerr << portablekit::game().app_name << " error: " << e.what() << "\n";
         return 1;
     }
 }

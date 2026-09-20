@@ -1,3 +1,4 @@
+#include "../profile.hpp"
 #include "ui/save_screen.hpp"
 
 #include "ui/file_browser.hpp"
@@ -84,7 +85,7 @@ fs::path savedata_root() { return sd::memory_stick() / "PSP" / "SAVEDATA"; }
 
 std::string utf8(const fs::path &path) { return install::path_to_utf8(path); }
 
-// The default place for backups, beside the rest of Yakumo's data.
+// The default place for backups, beside the rest of the port's data.
 fs::path backups_directory() {
     try {
         return install::user_data_directory() / "save-backups";
@@ -248,7 +249,7 @@ void start_backup(const fs::path &target) {
 bool browse(bool back) {
     State &s = state();
     ImGui::Indent(px(16.0f));
-    paragraph(s.stage == Stage::ChooseImport ? "Import: open a save folder (ULJM05800, ULJM05800QST), or choose a "
+    paragraph(s.stage == Stage::ChooseImport ? "Import: open a save folder, or choose a "
                                                "folder that holds them, such as a memory stick's PSP/SAVEDATA."
               : s.stage == Stage::ChooseExport ? "Export: choose the folder to copy your saves to."
                                                : "Back up: choose the folder the backup goes to.",
@@ -298,8 +299,9 @@ void review_screen(bool back) {
     ImGui::Indent(px(16.0f));
     paragraph("From " + utf8(s.picked), colors::kTextDim);
     if (s.found.empty())
-        paragraph("No saves of Monster Hunter Portable 3rd were found in this folder. Choose a save folder such as "
-                  "ULJM05800, or the PSP/SAVEDATA folder that holds it.",
+        paragraph(std::string("No saves of ") + portablekit::game().game_title +
+                      " were found in this folder. Choose a save folder such as "
+                  "a save folder, or the PSP/SAVEDATA folder that holds it.",
                   colors::kDanger);
     if (s.other_games > 0)
         paragraph(std::to_string(s.other_games) + (s.other_games == 1 ? " save belongs" : " saves belong") +
@@ -328,7 +330,8 @@ void review_screen(bool back) {
     if (importable > 0) {
         const std::string label =
             replacing > 0 ? "Replace and import" : importable == 1 ? "Import this save" : "Import these saves";
-        std::string description = "Copies the save" + std::string(importable == 1 ? "" : "s") + " into Yakumo.";
+        std::string description = "Copies the save" + std::string(importable == 1 ? "" : "s") + " into " +
+                                  portablekit::game().project_name + ".";
         if (replacing > 0)
             description += " The save" + std::string(replacing == 1 ? " it replaces is" : "s they replace are") +
                            " not deleted: " + (replacing == 1 ? "it moves" : "they move") +
@@ -496,7 +499,7 @@ void save_rows() {
     }
     if (button_row("Import save…", {!available, {},
                                      "Copy a save from a PSP memory stick, PPSSPP or another installation: choose "
-                                     "its folder (ULJM05800, ULJM05800QST) or the PSP/SAVEDATA folder that holds "
+                                     "its folder or the PSP/SAVEDATA folder that holds "
                                      "it. A save it replaces is kept, not deleted."}))
         open_browser(Stage::ChooseImport);
     if (button_row("Export save…", {!available, {},

@@ -1,4 +1,7 @@
+#include "profile.hpp"
 #include "system.hpp"
+
+#include "profile.hpp"
 
 #include "hle/hle_common.hpp"
 #include "kernel/kernel.hpp"
@@ -31,7 +34,7 @@ std::optional<std::uint32_t> parse_missing_function_address(const std::string &s
     return address;
 }
 
-constexpr std::string_view kBootPath = "disc0:/PSP_GAME/SYSDIR/EBOOT.BIN";
+
 
 struct StubState {
     std::string label;
@@ -53,11 +56,12 @@ void register_logging_stub(Runtime &runtime, const psprecomp::PspImport &import)
 }
 
 std::uint32_t load_image_end(const psprecomp::Elf32Image &elf) {
+    const std::uint32_t load_base = game().load_base;
     std::uint64_t end = 0u;
     for (std::size_t i = 0; i < elf.segments().size(); ++i) {
         const auto &segment = elf.segments()[i];
         if (segment.type != 1u) continue;
-        end = std::max<std::uint64_t>(end, elf.segment_runtime_address(i, kLoadBase) + segment.memory_size);
+        end = std::max<std::uint64_t>(end, elf.segment_runtime_address(i, load_base) + segment.memory_size);
     }
     return static_cast<std::uint32_t>(end);
 }
@@ -66,8 +70,9 @@ std::uint32_t load_image_end(const psprecomp::Elf32Image &elf) {
 
 std::filesystem::path memory_stick_directory(const std::filesystem::path &game_dir) { return game_dir / "ms0"; }
 
-void install_profile(Runtime &runtime, const psprecomp::Elf32Image &elf, const ProfilePaths &paths) {
-    const auto module = elf.find_module_info(runtime.memory(), kLoadBase);
+void install_system(Runtime &runtime, const psprecomp::Elf32Image &elf, const ProfilePaths &paths) {
+    const std::string_view boot_path = game().boot_path;
+    const auto module = elf.find_module_info(runtime.memory(), game().load_base);
     if (!module) throw psprecomp::Error("PSP module info not found in executable");
 
     kernel().install(runtime, module->gp, load_image_end(elf));
@@ -84,8 +89,9 @@ void install_profile(Runtime &runtime, const psprecomp::Elf32Image &elf, const P
     register_font(hle);
     register_utility(hle, paths.memory_stick);
     register_adhoc(hle);
+    if (game().register_extra_hle != nullptr) game().register_extra_hle(hle);
 
-    const bool strict = std::getenv("MHP3RD_STRICT_HLE") != nullptr;
+    const bool strict = env_set("STRICT_HLE");
     std::size_t stubbed = 0u;
     const auto imports = elf.scan_imports(runtime.memory(), *module);
     for (const auto &import : imports) {
@@ -98,12 +104,13 @@ void install_profile(Runtime &runtime, const psprecomp::Elf32Image &elf, const P
 
     auto &ctx = runtime.cpu();
     auto &memory = runtime.memory();
-    for (std::size_t i = 0; i < kBootPath.size(); ++i)
-        memory.store8(kBootArgumentAddress + static_cast<std::uint32_t>(i), static_cast<std::uint8_t>(kBootPath[i]));
-    memory.store8(kBootArgumentAddress + static_cast<std::uint32_t>(kBootPath.size()), 0u);
-    ctx.set_gpr(4, static_cast<std::uint32_t>(kBootPath.size() + 1u));
+    for (std::size_t i = 0; i < boot_path.size(); ++i)
+        memory.store8(kBootArgumentAddress + static_cast<std::uint32_t>(i), static_cast<std::uint8_t>(boot_path[i]));
+    memory.store8(kBootArgumentAddress + static_cast<std::uint32_t>(boot_path.size()), 0u);
+    ctx.set_gpr(4, static_cast<std::uint32_t>(boot_path.size() + 1u));
     ctx.set_gpr(5, kBootArgumentAddress);
-    kernel().start_loader_thread(ctx, elf.runtime_entry(kLoadBase), 0u);
+    if (game().patch_loaded_image != nullptr) game().patch_loaded_image(runtime, elf);
+    kernel().start_loader_thread(ctx, elf.runtime_entry(game().load_base), 0u);
 }
 
 } // namespace portablekit

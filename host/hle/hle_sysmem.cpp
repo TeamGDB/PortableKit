@@ -1,4 +1,5 @@
 // SysMemUserForUser, sceSuspendForUser and sceDmac.
+#include "../profile.hpp"
 #include "hle_common.hpp"
 
 #include "psprecomp/common.hpp"
@@ -97,9 +98,9 @@ void register_sysmem(HleRegistrar &hle) {
         const std::uint32_t destination = arg(ctx, 0);
         const std::uint32_t source = arg(ctx, 1);
         const std::uint32_t size = arg(ctx, 2);
-        // MHP3RD_TRACE_FB_TEXTURES: copies into or out of VRAM, where the
+        // <prefix>_TRACE_FB_TEXTURES: copies into or out of VRAM, where the
         // framebuffers are.
-        static const bool trace = std::getenv("MHP3RD_TRACE_FB_TEXTURES") != nullptr;
+        static const bool trace = portablekit::env("TRACE_FB_TEXTURES") != nullptr;
         const auto in_vram = [](std::uint32_t address) { return (address & 0x1F000000u) == 0x04000000u; };
         if (trace && (in_vram(source) || in_vram(destination))) {
             static std::uint32_t traced = 0u;

@@ -3,9 +3,10 @@
 // wherever the game's window can be created; this remains for systems where
 // it cannot, such as a machine without a working Vulkan driver.
 
+#include "../profile.hpp"
 #include "install/installer.hpp"
 
-#include "install/game_identity.hpp"
+#include "profile.hpp"
 #include "install/user_data.hpp"
 
 #include <cstdlib>
@@ -24,7 +25,8 @@ namespace portablekit::install {
 #if defined(PORTABLEKIT_HAS_SDL)
 namespace {
 
-constexpr const char *kTitle = "Yakumo setup";
+const std::string kTitleText = std::string(portablekit::game().project_name) + " setup";
+const char *const kTitle = kTitleText.c_str();
 
 struct Button {
     int id;
@@ -54,9 +56,9 @@ int ask(SDL_MessageBoxFlags kind, const char *title, const std::string &message,
 class DialogUi final : public InstallerUi {
 public:
     bool introduce(const std::filesystem::path &data_dir) override {
-        std::string text = std::string("Yakumo needs your own copy of ") + kGameTitle + " (" + kDiscIdDisplay +
+        std::string text = std::string(portablekit::game().project_name) + " needs your own copy of " + portablekit::game().game_title + " (" + portablekit::game().disc_id_display +
                            ") as a disc image (.iso).\n\n"
-                           "Choose the image next. Yakumo checks it, prepares the game's executable from it and "
+                           "Choose the image next. " + std::string(portablekit::game().project_name) + " checks it, prepares the game's executable from it and "
                            "copies it into its data folder, so the game keeps working if you move or delete the "
                            "original. You can also choose to use the image where it is.\n\n"
                            "Data folder:\n" +
@@ -96,7 +98,7 @@ public:
         if (!pick.path && !pick.error.empty()) {
             ask(SDL_MESSAGEBOX_ERROR, kTitle,
                 "The file dialog could not be opened (" + pick.error +
-                    ").\n\nRun the setup from a terminal instead:\n  MHP3rdNative --install /path/to/image.iso",
+                    ").\n\nRun the setup from a terminal instead:\n  " + std::string(portablekit::game().app_name) + " --install /path/to/image.iso",
                 {{0, "Quit", SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT | SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT}});
         }
         return pick.path;
@@ -106,9 +108,9 @@ public:
                                                const std::filesystem::path &data_dir) override {
         const std::uint64_t tenths = (info.size_bytes + 50'000'000u) / 100'000'000u;
         const std::string size = std::to_string(tenths / 10u) + "." + std::to_string(tenths % 10u) + " GB";
-        const std::string text = "The image is " + std::string(kGameTitle) + " (" + kDiscIdDisplay +
+        const std::string text = "The image is " + std::string(portablekit::game().game_title) + " (" + portablekit::game().disc_id_display +
                                  ") and passed its checks.\n\n"
-                                 "Copy it into Yakumo's data folder (recommended, " +
+                                 "Copy it into " + std::string(portablekit::game().project_name) + "'s data folder (recommended, " +
                                  size +
                                  "), so the game keeps working if the original is moved or deleted?\n\n"
                                  "Or use it where it is, to save space. The image must then stay at:\n" +
@@ -147,7 +149,7 @@ public:
 };
 
 bool dialogs_available() {
-    if (const char *off = std::getenv("MHP3RD_NO_RENDER"); off != nullptr && *off != '\0' && *off != '0') return false;
+    if (const char *off = portablekit::env("NO_RENDER"); off != nullptr && *off != '\0' && *off != '0') return false;
     return true;
 }
 

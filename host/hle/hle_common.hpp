@@ -55,7 +55,7 @@ private:
 // Returns the number of bytes read; 0 when the descriptor is unknown.
 std::size_t read_open_file(std::uint32_t fd, std::uint64_t offset, std::uint8_t *output, std::size_t size);
 
-// True when MHP3RD_TRACE_SYNC is set: logs kernel object activity.
+// True when <prefix>_TRACE_SYNC is set: logs kernel object activity.
 [[nodiscard]] bool trace_sync();
 void log_sync(const std::string &message);
 

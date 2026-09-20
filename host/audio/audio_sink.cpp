@@ -1,3 +1,4 @@
+#include "../profile.hpp"
 #include "audio/audio_sink.hpp"
 
 #include "settings/settings.hpp"
@@ -203,12 +204,12 @@ void AudioSink::initialize() {
     Impl &impl = *impl_;
     if (impl.started) return;
     impl.started = true;
-    impl.trace = std::getenv("MHP3RD_TRACE_AUDIO") != nullptr;
-    impl.enabled = std::getenv("MHP3RD_NO_AUDIO") == nullptr;
+    impl.trace = portablekit::env("TRACE_AUDIO") != nullptr;
+    impl.enabled = portablekit::env("NO_AUDIO") == nullptr;
     const settings::Settings &player = settings::current();
     impl.gain = player.mute ? 0.0f : static_cast<float>(player.volume) / 100.0f;
 
-    if (const char *path = std::getenv("MHP3RD_AUDIO_DUMP")) {
+    if (const char *path = portablekit::env("AUDIO_DUMP")) {
         if (impl.dump.open(path))
             std::cout << "Audio: writing the mix to " << path << "\n";
         else
@@ -216,7 +217,7 @@ void AudioSink::initialize() {
     }
 
     if (!impl.enabled) {
-        std::cout << "Audio: disabled by MHP3RD_NO_AUDIO\n";
+        std::cout << "Audio: disabled by <prefix>_NO_AUDIO\n";
         return;
     }
 #if defined(PORTABLEKIT_HAS_SDL_AUDIO)

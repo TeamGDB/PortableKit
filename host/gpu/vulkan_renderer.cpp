@@ -1,3 +1,4 @@
+#include "../profile.hpp"
 #include "vulkan_renderer.hpp"
 
 #include "texture_decode.hpp"
@@ -318,7 +319,7 @@ struct PadTuning {
 
 // Read on every poll, so the in-game menu's changes apply at once.
 PadTuning pad_tuning() {
-    static const bool trace = std::getenv("MHP3RD_TRACE_PAD") != nullptr;
+    static const bool trace = portablekit::env("TRACE_PAD") != nullptr;
     const settings::Settings &player = settings::current();
     PadTuning value{};
     value.dead_zone = player.dead_zone;
@@ -655,10 +656,10 @@ struct VulkanRenderer::Impl {
     // stealing the stick from whoever is already playing.
     void open_gamepad(SDL_JoystickID id) {
         if (gamepad != nullptr) {
-            // The virtual pad of MHP3RD_INPUT_SCRIPT takes over from a real
+            // The virtual pad of <prefix>_INPUT_SCRIPT takes over from a real
             // one, so a controller within reach does not steal a scripted run.
             const char *name = SDL_GetGamepadNameForID(id);
-            if (name == nullptr || std::strcmp(name, "Yakumo input script") != 0) return;
+            if (name == nullptr || std::strcmp(name, portablekit::kInputScriptName) != 0) return;
             SDL_CloseGamepad(gamepad);
             gamepad = nullptr;
         }
@@ -853,7 +854,7 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
 
     VkApplicationInfo application{VK_STRUCTURE_TYPE_APPLICATION_INFO};
-    application.pApplicationName = "MHP3rdNative";
+    application.pApplicationName = portablekit::game().app_name;
     application.apiVersion = VK_API_VERSION_1_1;
     VkInstanceCreateInfo instance_info{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     instance_info.pApplicationInfo = &application;
@@ -1581,7 +1582,7 @@ VulkanRenderer::Impl::Target *VulkanRenderer::Impl::target_for(std::uint32_t add
     info.layers = 1u;
     if (!check(vkCreateFramebuffer(device, &info, nullptr, &target.framebuffer), "vkCreateFramebuffer", error))
         return nullptr;
-    static const bool trace = std::getenv("MHP3RD_TRACE_FB_TEXTURES") != nullptr;
+    static const bool trace = portablekit::env("TRACE_FB_TEXTURES") != nullptr;
     if (trace) std::cout << "[fbtex] frame " << frames << " new render target 0x" << std::hex << address << std::dec << "\n";
     return &targets.emplace(address, target).first->second;
 }
@@ -1797,7 +1798,7 @@ std::uint32_t framebuffer_bytes_per_pixel(std::uint32_t format) { return format 
 
 } // namespace
 
-// MHP3RD_TRACE_FB_TEXTURES: every distinct texture whose memory overlaps a
+// <prefix>_TRACE_FB_TEXTURES: every distinct texture whose memory overlaps a
 // guest framebuffer the renderer has drawn to, once, with where it is drawn.
 void VulkanRenderer::Impl::trace_framebuffer_texture(const DrawCall &call) {
     const TextureState &texture = call.texture;
@@ -2209,7 +2210,7 @@ bool VulkanRenderer::pump_events() {
     // Unattended runs (overlay bootstrapping) press confirm periodically so the
     // game walks through title screens and dialogs on its own.
     static const std::uint64_t auto_confirm = [] {
-        const char *text = std::getenv("MHP3RD_AUTO_CONFIRM");
+        const char *text = portablekit::env("AUTO_CONFIRM");
         return text != nullptr ? std::strtoull(text, nullptr, 10) : 0ull;
     }();
     if (auto_confirm != 0u) {
@@ -2634,12 +2635,12 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     // Only unlit draws, though. Lighting on means the material colour is one term
     // of a sum the lights complete, which the vertex shader evaluates; handing
     // it over as the finished colour turned every character a flat muddy brown.
-    // MHP3RD_NO_LIGHTING leaves lit geometry with the old white stand-in and
+    // <prefix>_NO_LIGHTING leaves lit geometry with the old white stand-in and
     // turns fog off too, which is how everything was drawn before either
-    // existed; MHP3RD_NO_FOG turns off fog alone.
-    static const bool no_material_color = std::getenv("MHP3RD_NO_MATERIAL_COLOR") != nullptr;
-    static const bool no_lighting = std::getenv("MHP3RD_NO_LIGHTING") != nullptr;
-    static const bool no_fog = no_lighting || std::getenv("MHP3RD_NO_FOG") != nullptr;
+    // existed; <prefix>_NO_FOG turns off fog alone.
+    static const bool no_material_color = portablekit::env("NO_MATERIAL_COLOR") != nullptr;
+    static const bool no_lighting = portablekit::env("NO_LIGHTING") != nullptr;
+    static const bool no_fog = no_lighting || portablekit::env("NO_FOG") != nullptr;
     const bool lit = call.lighting_enabled && !no_lighting && !call.through && !call.clear_mode;
     const bool use_material_color = !no_material_color && !call.has_vertex_color && !call.lighting_enabled;
     const auto push_vertex = [&](const Vertex &vertex) {
@@ -2719,10 +2720,10 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
 
     // Through-mode vertices carry the texel range they may sample in the
     // otherwise unused normal and w; see clamp_through_quad().
-    // MHP3RD_NO_SPRITE_CLAMP lets them sample anywhere, as before.
+    // <prefix>_NO_SPRITE_CLAMP lets them sample anywhere, as before.
     if (call.through) {
         for (GpuVertex &vertex : impl.scratch) set_uv_rect(vertex, -kNoClamp, -kNoClamp, kNoClamp, kNoClamp);
-        static const bool no_sprite_clamp = std::getenv("MHP3RD_NO_SPRITE_CLAMP") != nullptr;
+        static const bool no_sprite_clamp = portablekit::env("NO_SPRITE_CLAMP") != nullptr;
         const bool quads = call.primitive == PrimitiveType::Sprites ||
                            ((call.primitive == PrimitiveType::TriangleStrip ||
                              call.primitive == PrimitiveType::TriangleFan) &&
@@ -2734,7 +2735,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         }
     }
 
-    static const bool trace = std::getenv("MHP3RD_TRACE_GE") != nullptr;
+    static const bool trace = portablekit::env("TRACE_GE") != nullptr;
     if (trace && impl.draws < 400u) {
         const GpuVertex &first = impl.scratch.front();
         const GpuVertex &second = impl.scratch[std::min<std::size_t>(1u, impl.scratch.size() - 1u)];
@@ -2750,10 +2751,10 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     }
 
 
-    // MHP3RD_TRACE_SPRITES=N: every through-mode sprite of frame N, with the
+    // <prefix>_TRACE_SPRITES=N: every through-mode sprite of frame N, with the
     // texture state it samples, to find the tiles a 2D screen is built from.
     static const std::uint64_t trace_sprites_frame = [] {
-        const char *text = std::getenv("MHP3RD_TRACE_SPRITES");
+        const char *text = portablekit::env("TRACE_SPRITES");
         return text != nullptr ? std::strtoull(text, nullptr, 10) : ~0ull;
     }();
     if (impl.frames == trace_sprites_frame && call.primitive != PrimitiveType::Sprites) {
@@ -2791,7 +2792,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     // Deep dump of the first transformed draws: matrices, raw positions and the
     // same positions after a CPU-side transform, so a geometry that never shows
     // up can be traced to the stage that loses it.
-    static const bool trace3d = std::getenv("MHP3RD_TRACE_3D") != nullptr;
+    static const bool trace3d = portablekit::env("TRACE_3D") != nullptr;
     static std::uint32_t traced_3d = 0u;
     static std::uint32_t traced_clears = 0u;
     if (trace3d && call.clear_mode && traced_clears < 4u) {
@@ -2972,8 +2973,8 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         key.cull_clockwise = call.cull_clockwise;
     }
     // Escape hatch for bisecting "nothing is visible" reports.
-    static const bool no_cull = std::getenv("MHP3RD_NO_CULL") != nullptr;
-    static const bool no_depth = std::getenv("MHP3RD_NO_DEPTH") != nullptr;
+    static const bool no_cull = portablekit::env("NO_CULL") != nullptr;
+    static const bool no_depth = portablekit::env("NO_DEPTH") != nullptr;
     if (no_cull) key.cull = false;
     if (no_depth && !call.clear_mode) key.depth_test = false;
     VkPipeline pipeline = impl.pipeline_for(key);
@@ -2996,13 +2997,13 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
 
     if (call.clear_mode) push.texture_params = {0.0f, 0.0f, 0.0f, 0.0f};
 
-    static const bool trace_fb = std::getenv("MHP3RD_TRACE_FB_TEXTURES") != nullptr;
+    static const bool trace_fb = portablekit::env("TRACE_FB_TEXTURES") != nullptr;
     if (trace_fb && call.texture.enabled && !call.clear_mode) impl.trace_framebuffer_texture(call);
 
     // A texture in a framebuffer the renderer drew is read from that render
     // target: the pixels never reach guest memory, which holds whatever was
-    // there before. MHP3RD_NO_FB_TEXTURES decodes guest memory as before.
-    static const bool no_fb_textures = std::getenv("MHP3RD_NO_FB_TEXTURES") != nullptr;
+    // there before. <prefix>_NO_FB_TEXTURES decodes guest memory as before.
+    static const bool no_fb_textures = portablekit::env("NO_FB_TEXTURES") != nullptr;
     VkDescriptorSet texture_descriptor = impl.white_texture.descriptor;
     if (call.texture.enabled && !call.clear_mode) {
         const Impl::FramebufferTexture source =
@@ -3128,7 +3129,7 @@ void VulkanRenderer::write_back_frame(GuestMemory &memory) {
 
 void VulkanRenderer::read_back_framebuffer(std::uint32_t source, GuestMemory &memory) {
     Impl &impl = *impl_;
-    static const bool disabled = std::getenv("MHP3RD_NO_FB_TEXTURES") != nullptr;
+    static const bool disabled = portablekit::env("NO_FB_TEXTURES") != nullptr;
     if (!impl.ready || disabled) return;
     const std::uint32_t wanted = GuestMemory::canonical(source);
     std::uint32_t found = 0u;
@@ -3172,7 +3173,7 @@ void VulkanRenderer::read_back_framebuffer(std::uint32_t source, GuestMemory &me
     impl.store_frame(memory, impl.writeback_recorded, pixels.data());
     // A write-back still waiting from an earlier frame is older than this one.
     if (impl.writeback_ready.address == found) impl.writeback_has_pixels = false;
-    static const bool trace = std::getenv("MHP3RD_TRACE_FB_TEXTURES") != nullptr;
+    static const bool trace = portablekit::env("TRACE_FB_TEXTURES") != nullptr;
     if (trace)
         std::cout << "[fbtex] frame " << impl.frames << " read framebuffer 0x" << std::hex << found << std::dec
                   << " back for a block transfer\n";
@@ -3222,7 +3223,7 @@ void VulkanRenderer::present(std::uint32_t display_address) {
     if (!impl.recording) begin_frame();
     impl.end_pass();
 
-    static const bool trace3d = std::getenv("MHP3RD_TRACE_3D") != nullptr;
+    static const bool trace3d = portablekit::env("TRACE_3D") != nullptr;
     if (trace3d && impl.frame_transformed_draws != 0u) {
         std::cout << "[3d] frame " << impl.frames << " through=" << impl.frame_through_draws
                   << " transformed=" << impl.frame_transformed_draws << " showing=0x" << std::hex << display_address
@@ -3244,7 +3245,7 @@ void VulkanRenderer::present(std::uint32_t display_address) {
     impl.frame_ndc_max = {-1e30f, -1e30f, -1e30f};
     impl.frame_transformed_targets.clear();
 
-    static const bool no_writeback = std::getenv("MHP3RD_NO_FB_TEXTURES") != nullptr;
+    static const bool no_writeback = portablekit::env("NO_FB_TEXTURES") != nullptr;
     if (!no_writeback) impl.record_writeback(display_address);
 
     // Show the target the guest flipped to; fall back to whatever was drawn last.

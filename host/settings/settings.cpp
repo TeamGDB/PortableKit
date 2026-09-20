@@ -1,3 +1,4 @@
+#include "../profile.hpp"
 #include "settings/settings.hpp"
 
 #include "install/user_data.hpp"
@@ -114,7 +115,7 @@ constexpr const char *kRetiredTypeNameKey = "input.type_name";
 
 const std::vector<Field> &fields() {
     static const std::vector<Field> table = {
-        {"video.internal_scale", "MHP3RD_INTERNAL_SCALE",
+        {"video.internal_scale", "INTERNAL_SCALE",
          [](Settings &s, const std::string &t) { return parse_uint(t, 1u, kMaxInternalScale, s.internal_scale); },
          [](const Settings &s) { return std::to_string(s.internal_scale); },
          [](Settings &s, const char *t) {
@@ -131,11 +132,11 @@ const std::vector<Field> &fields() {
         BOOL_FIELD("video.keep_aspect", keep_aspect),
         BOOL_FIELD("video.sharp_screen", sharp_screen),
         BOOL_FIELD("video.sharp_textures", sharp_textures),
-        {"video.unthrottled", "MHP3RD_UNTHROTTLED",
+        {"video.unthrottled", "UNTHROTTLED",
          [](Settings &s, const std::string &t) { return parse_bool(t, s.unthrottled); },
          [](const Settings &s) { return std::string(s.unthrottled ? "1" : "0"); },
          [](Settings &s, const char *t) { s.unthrottled = variable_present(t); }},
-        {"video.performance", "MHP3RD_PERF",
+        {"video.performance", "PERF",
          [](Settings &s, const std::string &t) { return kPerfDisplays.parse(t, s.perf); },
          [](const Settings &s) { return kPerfDisplays.format(s.perf); },
          [](Settings &s, const char *t) {
@@ -143,7 +144,7 @@ const std::vector<Field> &fields() {
              if (std::strcmp(t, "log") == 0) s.perf = PerfDisplay::Log;
              else s.perf = *t != '\0' && variable_flag(t) ? PerfDisplay::OverlayAndLog : PerfDisplay::Off;
          }},
-        {"text.font", "MHP3RD_FONT",
+        {"text.font", "FONT",
          [](Settings &s, const std::string &t) {
              s.font = t;
              return true;
@@ -156,7 +157,7 @@ const std::vector<Field> &fields() {
          [](Settings &s, const std::string &t) { return parse_uint(t, 0u, 100u, s.volume); },
          [](const Settings &s) { return std::to_string(s.volume); }, nullptr},
         BOOL_FIELD("audio.mute", mute),
-        {"input.confirm", "MHP3RD_PAD_FACE",
+        {"input.confirm", "PAD_FACE",
          [](Settings &s, const std::string &t) {
              if (t == "south") s.confirm_south = true;
              else if (t == "east") s.confirm_south = false;
@@ -165,65 +166,65 @@ const std::vector<Field> &fields() {
          },
          [](const Settings &s) { return std::string(s.confirm_south ? "south" : "east"); },
          [](Settings &s, const char *t) { s.confirm_south = std::strcmp(t, "xbox") == 0 || std::strcmp(t, "south") == 0; }},
-        {"input.dead_zone", "MHP3RD_PAD_DEADZONE",
+        {"input.dead_zone", "PAD_DEADZONE",
          [](Settings &s, const std::string &t) { return parse_float(t, 0.0f, 0.9f, s.dead_zone); },
          [](const Settings &s) { return format_float(s.dead_zone); },
          [](Settings &s, const char *t) { s.dead_zone = variable_float(t, 0.15f, 0.0f, 0.9f); }},
-        {"input.trigger", "MHP3RD_PAD_TRIGGER",
+        {"input.trigger", "PAD_TRIGGER",
          [](Settings &s, const std::string &t) { return parse_float(t, 0.05f, 1.0f, s.trigger); },
          [](const Settings &s) { return format_float(s.trigger); },
          [](Settings &s, const char *t) { s.trigger = variable_float(t, 0.25f, 0.05f, 1.0f); }},
-        {"input.right_stick", "MHP3RD_PAD_RSTICK_DPAD",
+        {"input.right_stick", "PAD_RSTICK_DPAD",
          [](Settings &s, const std::string &t) { return kRightSticks.parse(t, s.right_stick); },
          [](const Settings &s) { return kRightSticks.format(s.right_stick); },
          [](Settings &s, const char *t) { s.right_stick = variable_flag(t) ? RightStick::DPad : RightStick::Camera; }},
-        {"input.right_stick_zone", "MHP3RD_PAD_RSTICK_ZONE",
+        {"input.right_stick_zone", "PAD_RSTICK_ZONE",
          [](Settings &s, const std::string &t) { return parse_float(t, 0.1f, 1.0f, s.right_stick_zone); },
          [](const Settings &s) { return format_float(s.right_stick_zone); },
          [](Settings &s, const char *t) { s.right_stick_zone = variable_float(t, 0.5f, 0.1f, 1.0f); }},
         BOOL_FIELD("input.invert_camera_x", invert_camera_x),
         BOOL_FIELD("input.invert_camera_y", invert_camera_y),
-        {"input.name_entry", "MHP3RD_OSK_MODE",
+        {"input.name_entry", "OSK_MODE",
          [](Settings &s, const std::string &t) { return kNameEntries.parse(t, s.name_entry); },
          [](const Settings &s) { return kNameEntries.format(s.name_entry); },
          [](Settings &s, const char *t) {
-             if (!kNameEntries.parse(t, s.name_entry)) std::cerr << "[settings] MHP3RD_OSK_MODE: keyboard or fixed\n";
+             if (!kNameEntries.parse(t, s.name_entry)) std::cerr << "[settings] <prefix>_OSK_MODE: keyboard or fixed\n";
          }},
-        {"input.name", "MHP3RD_OSK_TEXT",
+        {"input.name", "OSK_TEXT",
          [](Settings &s, const std::string &t) {
              if (t.empty()) return false;
              s.name = t;
              return true;
          },
          [](const Settings &s) { return s.name; }, [](Settings &s, const char *t) { s.name = t; }},
-        {"network.adhoc", "MHP3RD_ADHOC",
+        {"network.adhoc", "ADHOC",
          [](Settings &s, const std::string &t) { return parse_bool(t, s.adhoc); },
          [](const Settings &s) { return std::string(s.adhoc ? "1" : "0"); },
          [](Settings &s, const char *t) { s.adhoc = variable_flag(t); }},
-        {"network.server", "MHP3RD_ADHOC_SERVER",
+        {"network.server", "ADHOC_SERVER",
          [](Settings &s, const std::string &t) {
              s.adhoc_server = t;
              return true;
          },
          [](const Settings &s) { return s.adhoc_server; }, [](Settings &s, const char *t) { s.adhoc_server = t; }},
-        {"network.nickname", "MHP3RD_ADHOC_NICKNAME",
+        {"network.nickname", "ADHOC_NICKNAME",
          [](Settings &s, const std::string &t) {
              s.adhoc_nickname = t;
              return true;
          },
          [](const Settings &s) { return s.adhoc_nickname; },
          [](Settings &s, const char *t) { s.adhoc_nickname = t; }},
-        {"network.mac", "MHP3RD_ADHOC_MAC",
+        {"network.mac", "ADHOC_MAC",
          [](Settings &s, const std::string &t) {
              s.adhoc_mac = t;
              return true;
          },
          [](const Settings &s) { return s.adhoc_mac; }, [](Settings &s, const char *t) { s.adhoc_mac = t; }},
-        {"ui.menu_pause", "MHP3RD_MENU_PAUSE",
+        {"ui.menu_pause", "MENU_PAUSE",
          [](Settings &s, const std::string &t) { return parse_bool(t, s.menu_pause); },
          [](const Settings &s) { return std::string(s.menu_pause ? "1" : "0"); },
          [](Settings &s, const char *t) { s.menu_pause = variable_flag(t); }},
-        {"ui.menu_pause_multiplayer", "MHP3RD_MENU_PAUSE_MULTIPLAYER",
+        {"ui.menu_pause_multiplayer", "MENU_PAUSE_MULTIPLAYER",
          [](Settings &s, const std::string &t) { return parse_bool(t, s.menu_pause_multiplayer); },
          [](const Settings &s) { return std::string(s.menu_pause_multiplayer ? "1" : "0"); },
          [](Settings &s, const char *t) { s.menu_pause_multiplayer = variable_flag(t); }},
@@ -244,7 +245,7 @@ const std::vector<Field> &fields() {
              return text;
          },
          nullptr},
-        {"network.host_port", "MHP3RD_ADHOC_HOST_PORT",
+        {"network.host_port", "ADHOC_HOST_PORT",
          [](Settings &s, const std::string &t) { return parse_uint(t, 1024u, 65534u, s.adhoc_host_port); },
          [](const Settings &s) { return std::to_string(s.adhoc_host_port); },
          [](Settings &s, const char *t) {
@@ -272,7 +273,7 @@ struct State {
     // What settings.ini held, so values the environment decided are written
     // back as the file had them.
     install::SettingsEntries file;
-    std::map<std::string, const char *> overrides;
+    std::map<std::string, std::string> overrides;
 };
 
 State &state() {
@@ -292,17 +293,17 @@ void load(State &s) {
         if (const auto found = s.file.find(field.key); found != s.file.end() && !field.parse(s.values, found->second))
             std::cerr << "[settings] ignoring " << field.key << "=" << found->second << "\n";
         if (field.variable == nullptr) continue;
-        const char *text = std::getenv(field.variable);
+        const char *text = portablekit::env(field.variable);
         if (text == nullptr) continue;
         field.parse_variable(s.values, text);
-        s.overrides[field.key] = field.variable;
+        s.overrides[field.key] = env_name(field.variable);
     }
     // A fixed name in the environment is meant for unattended runs, which
     // nobody is there to type in, so it also answers at once unless
-    // MHP3RD_OSK_MODE says otherwise.
-    if (s.overrides.count("input.name_entry") == 0u && std::getenv("MHP3RD_OSK_TEXT") != nullptr) {
+    // the OSK_MODE variable says otherwise.
+    if (s.overrides.count("input.name_entry") == 0u && portablekit::env("OSK_TEXT") != nullptr) {
         s.values.name_entry = NameEntry::Fixed;
-        s.overrides["input.name_entry"] = "MHP3RD_OSK_TEXT";
+        s.overrides["input.name_entry"] = env_name("OSK_TEXT");
     }
 }
 

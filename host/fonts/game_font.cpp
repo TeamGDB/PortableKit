@@ -375,7 +375,7 @@ void load(State &s) {
     }
     if (used == nullptr) {
         std::cout << "[font] no TrueType font found; the game's text stays blank. Choose one in the menu or set "
-                     "MHP3RD_FONT=<path to a .ttf, .otf or .ttc>\n";
+                     "<prefix>_FONT=<path to a .ttf, .otf or .ttc>\n";
         return;
     }
     std::cout << "Fonts: game text from " << used->name << " (" << used->path << "), " << used->em << " px em, baseline " << s.baseline;

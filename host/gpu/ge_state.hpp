@@ -111,7 +111,7 @@ struct ViewportState {
 };
 
 // One of the GE's four lights. The register layout below was read off the
-// running game with MHP3RD_TRACE_LIGHTING, not taken from a reference table.
+// running game with <prefix>_TRACE_LIGHTING, not taken from a reference table.
 struct LightState {
     bool enabled{};
     std::uint32_t kind{};         // bits 0..1: diffuse, diffuse + specular, powered diffuse
@@ -279,7 +279,7 @@ private:
 };
 
 // Copies the game makes out of VRAM with the DMA controller, remembered for
-// MHP3RD_TRACE_FB_TEXTURES so a texture read from a copy can be traced back to
+// <prefix>_TRACE_FB_TEXTURES so a texture read from a copy can be traced back to
 // the framebuffer it came from.
 void note_vram_copy(std::uint32_t destination, std::uint32_t source, std::uint32_t size);
 // The most recent such copy whose destination holds `address`: its source and

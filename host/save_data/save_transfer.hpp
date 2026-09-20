@@ -20,10 +20,9 @@
 
 namespace portablekit::savedata {
 
-// The folders this game keeps on a memory stick: the game data, the
-// downloaded quests, and the install data (a cache the game can rebuild).
-inline constexpr std::string_view kGameName = "ULJM05800";
-inline constexpr std::string_view kSaveFolderNames[] = {"ULJM05800", "ULJM05800QST", "ULJM05800DAT"};
+// The folders this game keeps on a memory stick, from the profile: its main
+// save, and whatever else it writes beside it.
+[[nodiscard]] std::string_view game_name();
 
 [[nodiscard]] bool is_game_save_name(std::string_view folder_name);
 // "Game data", "Downloaded quests", "Install data", or the name itself.
@@ -49,7 +48,7 @@ struct FolderSummary {
 // it cannot be imported, why, in words for the player.
 struct SaveCheck {
     std::filesystem::path folder;
-    std::string name;     // SAVEDATA_DIRECTORY, e.g. ULJM05800QST
+    std::string name;     // SAVEDATA_DIRECTORY, e.g. the quests folder
     std::string problem;  // empty: the save can be imported
     bool other_game{};    // a save, but not this game's
     [[nodiscard]] bool ok() const { return problem.empty(); }
@@ -108,7 +107,7 @@ ExportResult export_saves(const std::filesystem::path &memory_stick, const std::
 [[nodiscard]] std::vector<std::string> saves_to_back_up(const std::filesystem::path &memory_stick);
 
 // Where a backup goes. With a time, a new folder named by it:
-// <target>/2026-09-19_19-05-12/ULJM05800, ... ("-2" and so on when taken).
+// <target>/2026-09-19_19-05-12/<save folder>, ... ("-2" and so on when taken).
 // Without, the save folders go straight into <target>.
 [[nodiscard]] std::filesystem::path backup_folder(const std::filesystem::path &target,
                                                   std::optional<std::chrono::system_clock::time_point> time);

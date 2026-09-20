@@ -1,3 +1,4 @@
+#include "../profile.hpp"
 #include "save_data/save_transfer.hpp"
 
 #include "save_data/param_sfo.hpp"
@@ -22,9 +23,27 @@ constexpr std::uintmax_t kMaxParamSfoBytes = 64u * 1024u;
 // of padding.
 constexpr std::size_t kFileListEntrySize = 32u;
 constexpr std::size_t kFileListNameSize = 13u;
-// The folders an export carries: the install data is a cache the game
-// rebuilds, and it is several times the size of the rest.
-constexpr std::string_view kExportedFolders[] = {"ULJM05800", "ULJM05800QST"};
+// The folders an export carries. A profile marks the ones worth carrying:
+// a cache the game rebuilds is left out, being several times the size of the
+// rest.
+std::string_view game_name_view() { return portablekit::game().save_game_name; }
+
+std::vector<std::string_view> names_of_save_folders(bool exported_only) {
+    std::vector<std::string_view> names;
+    for (const SaveFolder &folder : portablekit::game().save_folders)
+        if (!exported_only || folder.exported) names.emplace_back(folder.name);
+    return names;
+}
+
+std::vector<std::string_view> exported_save_names() { return names_of_save_folders(true); }
+std::vector<std::string_view> all_save_names() { return names_of_save_folders(false); }
+
+// A folder the save-data utility writes through, which lists its data file.
+bool is_exported_save_name(std::string_view name) {
+    for (const SaveFolder &folder : portablekit::game().save_folders)
+        if (name == folder.name) return folder.exported;
+    return true;
+}
 
 struct Session {
     std::mutex mutex;
@@ -124,19 +143,21 @@ bool same_folder(const fs::path &a, const fs::path &b) {
 } // namespace
 
 bool is_game_save_name(std::string_view folder_name) {
-    return std::find(std::begin(kSaveFolderNames), std::end(kSaveFolderNames), folder_name) !=
-           std::end(kSaveFolderNames);
+    for (const SaveFolder &folder : portablekit::game().save_folders)
+        if (folder_name == folder.name) return true;
+    return false;
 }
 
 std::string save_label(std::string_view folder_name) {
-    if (folder_name == "ULJM05800") return "Game data";
-    if (folder_name == "ULJM05800QST") return "Downloaded quests";
-    if (folder_name == "ULJM05800DAT") return "Install data";
+    for (const SaveFolder &folder : portablekit::game().save_folders)
+        if (folder_name == folder.name) return folder.description;
     return std::string(folder_name);
 }
 
+std::string_view game_name() { return portablekit::game().save_game_name; }
+
 void remember_game_key(const std::string &game_name, const Block &key) {
-    if (game_name != kGameName || is_zero(key)) return;
+    if (game_name != game_name_view() || is_zero(key)) return;
     std::lock_guard lock(session().mutex);
     session().key = key;
 }
@@ -215,7 +236,8 @@ SaveCheck check_save_folder(const fs::path &folder, const std::optional<Block> &
     if (flags == 0u) return check;
     const auto mode = mode_from_flags(flags);
     if (!mode) {
-        check.problem = "The save is protected in a way Yakumo does not know.";
+        check.problem = std::string("The save is protected in a way ") + portablekit::game().project_name +
+                        " does not know.";
         return check;
     }
     const auto params_offset = sfo->data_offset("SAVEDATA_PARAMS");
@@ -240,7 +262,7 @@ SaveCheck check_save_folder(const fs::path &folder, const std::optional<Block> &
     // The game data and the quests are written through the save-data utility,
     // which lists their file; the install data is written file by file and
     // lists none.
-    if (listed.empty() && check.name != "ULJM05800DAT") {
+    if (listed.empty() && is_exported_save_name(check.name)) {
         check.problem = "PARAM.SFO lists no data file.";
         return check;
     }
@@ -318,7 +340,7 @@ ImportResult import_save(const SaveCheck &save, const fs::path &memory_stick, co
     const fs::path root = memory_stick / "PSP" / "SAVEDATA";
     result.destination = root / save.name;
     if (same_folder(save.folder, result.destination)) {
-        result.error = "This is the save Yakumo already uses.";
+        result.error = std::string("This is the save ") + portablekit::game().project_name + " already uses.";
         return result;
     }
 
@@ -368,7 +390,7 @@ ExportResult export_saves(const fs::path &memory_stick, const fs::path &target,
     ExportResult result;
     const fs::path root = memory_stick / "PSP" / "SAVEDATA";
     std::vector<std::string> names;
-    for (const std::string_view name : kExportedFolders)
+    for (const std::string_view name : exported_save_names())
         if (has_param_sfo(root / std::string(name))) names.emplace_back(name);
     if (names.empty()) {
         result.error = "There is no save to export yet.";
@@ -396,7 +418,7 @@ ExportResult export_saves(const fs::path &memory_stick, const fs::path &target,
 std::vector<std::string> saves_to_back_up(const fs::path &memory_stick) {
     std::vector<std::string> names;
     const fs::path root = memory_stick / "PSP" / "SAVEDATA";
-    for (const std::string_view name : kSaveFolderNames)
+    for (const std::string_view name : all_save_names())
         if (has_param_sfo(root / std::string(name))) names.emplace_back(name);
     return names;
 }

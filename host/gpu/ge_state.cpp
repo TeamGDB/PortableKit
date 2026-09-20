@@ -1,3 +1,4 @@
+#include "../profile.hpp"
 #include "ge_state.hpp"
 
 #include <algorithm>
@@ -363,20 +364,20 @@ std::uint32_t decode_vertices(const GuestMemory &memory, std::uint32_t address, 
 void GeState::handle_command(const GuestMemory &memory, std::uint32_t command, std::uint32_t data) {
     registers_[command] = data;
     // Which of 0x53..0x5C actually carries the colour the guest sets is worth
-    // reading off the game rather than recalling: MHP3RD_TRACE_MATERIAL reports
+    // reading off the game rather than recalling: <prefix>_TRACE_MATERIAL reports
     // every distinct value each of them is given.
-    if (static const bool trace = std::getenv("MHP3RD_TRACE_MATERIAL") != nullptr;
+    if (static const bool trace = portablekit::env("TRACE_MATERIAL") != nullptr;
         trace && command >= 0x53u && command <= 0x5Cu) {
         static std::map<std::uint32_t, std::map<std::uint32_t, std::uint64_t>> seen;
         auto &values = seen[command];
         if (++values[data] == 1u && values.size() <= 24u)
             std::cout << "[material] cmd=0x" << std::hex << command << " value=0x" << data << std::dec << "\n";
     }
-    // MHP3RD_TRACE_LIGHTING does the same for the registers around that run
+    // <prefix>_TRACE_LIGHTING does the same for the registers around that run
     // that lighting and fog may live in: the enables after 0x17, 0x50..0x52,
     // 0x5D..0x9A and 0xC8..0xD0. Each value is also shown as a 24-bit float,
     // since several of them carry one.
-    if (static const bool trace = std::getenv("MHP3RD_TRACE_LIGHTING") != nullptr;
+    if (static const bool trace = portablekit::env("TRACE_LIGHTING") != nullptr;
         trace && ((command >= 0x18u && command <= 0x20u) || (command >= 0x50u && command <= 0x52u) ||
                   (command >= 0x5Du && command <= 0x9Au) || (command >= 0xC8u && command <= 0xD0u))) {
         static std::map<std::uint32_t, std::map<std::uint32_t, std::uint64_t>> seen;
@@ -611,7 +612,7 @@ void GeState::handle_command(const GuestMemory &memory, std::uint32_t command, s
         transfer.width = (registers_[kTransferSize] & 0x3FFu) + 1u;
         transfer.height = ((registers_[kTransferSize] >> 10u) & 0x3FFu) + 1u;
         transfer.bytes_per_pixel = (data & 1u) != 0u ? 4u : 2u;
-        static const bool trace = std::getenv("MHP3RD_TRACE_FB_TEXTURES") != nullptr;
+        static const bool trace = portablekit::env("TRACE_FB_TEXTURES") != nullptr;
         if (trace)
             std::cout << "[fbtex] block transfer 0x" << std::hex << transfer.source << std::dec << " ("
                       << transfer.source_x << "," << transfer.source_y << " row " << transfer.source_stride
@@ -695,11 +696,11 @@ bool find_vram_copy(std::uint32_t address, std::uint32_t &source, std::uint32_t 
     return false;
 }
 
-// MHP3RD_TRACE_FB_TEXTURES also lists the commands the GE state ignores, with
+// <prefix>_TRACE_FB_TEXTURES also lists the commands the GE state ignores, with
 // the first few values of each, so copies the renderer never sees (block
 // transfers, for example) show up next to the textures that read their result.
 void GeState::trace_unhandled(std::uint32_t command, std::uint32_t data) {
-    static const bool trace = std::getenv("MHP3RD_TRACE_FB_TEXTURES") != nullptr;
+    static const bool trace = portablekit::env("TRACE_FB_TEXTURES") != nullptr;
     if (!trace) return;
     static std::map<std::uint32_t, std::uint32_t> seen;
     std::uint32_t &count = seen[command];
@@ -810,7 +811,7 @@ void GeState::draw_primitive(const GuestMemory &memory, std::uint32_t data) {
     // distinct combination of vertex type, enables and material registers,
     // printed with every non-zero register lighting may read. Light positions
     // and colours are left out of the key because the game animates them.
-    if (static const bool trace = std::getenv("MHP3RD_TRACE_LIGHTING") != nullptr; trace && lighting_enabled_) {
+    if (static const bool trace = portablekit::env("TRACE_LIGHTING") != nullptr; trace && lighting_enabled_) {
         static std::map<std::vector<std::uint32_t>, std::uint64_t> seen;
         std::vector<std::uint32_t> key{vertex_type_};
         for (std::uint32_t command = 0x18u; command <= 0x1Fu; ++command) key.push_back(registers_[command]);

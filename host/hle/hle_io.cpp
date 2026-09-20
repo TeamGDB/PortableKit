@@ -1,5 +1,6 @@
 // IoFileMgrForUser and sceUmdUser: UMD access straight from the disc image
 // (including raw "sce_lbn" sector files) and a host directory for ms0:.
+#include "../profile.hpp"
 #include "hle_common.hpp"
 #include "kernel/iso_image.hpp"
 
@@ -115,7 +116,7 @@ std::optional<std::pair<std::uint64_t, std::uint64_t>> parse_lbn_path(const std:
 std::filesystem::path host_path(const std::string &path) { return io().memory_stick / path; }
 
 bool trace_io() {
-    static const bool enabled = std::getenv("MHP3RD_TRACE_IO") != nullptr;
+    static const bool enabled = portablekit::env("TRACE_IO") != nullptr;
     return enabled;
 }
 

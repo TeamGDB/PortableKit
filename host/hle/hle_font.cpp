@@ -2,6 +2,7 @@
 // a dumped disc does not contain, so glyphs come from a font on the host
 // (fonts/game_font.hpp, which also describes how the game lays them out). The
 // metrics reported are those of the bitmaps drawn.
+#include "../profile.hpp"
 #include "hle_common.hpp"
 
 #include "fonts/game_font.hpp"
@@ -28,9 +29,9 @@ constexpr std::uint32_t kPixelFormat32 = 4u;
 constexpr std::uint32_t kLibraryHandle = 0x00F0F000u;
 constexpr std::uint32_t kFontHandle = 0x00F0F100u;
 
-// MHP3RD_TRACE_FONT=1: every sceLibFont call with its arguments and results.
+// <prefix>_TRACE_FONT=1: every sceLibFont call with its arguments and results.
 bool trace_font() {
-    static const bool enabled = std::getenv("MHP3RD_TRACE_FONT") != nullptr;
+    static const bool enabled = portablekit::env("TRACE_FONT") != nullptr;
     return enabled;
 }
 

@@ -13,8 +13,9 @@
 // timeouts stand still, and the network thread keeps the server connection
 // alive and buffers what arrives.
 //
-// MHP3RD_TRACE_ADHOC=1 logs every call with its arguments and result, and
+// <prefix>_TRACE_ADHOC=1 logs every call with its arguments and result, and
 // every packet header the client sends or receives.
+#include "../profile.hpp"
 #include "hle_common.hpp"
 
 #include "adhoc/client.hpp"
@@ -94,7 +95,7 @@ constexpr std::uint32_t kNetconfAdhocParam = 0x34u;
 constexpr std::uint32_t kNetconfActionConnectAdhoc = 2u;
 constexpr std::uint32_t kNetconfResultCancelled = 1u;
 
-constexpr const char *kDefaultProduct = "ULJM05800";
+
 constexpr std::uint32_t kErrorWaitTimeout = error::kWaitTimeout;
 
 bool trace_adhoc() { return Client::tracing(); }
@@ -191,7 +192,7 @@ Mac own_mac() {
 std::string nickname() {
     const settings::Settings &s = settings::current();
     std::string name = !s.adhoc_nickname.empty() ? s.adhoc_nickname : s.name;
-    if (name.empty()) name = "Yakumo";
+    if (name.empty()) name = portablekit::game().project_name;
     return name.substr(0, 127);
 }
 
@@ -221,7 +222,7 @@ struct NetconfState {
 struct State {
     bool adhoc_initialized{};
     bool ctl_initialized{};
-    std::string product{kDefaultProduct};
+    std::string product{portablekit::game().adhoc_product_code};
     std::map<std::uint32_t, Handler> handlers;
     std::uint32_t next_handler{1u};
     std::map<std::uint32_t, PdpSocket> pdp;

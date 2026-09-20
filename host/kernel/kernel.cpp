@@ -1,3 +1,4 @@
+#include "../profile.hpp"
 #include "kernel.hpp"
 
 #include "perf/frame_stats.hpp"
@@ -37,7 +38,7 @@ std::uint32_t align_up(std::uint32_t value, std::uint32_t alignment) noexcept {
 }
 
 bool trace_enabled() {
-    static const bool enabled = std::getenv("MHP3RD_TRACE_KERNEL") != nullptr;
+    static const bool enabled = portablekit::env("TRACE_KERNEL") != nullptr;
     return enabled;
 }
 
@@ -91,12 +92,12 @@ void Kernel::install(Runtime &runtime, std::uint32_t gp, std::uint32_t image_end
     const std::uint32_t user_start = align_up(image_end, 0x1000u);
     free_ranges_.push_back(FreeRange{user_start, kUserMemoryEnd - user_start});
 
-    runtime.register_function(kThreadExitStub, &native_thread_exit, "mhp3rd_thread_exit");
-    runtime.register_function(kInterruptReturnStub, &native_interrupt_return, "mhp3rd_interrupt_return");
-    runtime.register_function(kIdleStub, &native_idle, "mhp3rd_idle");
-    runtime.register_function(kGuestCallReturnStub, &native_guest_call_return, "mhp3rd_guest_call_return");
+    runtime.register_function(kThreadExitStub, &native_thread_exit, "portablekit_thread_exit");
+    runtime.register_function(kInterruptReturnStub, &native_interrupt_return, "portablekit_interrupt_return");
+    runtime.register_function(kIdleStub, &native_idle, "portablekit_idle");
+    runtime.register_function(kGuestCallReturnStub, &native_guest_call_return, "portablekit_guest_call_return");
     std::uint64_t interval = 20'000u;
-    if (const char *text = std::getenv("MHP3RD_STARVATION_INTERVAL")) interval = std::strtoull(text, nullptr, 0);
+    if (const char *text = portablekit::env("STARVATION_INTERVAL")) interval = std::strtoull(text, nullptr, 0);
     psprecomp::set_runtime_starvation_hook(&native_starvation, interval);
 }
 
@@ -445,8 +446,8 @@ bool Kernel::pace_to_real_time() {
     // Virtual time jumps to the next event whenever every thread waits, so
     // without this the game runs as fast as frames can be presented: two to
     // three times PSP speed on a 60-90 Hz display. Runs without a window, and
-    // the unthrottled setting (MHP3RD_UNTHROTTLED), keep the unpaced clock.
-    static const bool windowed = std::getenv("MHP3RD_NO_RENDER") == nullptr;
+    // the unthrottled setting (<prefix>_UNTHROTTLED), keep the unpaced clock.
+    static const bool windowed = portablekit::env("NO_RENDER") == nullptr;
     if (!windowed || settings::current().unthrottled) {
         // Turning pacing back on starts from the current moment.
         pacing_started_ = false;

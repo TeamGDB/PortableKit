@@ -9,7 +9,7 @@ namespace portablekit::perf {
 
 using Clock = std::chrono::steady_clock;
 
-// What the performance setting asks for (MHP3RD_PERF, or the in-game menu):
+// What the performance setting asks for (<prefix>_PERF, or the in-game menu):
 // the log line, the overlay or both. The overlay can also be toggled at run
 // time (F3).
 struct Options {

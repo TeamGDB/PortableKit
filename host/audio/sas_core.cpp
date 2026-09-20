@@ -1,3 +1,4 @@
+#include "../profile.hpp"
 #include "audio/sas_core.hpp"
 
 #include <algorithm>
@@ -52,12 +53,12 @@ struct EnvelopeRate {
 }
 
 [[nodiscard]] bool envelopes_disabled() {
-    static const bool disabled = std::getenv("MHP3RD_SAS_NO_ENV") != nullptr;
+    static const bool disabled = portablekit::env("SAS_NO_ENV") != nullptr;
     return disabled;
 }
 
 [[nodiscard]] bool tracing() {
-    static const bool enabled = std::getenv("MHP3RD_TRACE_AUDIO") != nullptr;
+    static const bool enabled = portablekit::env("TRACE_AUDIO") != nullptr;
     return enabled;
 }
 

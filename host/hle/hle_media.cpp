@@ -2,6 +2,7 @@
 // timing and callbacks behaving like hardware (vblank-paced input reads, GE
 // list completion callbacks, blocking audio output); the drawing and the
 // mixing themselves live under gpu/ and audio/.
+#include "../profile.hpp"
 #include "hle_common.hpp"
 
 #include "overlays.hpp"
@@ -194,9 +195,9 @@ void present_frame(Runtime &rt) {
     perf::end_frame(kernel().now_us());
 
     // Optional frame capture, independent of the window.
-    static const char *screenshot_dir = std::getenv("MHP3RD_SCREENSHOT_DIR");
+    static const char *screenshot_dir = portablekit::env("SCREENSHOT_DIR");
     static const std::uint64_t screenshot_every = [] {
-        const char *text = std::getenv("MHP3RD_SCREENSHOT_EVERY");
+        const char *text = portablekit::env("SCREENSHOT_EVERY");
         return text != nullptr ? std::strtoull(text, nullptr, 10) : 60ull;
     }();
     if (screenshot_dir != nullptr && screenshot_every != 0u &&
@@ -261,7 +262,7 @@ void register_display_ctrl(HleRegistrar &hle) {
         media().ctrl_mode = arg(ctx, 0);
         // The mode is recorded but not acted on: the game subtracts 128 from Lx
         // unconditionally, so reporting the neutral 0x80 is right in both modes.
-        if (std::getenv("MHP3RD_TRACE_PAD") != nullptr && media().ctrl_mode != previous)
+        if (portablekit::env("TRACE_PAD") != nullptr && media().ctrl_mode != previous)
             std::cout << "[pad] sceCtrlSetSamplingMode " << media().ctrl_mode << "\n";
         kernel().finish(ctx, previous);
     });
@@ -571,8 +572,8 @@ gpu::VulkanRenderer *ensure_renderer() {
     static bool tried = false;
     if (tried) return active_renderer();
     tried = true;
-    if (std::getenv("MHP3RD_NO_RENDER") != nullptr) {
-        std::cout << "Renderer: disabled by MHP3RD_NO_RENDER\n";
+    if (portablekit::env("NO_RENDER") != nullptr) {
+        std::cout << "Renderer: disabled by <prefix>_NO_RENDER\n";
         return nullptr;
     }
     auto renderer = std::make_unique<gpu::VulkanRenderer>();
@@ -580,7 +581,7 @@ gpu::VulkanRenderer *ensure_renderer() {
     gpu::RendererConfig config;
     // Tells windows apart when several instances run side by side, e.g. two
     // players testing ad hoc play on one machine.
-    if (const char *title = std::getenv("MHP3RD_WINDOW_TITLE"); title != nullptr && *title != '\0')
+    if (const char *title = portablekit::env("WINDOW_TITLE"); title != nullptr && *title != '\0')
         config.title = title;
     if (!renderer->initialize(config, error)) {
         std::cerr << "Renderer: unavailable (" << error << "); running headless\n";

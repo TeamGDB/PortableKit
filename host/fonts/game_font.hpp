@@ -7,10 +7,10 @@
 // The font the game's text is drawn with. The PSP's system fonts live in the
 // console's flash, which a dumped disc does not contain, so sceLibFont glyphs
 // are rasterised from a TrueType or OpenType font on the host: the player's
-// choice (settings text.font, or MHP3RD_FONT), with a Japanese system font as
+// choice (settings text.font, or <prefix>_FONT), with a Japanese system font as
 // the fallback for every glyph the chosen font lacks.
 //
-// How the game uses the glyphs, traced with MHP3RD_TRACE_FONT=1:
+// How the game uses the glyphs, traced with <prefix>_TRACE_FONT=1:
 //
 // - It reads the font info once and sizes a glyph cell from the maximum glyph
 //   width and height, each rounded up to an even number. A texture atlas of

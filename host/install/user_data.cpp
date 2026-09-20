@@ -1,3 +1,4 @@
+#include "../profile.hpp"
 #include "install/user_data.hpp"
 
 #include "psprecomp/common.hpp"
@@ -14,8 +15,8 @@
 namespace portablekit::install {
 namespace {
 
-constexpr const char *kOrganization = "Yakumo";
-constexpr const char *kApplication = "MHP3rd";
+
+
 
 std::string trim(const std::string &text) {
     const auto first = text.find_first_not_of(" \t\r\n");
@@ -43,9 +44,9 @@ std::filesystem::path path_from_utf8(const std::string &text) {
 }
 
 std::filesystem::path user_data_directory() {
-    if (const char *dir = std::getenv("MHP3RD_DATA_DIR"); dir != nullptr && *dir != '\0') return path_from_utf8(dir);
+    if (const char *dir = portablekit::env("DATA_DIR"); dir != nullptr && *dir != '\0') return path_from_utf8(dir);
 #if defined(PORTABLEKIT_HAS_SDL)
-    char *pref = SDL_GetPrefPath(kOrganization, kApplication);
+    char *pref = SDL_GetPrefPath(portablekit::game().data_organization, portablekit::game().data_application);
     if (pref == nullptr) throw psprecomp::Error(std::string("Cannot determine the user data directory: ") + SDL_GetError());
     std::filesystem::path result = path_from_utf8(pref);
     SDL_free(pref);
@@ -61,8 +62,8 @@ std::filesystem::path user_data_directory() {
     base = environment_path("XDG_DATA_HOME");
     if (const auto home = environment_path("HOME"); base.empty() && !home.empty()) base = home / ".local" / "share";
 #endif
-    if (base.empty()) throw psprecomp::Error("Cannot determine the user data directory; set MHP3RD_DATA_DIR");
-    return base / kOrganization / kApplication;
+    if (base.empty()) throw psprecomp::Error(std::string("Cannot determine the user data directory; set ") + portablekit::env_name("DATA_DIR"));
+    return base / portablekit::game().data_organization / portablekit::game().data_application;
 #endif
 }
 
@@ -87,7 +88,8 @@ void write_settings_file(const std::filesystem::path &data_dir, const SettingsEn
     const std::filesystem::path partial = data_dir / (std::string(kSettingsFile) + ".part");
     {
         std::ofstream out(partial, std::ios::trunc);
-        out << "# Written by MHP3rdNative: the installer and the in-game menu (Esc, or L3+R3 on a gamepad).\n"
+        out << "# Written by " << portablekit::game().app_name
+            << ": the installer and the in-game menu (Esc, or L3+R3 on a gamepad).\n"
             << "# disc_image: the disc image to play from; a relative path is inside this directory.\n";
         for (const auto &[key, value] : entries) out << key << "=" << value << "\n";
         if (!out) throw psprecomp::Error("Cannot write " + path_to_utf8(partial));

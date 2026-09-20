@@ -1,25 +1,25 @@
 // Entry point of one overlay library, configured from the overlay's meta.txt by
 // the profile's CMakeLists.txt. Everything else in the library is psp_recomp
-// output carrying the @MHP3RD_OVERLAY_PREFIX@ symbol prefix.
-#define MHP3RD_OVERLAY_MODULE 1
+// output carrying the @PORTABLEKIT_OVERLAY_PREFIX@ symbol prefix.
+#define PORTABLEKIT_OVERLAY_MODULE 1
 #include "overlay_module.hpp"
 
 #include "psprecomp/runtime.hpp"
 
 namespace psprecomp {
-void register_@MHP3RD_OVERLAY_PREFIX@_functions(Runtime &runtime);
+void register_@PORTABLEKIT_OVERLAY_PREFIX@_functions(Runtime &runtime);
 }
 
 namespace {
 
-constexpr portablekit::OverlayModuleInfo kInfo{portablekit::kOverlayAbiVersion, @MHP3RD_OVERLAY_BASE@u,
-                                          @MHP3RD_OVERLAY_SIZE@u, @MHP3RD_OVERLAY_CODE_SIZE@u,
-                                          @MHP3RD_OVERLAY_HASH@ull, "@MHP3RD_OVERLAY_NAME@"};
+constexpr portablekit::OverlayModuleInfo kInfo{portablekit::kOverlayAbiVersion, @PORTABLEKIT_OVERLAY_BASE@u,
+                                          @PORTABLEKIT_OVERLAY_SIZE@u, @PORTABLEKIT_OVERLAY_CODE_SIZE@u,
+                                          @PORTABLEKIT_OVERLAY_HASH@ull, "@PORTABLEKIT_OVERLAY_NAME@"};
 
 } // namespace
 
-const portablekit::OverlayModuleInfo *mhp3rd_overlay_info() { return &kInfo; }
+const portablekit::OverlayModuleInfo *portablekit_overlay_info() { return &kInfo; }
 
-void mhp3rd_register_overlay(psprecomp::Runtime &runtime) {
-    psprecomp::register_@MHP3RD_OVERLAY_PREFIX@_functions(runtime);
+void portablekit_register_overlay(psprecomp::Runtime &runtime) {
+    psprecomp::register_@PORTABLEKIT_OVERLAY_PREFIX@_functions(runtime);
 }

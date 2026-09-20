@@ -2,6 +2,7 @@
 // each change applies at once and is saved to settings.ini straight away. It
 // pauses the game, or, as the settings say, stays over the running game.
 
+#include "../profile.hpp"
 #include "ui/ui.hpp"
 
 #include "ui/font_menu.hpp"
@@ -16,7 +17,7 @@
 #include "adhoc/session.hpp"
 #include "audio/audio_sink.hpp"
 #include "gpu/vulkan_renderer.hpp"
-#include "install/game_identity.hpp"
+#include "profile.hpp"
 #include "install/installer.hpp"
 #include "install/user_data.hpp"
 #include "perf/frame_stats.hpp"
@@ -56,7 +57,7 @@ constexpr double kHintSeconds = 12.0;
 // The longest hunter name the game takes: its name buffer holds 12
 // characters and a terminator.
 constexpr std::size_t kHunterNameLength = 12u;
-// Resolutions the menu offers. MHP3RD_INTERNAL_SCALE goes up to 8, but a
+// Resolutions the menu offers. <prefix>_INTERNAL_SCALE goes up to 8, but a
 // setting that runs out of video memory would fail on every start.
 constexpr int kMenuMaxInternalScale = 6;
 
@@ -145,7 +146,7 @@ bool Menu::frame() {
     const bool font_list_was_open = (tab_ == 0 && font_list_open()) || (tab_ == 4 && save_screen_open());
     back_ = back || pad_back;
 
-    begin_panel("##menu", "Yakumo", paused_ ? "Paused" : "Running", true);
+    begin_panel("##menu", portablekit::game().project_name, paused_ ? "Paused" : "Running", true);
     static const char *const kTabs[] = {"Video", "Audio", "Controls", "Network", "System"};
     const bool switched = tab_bar(kTabs, 5, tab_) || first_frame_;
     first_frame_ = false;
@@ -287,7 +288,7 @@ void Menu::video() {
     }
     font_rows();
     ImGui::Dummy({0.0f, font_gap()});
-    if (button_row("Restore video defaults", {false, {}, "Every setting on this page back to how Yakumo ships."})) {
+    if (button_row("Restore video defaults", {false, {}, std::string("Every setting on this page back to how ") + portablekit::game().project_name + " ships."})) {
         const settings::Settings &d = settings::defaults();
         const auto restore = [&](const char *key, auto &value, const auto &fallback) {
             if (settings::overridden_by(key) == nullptr) value = fallback;
@@ -321,7 +322,7 @@ void Menu::audio() {
         RowOptions options = options_for(key, description);
         if (!device) {
             options.disabled = true;
-            options.note = std::getenv("MHP3RD_NO_AUDIO") != nullptr ? "Off: MHP3RD_NO_AUDIO" : "No audio device";
+            options.note = portablekit::env("NO_AUDIO") != nullptr ? "Off: <prefix>_NO_AUDIO" : "No audio device";
         }
         return options;
     };
@@ -550,7 +551,7 @@ void Menu::controls() {
     }};
     for (const auto &[key, button] : kKeys) info_row(key, button);
     ImGui::Dummy({0.0f, font_gap()});
-    if (button_row("Restore control defaults", {false, {}, "Every gamepad and name setting back to how Yakumo ships."})) {
+    if (button_row("Restore control defaults", {false, {}, std::string("Every gamepad and name setting back to how ") + portablekit::game().project_name + " ships."})) {
         const settings::Settings &d = settings::defaults();
         const auto restore = [&](const char *key, auto &value, const auto &fallback) {
             if (settings::overridden_by(key) == nullptr) value = fallback;
@@ -619,10 +620,10 @@ std::string traffic_text(const adhoc::Traffic &t) {
            std::to_string(t.packets_out) + " (" + format_bytes(t.bytes_out) + ")";
 }
 
-// The on-screen network overlay (menu: Network, or MHP3RD_ADHOC_OVERLAY).
+// The on-screen network overlay (menu: Network, or <prefix>_ADHOC_OVERLAY).
 bool &network_overlay() {
     static bool shown = [] {
-        const char *text = std::getenv("MHP3RD_ADHOC_OVERLAY");
+        const char *text = portablekit::env("ADHOC_OVERLAY");
         return text != nullptr && *text != '\0' && std::string(text) != "0";
     }();
     return shown;
@@ -817,7 +818,7 @@ void Menu::network() {
                    {false, {}, "A small panel over the game with the connection, the group and the traffic."}))
         network_overlay() = !network_overlay();
     if (toggle_row("Log every call and packet", adhoc::Client::tracing(),
-                   {false, {}, "The same as MHP3RD_TRACE_ADHOC=1: every ad hoc call and packet header goes to the "
+                   {false, {}, "The same as <prefix>_TRACE_ADHOC=1: every ad hoc call and packet header goes to the "
                                "console and to the network log. Busy; for finding a problem."}))
         adhoc::Client::set_tracing(!adhoc::Client::tracing());
     if (button_row("Save network log",
@@ -892,14 +893,14 @@ void Menu::system() {
         s.menu_pause_multiplayer = !s.menu_pause_multiplayer;
         settings::save();
     }
-    if (button_row("Open the data folder", {false, {}, "Show Yakumo's data folder in the file manager."})) {
+    if (button_row("Open the data folder", {false, {}, std::string("Show ") + portablekit::game().project_name + "'s data folder in the file manager."})) {
         if (!SDL_OpenURL(file_url(data_dir).c_str()))
             std::cout << "[menu] cannot open " << data_dir << ": " << SDL_GetError() << "\n";
     }
     if (button_row("Set up game data again…",
                    {false, {}, "Choose the disc image again, for example after moving it. The game closes first."}))
         confirm_ = Confirm::Setup;
-    if (button_row("Quit game", {false, {}, "Close Yakumo. Progress since your last save is lost."},
+    if (button_row("Quit game", {false, {}, std::string("Close ") + portablekit::game().project_name + ". Progress since your last save is lost."},
                    colors::kDanger))
         confirm_ = Confirm::Quit;
 
@@ -907,8 +908,8 @@ void Menu::system() {
     save_rows();
 
     section("About");
-    info_row("Yakumo", std::string(kBuildVersion));
-    info_row("Game", std::string(install::kGameTitle) + " (" + install::kDiscIdDisplay + ")");
+    info_row(portablekit::game().project_name, std::string(kBuildVersion));
+    info_row("Game", std::string(portablekit::game().game_title) + " (" + portablekit::game().disc_id_display + ")");
     info_row("Data folder", data_dir);
     if (!savedata::memory_stick().empty())
         info_row("Saves folder", install::path_to_utf8(savedata::memory_stick() / "PSP" / "SAVEDATA"));
@@ -935,7 +936,7 @@ bool Menu::confirm_dialog() {
         const bool quit = confirm_ == Confirm::Quit;
         heading(quit ? "Quit the game?" : "Set up game data again?");
         paragraph(quit ? "Progress since your last save is lost."
-                       : "Yakumo closes the game and opens the setup, where you choose the disc image again. "
+                       : std::string(portablekit::game().project_name) + " closes the game and opens the setup, where you choose the disc image again. "
                          "Progress since your last save is lost.",
                   colors::kTextDim);
         ImGui::Dummy({0.0f, font * 0.6f});

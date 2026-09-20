@@ -2,6 +2,7 @@
 // save-data dialog is in hle_savedata.cpp. The keyboard opens the port's own
 // (host/ui/text_input.hpp); the message dialog draws nothing yet and answers
 // the way a player confirming it would.
+#include "../profile.hpp"
 #include "hle_common.hpp"
 #include "utility_dialog.hpp"
 
@@ -24,7 +25,7 @@ namespace portablekit {
 namespace {
 
 // The on-screen keyboard's parameters, as the game's requests show them
-// (MHP3RD_TRACE_OSK): the common dialog header, then at 0x30 the number of
+// (<prefix>_TRACE_OSK): the common dialog header, then at 0x30 the number of
 // fields, at 0x34 the address of the first, and at 0x38 a state word the
 // keyboard keeps. Each field describes one text box.
 namespace osk {
@@ -72,11 +73,11 @@ OskState &osk_state() {
     return state;
 }
 
-// MHP3RD_TRACE_OSK: every call of the keyboard utility, with the words of
+// <prefix>_TRACE_OSK: every call of the keyboard utility, with the words of
 // its parameter block and of the first field, so their layout is read off the
 // game rather than recalled.
 bool trace_osk() {
-    static const bool trace = std::getenv("MHP3RD_TRACE_OSK") != nullptr;
+    static const bool trace = portablekit::env("TRACE_OSK") != nullptr;
     return trace;
 }
 

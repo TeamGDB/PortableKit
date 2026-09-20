@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../profile.hpp"
 #include "ge_state.hpp"
 
 #include <cstdint>
@@ -30,7 +31,7 @@ struct PadState {
 };
 
 struct RendererConfig {
-    std::string title{"MHP3rdNative"};
+    std::string title{portablekit::game().app_name};
 };
 
 // Vulkan backend for the GE. Draw calls are rendered into an offscreen target
@@ -62,13 +63,13 @@ public:
     // Writes the framebuffer shown a frame or two ago back to guest VRAM, in
     // the guest's pixel format at 480x272, so game code that copies a frame
     // out of VRAM with the CPU or DMA finds the picture instead of stale
-    // bytes. Call once per frame before present(). MHP3RD_NO_FB_TEXTURES turns
+    // bytes. Call once per frame before present(). <prefix>_NO_FB_TEXTURES turns
     // it off along with sampling render targets as textures.
     void write_back_frame(GuestMemory &memory);
     // Before a GE block transfer reads guest memory: when `source` lies in a
     // framebuffer the renderer drew, finishes the work queued so far and
     // writes that framebuffer back to guest memory, so the copy gets the
-    // picture. Waits for the GPU. MHP3RD_NO_FB_TEXTURES turns it off.
+    // picture. Waits for the GPU. <prefix>_NO_FB_TEXTURES turns it off.
     void read_back_framebuffer(std::uint32_t source, GuestMemory &memory);
     // Ends the frame and shows the target the guest just flipped to. Draws go to
     // a separate offscreen target per guest framebuffer address, so only the

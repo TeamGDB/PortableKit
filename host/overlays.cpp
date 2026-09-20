@@ -4,6 +4,7 @@
 // identified by the size and hash of the dump it was generated from; on a
 // dispatch miss inside a slot the matching corpus replaces whatever was
 // registered there before.
+#include "profile.hpp"
 #include "overlays.hpp"
 
 #include "app_paths.hpp"
@@ -37,7 +38,7 @@ struct OverlayCorpus {
     std::uint32_t size{};
     std::uint32_t code_size{};
     std::uint64_t hash{};
-    decltype(&mhp3rd_register_overlay) install{};
+    decltype(&portablekit_register_overlay) install{};
 };
 
 std::vector<OverlayCorpus> &overlay_corpora() {
@@ -108,9 +109,10 @@ std::uint64_t header_hash(const psprecomp::GuestMemory &memory, std::uint32_t ba
 
 // Slot containing `address`, or {0, 0}.
 std::pair<std::uint32_t, std::uint32_t> slot_of(std::uint32_t address) {
-    for (std::size_t i = 0; i + 1u < std::size(kOverlaySlots); ++i) {
-        if (address >= kOverlaySlots[i] && address < kOverlaySlots[i + 1u])
-            return {kOverlaySlots[i], kOverlaySlots[i + 1u]};
+    const std::span<const std::uint32_t> slots = game().overlay_slots;
+    for (std::size_t i = 0; i + 1u < slots.size(); ++i) {
+        if (address >= slots[i] && address < slots[i + 1u])
+            return {slots[i], slots[i + 1u]};
     }
     return {0u, 0u};
 }
@@ -127,7 +129,7 @@ std::map<std::uint32_t, std::uint64_t> &installed_headers() {
 }
 
 std::filesystem::path overlay_directory() {
-    if (const char *dir = std::getenv("MHP3RD_OVERLAY_DIR"); dir != nullptr && *dir != '\0') return dir;
+    if (const char *dir = portablekit::env("OVERLAY_DIR"); dir != nullptr && *dir != '\0') return dir;
     const std::filesystem::path directory = executable_directory();
     if (directory.empty()) return "overlays";
     return directory / "overlays";
@@ -172,10 +174,10 @@ void load_overlay_library(const std::filesystem::path &path) {
         std::cerr << "[overlay] cannot load " << path.filename().string() << ": " << library_error() << "\n";
         return;
     }
-    const auto info_of = reinterpret_cast<decltype(&mhp3rd_overlay_info)>(
-        library_symbol(handle, "mhp3rd_overlay_info"));
-    const auto install = reinterpret_cast<decltype(&mhp3rd_register_overlay)>(
-        library_symbol(handle, "mhp3rd_register_overlay"));
+    const auto info_of = reinterpret_cast<decltype(&portablekit_overlay_info)>(
+        library_symbol(handle, "portablekit_overlay_info"));
+    const auto install = reinterpret_cast<decltype(&portablekit_register_overlay)>(
+        library_symbol(handle, "portablekit_register_overlay"));
     if (info_of == nullptr || install == nullptr) {
         std::cerr << "[overlay] " << path.filename().string() << " is not an overlay library\n";
         return;
@@ -208,10 +210,10 @@ void load_overlay_libraries() {
 
 // Writes the loaded image next to the other dumps so the corpus can be built.
 void dump_slot(const psprecomp::GuestMemory &memory, std::uint32_t slot_start, std::uint32_t slot_end) {
-    const char *directory = std::getenv("MHP3RD_DUMP_OVERLAYS");
+    const char *directory = portablekit::env("DUMP_OVERLAYS");
     if (directory == nullptr) {
         log_once("overlay-dump-hint",
-                 "[overlay] set MHP3RD_DUMP_OVERLAYS=<dir> to dump the loaded overlay for recompilation");
+                 "[overlay] set <prefix>_DUMP_OVERLAYS=<dir> to dump the loaded overlay for recompilation");
         return;
     }
     std::vector<std::uint8_t> image;

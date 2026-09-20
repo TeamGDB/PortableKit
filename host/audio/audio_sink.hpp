@@ -25,7 +25,7 @@ class AudioSink {
 public:
     static AudioSink &instance();
 
-    // Opens the device. Safe to call more than once; honours MHP3RD_NO_AUDIO.
+    // Opens the device. Safe to call more than once; honours <prefix>_NO_AUDIO.
     void initialize();
     void shutdown();
 
@@ -36,12 +36,12 @@ public:
              std::uint32_t left_volume, std::uint32_t right_volume);
 
     // Output gain in 0..1, from the volume and mute settings. Only the device
-    // output is scaled; MHP3RD_AUDIO_DUMP keeps the game's own levels.
+    // output is scaled; <prefix>_AUDIO_DUMP keeps the game's own levels.
     void set_volume(float gain);
     // Stops and restarts the device, for the in-game menu's pause. What the
     // game queued before the pause stays in the ring and plays on resume.
     void set_paused(bool paused);
-    // Whether a playback device is open (not with MHP3RD_NO_AUDIO, or when
+    // Whether a playback device is open (not with <prefix>_NO_AUDIO, or when
     // none could be opened).
     [[nodiscard]] bool has_device() const;
 

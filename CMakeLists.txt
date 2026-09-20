@@ -1,5 +1,11 @@
 cmake_minimum_required(VERSION 3.20)
-project(PSPRecomp VERSION 0.1.0 LANGUAGES CXX)
+# A game's own repository adds this directory and then calls
+# portablekit_add_game(); building this directory on its own gives the
+# recompiler, the tools and the framework's tests, which is what a framework
+# change is checked with.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    project(PortableKit VERSION 0.1.0 LANGUAGES CXX)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -7,6 +13,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include(cmake/BuildLock.cmake)
+include(cmake/PortableKit.cmake)
 
 # A compiler cache turns a lost .ninja_deps, a clean or a regenerated corpus
 # into seconds of cache hits instead of a full rebuild of the generated units.
@@ -43,8 +50,6 @@ endif()
 set_property(GLOBAL APPEND PROPERTY JOB_POOLS psprecomp_generated=${PSPRECOMP_GENERATED_JOBS})
 
 option(PSPRECOMP_BUILD_TESTS "Build reusable PSPRecomp tests" ON)
-option(PSPRECOMP_BUILD_PROFILE_TESTS "Build tests supplied by the selected profile" ON)
-set(PSPRECOMP_PROFILE "" CACHE STRING "Profile to build from profiles/<name>; empty builds only the framework")
 
 set(PSPRECOMP_GENERATED_OPT_LEVEL "2" CACHE STRING
     "Optimization level for generated AOT units (0, 1, 2 or 3)")
@@ -113,17 +118,17 @@ endif()
 # On Windows this also lets WINDOWS_EXPORT_ALL_SYMBOLS include runtime symbols
 # in the executable's import library for separately linked overlay modules.
 add_library(psprecomp_core OBJECT
-    src/decoder.cpp
-    src/deflate.cpp
-    src/elf32.cpp
-    src/guest_memory.cpp
-    src/interpreter.cpp
-    src/nid_registry.cpp
-    src/program_analysis.cpp
-    src/runtime.cpp
-    src/sha256.cpp
+    "${PORTABLEKIT_ROOT}/src/decoder.cpp"
+    "${PORTABLEKIT_ROOT}/src/deflate.cpp"
+    "${PORTABLEKIT_ROOT}/src/elf32.cpp"
+    "${PORTABLEKIT_ROOT}/src/guest_memory.cpp"
+    "${PORTABLEKIT_ROOT}/src/interpreter.cpp"
+    "${PORTABLEKIT_ROOT}/src/nid_registry.cpp"
+    "${PORTABLEKIT_ROOT}/src/program_analysis.cpp"
+    "${PORTABLEKIT_ROOT}/src/runtime.cpp"
+    "${PORTABLEKIT_ROOT}/src/sha256.cpp"
 )
-target_include_directories(psprecomp_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(psprecomp_core PUBLIC ${PORTABLEKIT_ROOT}/include)
 target_compile_definitions(psprecomp_core PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>)
 if(MSVC)
@@ -133,15 +138,15 @@ else()
     target_compile_options(psprecomp_core PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
 endif()
 
-add_executable(psp_analyze tools/analyzer_main.cpp)
+add_executable(psp_analyze "${PORTABLEKIT_ROOT}/tools/analyzer_main.cpp")
 target_link_libraries(psp_analyze PRIVATE psprecomp_core)
 target_compile_definitions(psp_analyze PRIVATE
-    PSPRECOMP_DEFAULT_NIDS_CSV="${CMAKE_CURRENT_SOURCE_DIR}/configs/nids.csv")
+    PSPRECOMP_DEFAULT_NIDS_CSV="${PORTABLEKIT_ROOT}/configs/nids.csv")
 
-add_executable(psp_recomp tools/codegen_main.cpp)
+add_executable(psp_recomp "${PORTABLEKIT_ROOT}/tools/codegen_main.cpp")
 target_link_libraries(psp_recomp PRIVATE psprecomp_core)
 
-add_executable(dump_function tools/dump_function.cpp)
+add_executable(dump_function "${PORTABLEKIT_ROOT}/tools/dump_function.cpp")
 target_link_libraries(dump_function PRIVATE psprecomp_core)
 
 function(psprecomp_enable_host_avx target)
@@ -156,7 +161,7 @@ endfunction()
 
 if(PSPRECOMP_BUILD_TESTS)
     enable_testing()
-    add_executable(psprecomp_tests tests/test_main.cpp)
+    add_executable(psprecomp_tests "${PORTABLEKIT_ROOT}/tests/test_main.cpp")
     target_link_libraries(psprecomp_tests PRIVATE psprecomp_core)
     add_dependencies(psprecomp_tests psp_recomp)
     target_compile_definitions(psprecomp_tests PRIVATE
@@ -164,10 +169,41 @@ if(PSPRECOMP_BUILD_TESTS)
     add_test(NAME psprecomp_tests COMMAND psprecomp_tests)
 endif()
 
-if(NOT PSPRECOMP_PROFILE STREQUAL "")
-    set(PSPRECOMP_PROFILE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/profiles/${PSPRECOMP_PROFILE}")
-    if(NOT EXISTS "${PSPRECOMP_PROFILE_DIR}/CMakeLists.txt")
-        message(FATAL_ERROR "Unknown PSPRecomp profile: ${PSPRECOMP_PROFILE}")
+# Save-data checks that need no game data: crypto test vectors and round trips,
+# and the ad hoc server against the client, a raw protocol peer and local
+# network discovery, all over the loopback address. Both link a stand-in
+# profile, because they exercise host code that asks the profile for names.
+if(PSPRECOMP_BUILD_TESTS)
+    add_executable(portablekit_savedata_tests
+        "${PORTABLEKIT_ROOT}/tests/savedata_tests.cpp"
+        "${PORTABLEKIT_ROOT}/tests/test_profile.cpp"
+        "${PORTABLEKIT_ROOT}/host/profile.cpp"
+        "${PORTABLEKIT_ROOT}/host/save_data/aes128.cpp"
+        "${PORTABLEKIT_ROOT}/host/save_data/param_sfo.cpp"
+        "${PORTABLEKIT_ROOT}/host/save_data/savedata_crypto.cpp"
+        "${PORTABLEKIT_ROOT}/host/save_data/savedata_store.cpp"
+        "${PORTABLEKIT_ROOT}/host/save_data/save_transfer.cpp"
+        "${PORTABLEKIT_ROOT}/third_party/tiny_aes/aes.c")
+    set_source_files_properties("${PORTABLEKIT_ROOT}/third_party/tiny_aes/aes.c" PROPERTIES LANGUAGE CXX)
+    target_include_directories(portablekit_savedata_tests PRIVATE
+        "${PORTABLEKIT_ROOT}/host" "${PORTABLEKIT_ROOT}/third_party" "${PORTABLEKIT_ROOT}/include")
+    set_target_properties(portablekit_savedata_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME portablekit_savedata_tests COMMAND portablekit_savedata_tests)
+
+    add_executable(portablekit_adhoc_tests
+        "${PORTABLEKIT_ROOT}/tests/adhoc_tests.cpp"
+        "${PORTABLEKIT_ROOT}/tests/test_profile.cpp"
+        "${PORTABLEKIT_ROOT}/host/profile.cpp"
+        "${PORTABLEKIT_ROOT}/host/adhoc/client.cpp"
+        "${PORTABLEKIT_ROOT}/host/adhoc/discovery.cpp"
+        "${PORTABLEKIT_ROOT}/host/adhoc/server.cpp")
+    target_include_directories(portablekit_adhoc_tests PRIVATE
+        "${PORTABLEKIT_ROOT}/host" "${PORTABLEKIT_ROOT}/include")
+    find_package(Threads REQUIRED)
+    target_link_libraries(portablekit_adhoc_tests PRIVATE Threads::Threads)
+    if(WIN32)
+        target_link_libraries(portablekit_adhoc_tests PRIVATE ws2_32 iphlpapi)
     endif()
-    add_subdirectory("${PSPRECOMP_PROFILE_DIR}" "profiles/${PSPRECOMP_PROFILE}")
+    set_target_properties(portablekit_adhoc_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME portablekit_adhoc_tests COMMAND portablekit_adhoc_tests)
 endif()

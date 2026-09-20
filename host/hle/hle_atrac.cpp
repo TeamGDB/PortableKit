@@ -8,6 +8,7 @@
 // sample the encoder was given. The decoded stream starts earlier, by the
 // encoder delay recorded in the `fact` chunk plus the decoder's own delay, and
 // loop points in the `smpl` chunk are counted including the encoder delay.
+#include "../profile.hpp"
 #include "hle_common.hpp"
 
 #include "audio/atrac_decoder.hpp"
@@ -50,7 +51,7 @@ constexpr std::int32_t kRemainAllDataOnMemory = -1;
 constexpr std::size_t kMaxAtracIds = 6u;
 
 bool trace_atrac() {
-    static const bool enabled = std::getenv("MHP3RD_TRACE_ATRAC") != nullptr;
+    static const bool enabled = portablekit::env("TRACE_ATRAC") != nullptr;
     return enabled;
 }
 

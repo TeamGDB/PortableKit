@@ -1,3 +1,4 @@
+#include "../profile.hpp"
 #include "hle_common.hpp"
 
 #include "psprecomp/common.hpp"
@@ -56,13 +57,13 @@ bool HleRegistrar::bound(const std::string &library, std::uint32_t nid) const {
 }
 
 bool trace_sync() {
-    static const bool enabled = std::getenv("MHP3RD_TRACE_SYNC") != nullptr;
+    static const bool enabled = portablekit::env("TRACE_SYNC") != nullptr;
     return enabled;
 }
 
 void log_sync(const std::string &message) {
     static std::uint64_t remaining = [] {
-        const char *limit = std::getenv("MHP3RD_TRACE_SYNC_LIMIT");
+        const char *limit = portablekit::env("TRACE_SYNC_LIMIT");
         return limit != nullptr ? std::strtoull(limit, nullptr, 10) : 4000ull;
     }();
     if (remaining == 0u) return;

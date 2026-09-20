@@ -25,7 +25,7 @@ struct Identity {
     std::string server;    // host name or address, optionally host:port for adhocctl
     std::string nickname;
     Mac mac{};
-    std::string product;   // the game's product code, for example ULJM05800
+    std::string product;   // the game's product code, e.g. "ULJM05800"
 };
 
 // What the game sees of the matchmaking service.
@@ -202,7 +202,7 @@ public:
     void note_timeout();
 
     // Every call and packet header is logged to the console and to the log
-    // buffer while this is on. MHP3RD_TRACE_ADHOC sets it at start.
+    // buffer while this is on. <prefix>_TRACE_ADHOC sets it at start.
     [[nodiscard]] static bool tracing();
     static void set_tracing(bool enabled);
     // Adds a line to the log buffer, and to the console when `print` is set or

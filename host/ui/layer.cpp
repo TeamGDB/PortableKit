@@ -1,3 +1,4 @@
+#include "../profile.hpp"
 #include "ui/layer.hpp"
 
 #include "app_paths.hpp"
@@ -71,9 +72,9 @@ bool exists(const char *path) {
 
 void load_fonts() {
     ImGuiIO &io = ImGui::GetIO();
-    const char *text_font = std::getenv("MHP3RD_UI_FONT");
+    const char *text_font = portablekit::env("UI_FONT");
     if (text_font != nullptr && !exists(text_font)) {
-        std::cout << "[ui] MHP3RD_UI_FONT " << text_font << " not found\n";
+        std::cout << "[ui] <prefix>_UI_FONT " << text_font << " not found\n";
         text_font = nullptr;
     }
     for (const char *candidate : kTextFonts) {

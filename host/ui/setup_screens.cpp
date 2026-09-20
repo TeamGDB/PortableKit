@@ -10,7 +10,7 @@
 #include "ui/widgets.hpp"
 
 #include "hle/hle_common.hpp"
-#include "install/game_identity.hpp"
+#include "profile.hpp"
 #include "install/installer.hpp"
 #include "install/user_data.hpp"
 #include "settings/settings.hpp"
@@ -96,14 +96,14 @@ bool SetupScreens::introduce(const fs::path &data_dir) {
                 answer = 2;
                 return false;
             }
-            begin_panel("##welcome", "Welcome to Yakumo", kSubtitle, false);
+            begin_panel("##welcome", std::string("Welcome to ") + portablekit::game().project_name, kSubtitle, false);
             begin_content();
             ImGui::Dummy({0.0f, font() * 0.3f});
-            paragraph(std::string("Yakumo plays ") + install::kGameTitle +
+            paragraph(std::string(portablekit::game().project_name) + " plays " + portablekit::game().game_title +
                       " from your own copy of the game. It needs the disc image of the game's PSP disc, " +
-                      install::kDiscIdDisplay + ", as an .iso file: the PlayStation 3 release carries it.");
+                      portablekit::game().disc_id_display + ", as an .iso file: the PlayStation 3 release carries it.");
             ImGui::Dummy({0.0f, font() * 0.4f});
-            paragraph("Choose the image next. Yakumo checks that it is the right release, prepares the game from it "
+            paragraph(std::string("Choose the image next. ") + portablekit::game().project_name + " checks that it is the right release, prepares the game from it "
                       "and, unless you choose otherwise, copies it into its data folder so the game keeps working if "
                       "the original is moved or deleted. Nothing is downloaded.",
                       colors::kTextDim);
@@ -117,7 +117,8 @@ bool SetupScreens::introduce(const fs::path &data_dir) {
             first = false;
             ImGui::Dummy({0.0f, font() * 0.4f});
             paragraph("You can also drop the .iso file onto this window.", colors::kTextDim);
-            layer.set_description("Monster Hunter Portable 3rd HD Ver. (NPJB-40001) is the only release supported.");
+            layer.set_description(std::string(portablekit::game().game_title) + " (" + portablekit::game().disc_id_display +
+                                  ") is the only release supported.");
             begin_footer();
             hints({{Control::Confirm, "Select"}, {Control::Back, "Quit"}});
             end_panel();
@@ -147,7 +148,7 @@ std::optional<fs::path> SetupScreens::choose_image() {
             begin_panel("##browser", "Choose the disc image", kSubtitle, false);
             begin_content();
             const FileBrowser::Result result = browser.frame(back || pad_back);
-            layer.set_description(std::string("Look for the .iso image of ") + install::kDiscIdDisplay +
+            layer.set_description(std::string("Look for the .iso image of ") + portablekit::game().disc_id_display +
                                   ". Removable drives and SD cards are listed next to Home.");
             begin_footer();
             if (layer.input_device() == InputDevice::Gamepad)
@@ -183,7 +184,7 @@ std::optional<install::ImageStorage> SetupScreens::choose_storage(const fs::path
             if (ImGui::IsKeyPressed(cancel, false)) return false;
             begin_panel("##storage", "Disc image found", kSubtitle, false);
             begin_content();
-            paragraph(std::string(install::kGameTitle) + " (" + install::kDiscIdDisplay + "), " +
+            paragraph(std::string(portablekit::game().game_title) + " (" + portablekit::game().disc_id_display + "), " +
                           human_size(info.size_bytes) + ". It passed its checks.",
                       colors::kGood);
             ImGui::Dummy({0.0f, font() * 0.2f});
@@ -199,21 +200,21 @@ std::optional<install::ImageStorage> SetupScreens::choose_storage(const fs::path
                                    human_size(*space) + " is free in the data folder.";
             RowOptions copy_options{!room, {}, {}};
             if (first && room) focus_next_row();
-            if (button_row("Copy it into Yakumo's data folder", copy_options)) choice = install::ImageStorage::Copy;
+            if (button_row((std::string("Copy it into ") + portablekit::game().project_name + "'s data folder").c_str(), copy_options)) choice = install::ImageStorage::Copy;
             ImGui::Indent(std::round(16.0f * layer.scale()));
             paragraph(copy_note, room ? colors::kTextDim : colors::kDanger);
             ImGui::Unindent(std::round(16.0f * layer.scale()));
             ImGui::Dummy({0.0f, font() * 0.4f});
             const std::string place_note =
                 "Saves " + human_size(info.size_bytes) + ". The image must then stay where it is; if it moves, "
-                "Yakumo asks you to set up again.";
+                std::string(portablekit::game().project_name) + " asks you to set up again.";
             if (first && !room) focus_next_row();
             if (button_row("Use it where it is")) choice = install::ImageStorage::InPlace;
             ImGui::Indent(std::round(16.0f * layer.scale()));
             paragraph(place_note, colors::kTextDim);
             ImGui::Unindent(std::round(16.0f * layer.scale()));
             first = false;
-            layer.set_description("Either way, the game's executable is prepared from the image into Yakumo's data "
+            layer.set_description(std::string("Either way, the game's executable is prepared from the image into ") + portablekit::game().project_name + "'s data "
                                   "folder.");
             begin_footer();
             hints({{Control::Confirm, "Continue"}, {Control::Back, "Choose another file"}});
@@ -338,8 +339,8 @@ bool SetupScreens::offer_retry(const std::string &message) {
             ImGui::Dummy({0.0f, font() * 0.8f});
             answer = button_pair("Choose another file", "Quit", first);
             first = false;
-            layer.set_description(std::string("Yakumo supports only ") + install::kGameTitle + ", " +
-                                  install::kDiscIdDisplay + ", as an unmodified, uncompressed .iso image.");
+            layer.set_description(std::string(portablekit::game().project_name) + " supports only " + portablekit::game().game_title + ", " +
+                                  portablekit::game().disc_id_display + ", as an unmodified, uncompressed .iso image.");
             begin_footer();
             hints({{Control::Confirm, "Select"}, {Control::Back, "Quit"}});
             end_panel();
@@ -359,7 +360,7 @@ void SetupScreens::finished(const fs::path &data_dir) {
             ImGui::Dummy({0.0f, font() * 0.5f});
             paragraph("The game is ready. Later starts go straight to it.", colors::kGood);
             ImGui::Dummy({0.0f, font() * 0.3f});
-            paragraph("In the game, Esc or L3+R3 (both sticks pressed) opens Yakumo's menu, with the settings and the "
+            paragraph(std::string("In the game, Esc or L3+R3 (both sticks pressed) opens ") + portablekit::game().project_name + "'s menu, with the settings and the "
                       "way back to this setup.",
                       colors::kTextDim);
             ImGui::Dummy({0.0f, font() * 0.3f});

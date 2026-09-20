@@ -8,8 +8,8 @@ namespace portablekit {
 
 // Loads the overlay libraries and installs the dispatch-miss hook that
 // recognises the overlay currently in a slot and registers its recompiled
-// corpus. The libraries are read from MHP3RD_OVERLAY_DIR, or from overlays/
-// next to the executable. With MHP3RD_DUMP_OVERLAYS set, an unknown overlay is
+// corpus. The libraries are read from PORTABLEKIT_OVERLAY_DIR, or from overlays/
+// next to the executable. With <prefix>_DUMP_OVERLAYS set, an unknown overlay is
 // written out instead so it can be recompiled.
 void install_overlay_support(psprecomp::Runtime &runtime);
 

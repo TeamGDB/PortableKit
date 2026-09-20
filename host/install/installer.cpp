@@ -3,7 +3,7 @@
 #include "app_paths.hpp"
 
 #include "install/executable_preparation.hpp"
-#include "install/game_identity.hpp"
+#include "profile.hpp"
 #include "install/user_data.hpp"
 
 #include "kernel/iso_image.hpp"
@@ -85,14 +85,14 @@ Inspection inspect(const std::filesystem::path &path) {
     const std::string name = display_name(path);
     std::error_code ec;
     if (!std::filesystem::is_regular_file(path, ec))
-        throw InstallError("\"" + path_to_utf8(path) + "\" is not a file Yakumo can open.");
+        throw InstallError("\"" + path_to_utf8(path) + "\" is not a file " + std::string(portablekit::game().project_name) + " can open.");
     {
         std::ifstream in(path, std::ios::binary);
         std::array<char, 4> magic{};
         if (!in.read(magic.data(), magic.size()))
             throw InstallError("\"" + name + "\" is empty or cannot be read.");
         if (std::memcmp(magic.data(), "CISO", 4u) == 0 || std::memcmp(magic.data(), "ZISO", 4u) == 0)
-            throw InstallError("\"" + name + "\" is a compressed image. Yakumo needs an uncompressed .iso image of the "
+            throw InstallError("\"" + name + "\" is a compressed image. " + std::string(portablekit::game().project_name) + " needs an uncompressed .iso image of the "
                                "disc; decompress it first.");
     }
 
@@ -100,45 +100,42 @@ Inspection inspect(const std::filesystem::path &path) {
     try {
         iso.emplace(path);
     } catch (const std::exception &) {
-        throw InstallError("\"" + name + "\" is not a disc image Yakumo can read. Choose an uncompressed .iso image "
+        throw InstallError("\"" + name + "\" is not a disc image " + std::string(portablekit::game().project_name) + " can read. Choose an uncompressed .iso image "
                            "of the game's PSP disc.");
     }
 
-    const auto sfo_entry = iso->find(kParamSfoPathOnDisc);
+    const auto sfo_entry = iso->find(portablekit::game().param_sfo_path_on_disc);
     if (!sfo_entry || sfo_entry->directory) {
         if (iso->find("PS3_GAME/PARAM.SFO"))
-            throw InstallError("\"" + name + "\" is a PlayStation 3 disc image. Yakumo needs the PSP disc image of " +
-                               kGameTitle + ": an .iso whose top level holds a PSP_GAME folder.");
+            throw InstallError("\"" + name + "\" is a PlayStation 3 disc image. " + std::string(portablekit::game().project_name) + " needs the PSP disc image of " +
+                               portablekit::game().game_title + ": an .iso whose top level holds a PSP_GAME folder.");
         throw InstallError("\"" + name + "\" is not a PSP game disc image: it has no PSP_GAME/PARAM.SFO.");
     }
     const auto sfo = parse_sfo(read_file(*iso, *sfo_entry));
     const auto disc_id = sfo.find("DISC_ID");
     if (disc_id == sfo.end())
-        throw InstallError("\"" + name + "\" has no disc id in PSP_GAME/PARAM.SFO, so it is not an image Yakumo "
+        throw InstallError("\"" + name + "\" has no disc id in PSP_GAME/PARAM.SFO, so it is not an image " + std::string(portablekit::game().project_name) + " "
                            "supports.");
-    if (disc_id->second != kDiscId) {
+    if (disc_id->second != portablekit::game().disc_id) {
         const auto title = sfo.find("TITLE");
         std::string what = "\"" + name + "\" is ";
         what += title != sfo.end() && !title->second.empty() ? title->second + " (" + disc_id->second + ")"
                                                               : "disc " + disc_id->second;
-        what += ". Yakumo supports only " + std::string(kGameTitle) + ", the Japanese release with disc id " +
-                kDiscIdDisplay + ".";
-        if (disc_id->second == "ULJM05800")
-            what += " This is the original PSP release of the game, which Yakumo does not support.";
-        else
-            what += " Other releases and regions are not supported.";
+        what += ". " + std::string(portablekit::game().project_name) + " supports only " + std::string(portablekit::game().game_title) + ", the Japanese release with disc id " +
+                portablekit::game().disc_id_display + ".";
+        what += " Other releases and regions are not supported.";
         throw InstallError(what);
     }
 
-    const auto eboot_entry = iso->find(kExecutablePathOnDisc);
+    const auto eboot_entry = iso->find(portablekit::game().executable_path_on_disc);
     if (!eboot_entry || eboot_entry->directory)
         throw InstallError("\"" + name + "\" has the right disc id but no PSP_GAME/SYSDIR/EBOOT.BIN. The image is "
                            "incomplete or modified; make it again from your disc.");
     Inspection result;
     result.eboot_bin = read_file(*iso, *eboot_entry);
-    if (psprecomp::sha256_bytes(result.eboot_bin) != kEncryptedExecutableSha256)
-        throw InstallError("\"" + name + "\" is " + kGameTitle + " (" + kDiscIdDisplay +
-                           "), but its executable is not the version Yakumo supports. The image may be patched, "
+    if (psprecomp::sha256_bytes(result.eboot_bin) != portablekit::game().encrypted_executable_sha256)
+        throw InstallError("\"" + name + "\" is " + portablekit::game().game_title + " (" + portablekit::game().disc_id_display +
+                           "), but its executable is not the version " + std::string(portablekit::game().project_name) + " supports. The image may be patched, "
                            "modified or damaged; make it again from an unmodified disc.");
     result.info.size_bytes = iso->size_bytes();
     return result;
@@ -338,11 +335,11 @@ int restart_for_setup(const char *program) {
     // The player asked for the setup: a game directory chosen for this run
     // would make --install skip it.
 #if defined(_WIN32)
-    _putenv_s("MHP3RD_GAME_DIR", "");
+    _putenv_s(env_name("GAME_DIR").c_str(), "");
     const intptr_t result = _execlp(program, program, "--install", nullptr);
     (void)result;
 #else
-    unsetenv("MHP3RD_GAME_DIR");
+    unsetenv(env_name("GAME_DIR").c_str());
     execlp(program, program, "--install", static_cast<char *>(nullptr));
 #endif
     std::cerr << "Cannot restart " << program << " for the setup; start it with --install\n";
