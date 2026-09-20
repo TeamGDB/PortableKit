@@ -41,6 +41,12 @@ struct OpenFile {
     std::uint64_t disc_offset{};  // absolute image offset of byte 0
     std::uint64_t size{};
     std::uint64_t position{};
+    // The raw disc device counts 2048-byte sectors, not bytes: a seek moves
+    // to a sector, a read asks for that many sectors and answers with how
+    // many it got. Everything else here counts bytes, so size and position
+    // are sectors for this one kind of handle and the conversion happens
+    // where the image is touched.
+    bool sector_units{};
     std::unique_ptr<std::fstream> host;
 };
 
@@ -127,7 +133,16 @@ std::int64_t open_file(const std::string &full_path, std::uint32_t flags) {
     if (split.device == Device::Disc) {
         if (!io().disc) return static_cast<std::int32_t>(io_error::kDeviceNotFound);
         if ((flags & kOpenWrite) != 0u) return static_cast<std::int32_t>(io_error::kReadOnly);
-        if (const auto lbn = parse_lbn_path(split.path)) {
+        if (split.path.empty()) {
+            // The device itself, with no path: the whole image as a stream of
+            // sectors, which is how a game reads the disc without going
+            // through the filesystem. This has to be tested before find(),
+            // because an empty path finds the root directory and the game
+            // then gets a directory handle where it wanted the disc.
+            file.kind = OpenFile::Kind::Disc;
+            file.sector_units = true;
+            file.size = io().disc->size_bytes() / IsoImage::kSectorSize;
+        } else if (const auto lbn = parse_lbn_path(split.path)) {
             file.kind = OpenFile::Kind::Disc;
             file.disc_offset = lbn->first * IsoImage::kSectorSize;
             file.size = lbn->second;
@@ -135,10 +150,6 @@ std::int64_t open_file(const std::string &full_path, std::uint32_t flags) {
             file.kind = entry->directory ? OpenFile::Kind::Directory : OpenFile::Kind::Disc;
             file.disc_offset = static_cast<std::uint64_t>(entry->lba) * IsoImage::kSectorSize;
             file.size = entry->size;
-        } else if (split.path.empty()) {
-            // Opening the device itself gives raw sector access.
-            file.kind = OpenFile::Kind::Disc;
-            file.size = io().disc->size_bytes();
         } else {
             return static_cast<std::int32_t>(io_error::kFileNotFound);
         }
@@ -243,25 +254,31 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
         const std::uint32_t address = arg(ctx, 1);
         std::uint32_t requested = arg(ctx, 2);
         std::vector<std::uint8_t> buffer;
+        std::uint32_t result = 0u;
         if (file.kind == OpenFile::Kind::Disc) {
             const std::uint64_t available = file.position < file.size ? file.size - file.position : 0u;
             requested = static_cast<std::uint32_t>(std::min<std::uint64_t>(requested, available));
-            buffer.resize(requested);
-            const std::size_t count = io().disc->read(file.disc_offset + file.position, buffer);
+            const std::uint64_t unit = file.sector_units ? IsoImage::kSectorSize : 1u;
+            buffer.resize(static_cast<std::size_t>(requested) * unit);
+            const std::size_t count = io().disc->read(file.disc_offset + file.position * unit, buffer);
             buffer.resize(count);
+            // A raw read answers in sectors, and a partial sector is not one.
+            result = static_cast<std::uint32_t>(count / unit);
         } else {
             buffer.resize(requested);
             file.host->clear();
             file.host->seekg(static_cast<std::streamoff>(file.position));
             file.host->read(reinterpret_cast<char *>(buffer.data()), requested);
             buffer.resize(static_cast<std::size_t>(file.host->gcount()));
+            result = static_cast<std::uint32_t>(buffer.size());
         }
         rt.memory().copy_in(address, buffer);
         if (trace_io())
-            std::cerr << "[io] read fd=" << arg(ctx, 0) << " " << file.path << " offset=" << file.position
-                      << " size=" << buffer.size() << " -> " << psprecomp::hex32(address) << "\n";
-        file.position += buffer.size();
-        kernel().finish(ctx, static_cast<std::uint32_t>(buffer.size()));
+            std::cerr << "[io] read fd=" << arg(ctx, 0) << " " << file.path
+                      << (file.sector_units ? " sector=" : " offset=") << file.position << " got=" << result
+                      << (file.sector_units ? " sectors" : " bytes") << " -> " << psprecomp::hex32(address) << "\n";
+        file.position += file.kind == OpenFile::Kind::Disc && file.sector_units ? result : buffer.size();
+        kernel().finish(ctx, result);
     });
     hle.add("IoFileMgrForUser", "sceIoWrite", [](Runtime &rt, AllegrexContext &ctx) {
         const std::uint32_t fd = arg(ctx, 0);
