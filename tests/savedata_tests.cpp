@@ -2,8 +2,8 @@
 // primitives against their published test vectors, PARAM.SFO round trips,
 // and the encryption, hashing and folder layout round trips.
 //
-//   mhp3rd_savedata_tests
-//   mhp3rd_savedata_tests --check <save folder> <data file name> <game key, 32 hex digits> [plaintext out]
+//   portablekit_savedata_tests
+//   portablekit_savedata_tests --check <save folder> <data file name> <game key, 32 hex digits> [plaintext out]
 //
 // The second form checks a save made elsewhere, for example one copied from
 // a PSP: the PARAM.SFO hashes, the data file's hash, and that the decrypted
@@ -185,7 +185,7 @@ void make_save(const std::filesystem::path &memory_stick, const std::string &gam
 
 void test_transfer() {
     namespace fs = std::filesystem;
-    const auto root = fs::temp_directory_path() / "mhp3rd_save_transfer_tests";
+    const auto root = fs::temp_directory_path() / "portablekit_save_transfer_tests";
     fs::remove_all(root);
     const Block key = block("0102030405060708090a0b0c0d0e0f10");
     const Block wrong_key = block("f0e0d0c0b0a090807060504030201000");
