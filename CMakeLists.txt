@@ -216,7 +216,7 @@ endif()
 # catches them on its own. It is not a port: no renderer, no FFmpeg, no game,
 # and it is never meant to be run.
 if(PSPRECOMP_BUILD_TESTS)
-    set(_check_nids "${CMAKE_BINARY_DIR}/generated_nids/nid_table.inc")
+    set(_check_nids "${CMAKE_CURRENT_BINARY_DIR}/host_check_nids/nid_table.inc")
     add_custom_command(
         OUTPUT "${_check_nids}"
         COMMAND ${CMAKE_COMMAND} "-DINPUT=${PORTABLEKIT_ROOT}/configs/nids.csv" -DOUTPUT=${_check_nids}
@@ -239,7 +239,7 @@ if(PSPRECOMP_BUILD_TESTS)
     target_compile_features(portablekit_host_check PRIVATE cxx_std_20)
     target_include_directories(portablekit_host_check PRIVATE
         "${PORTABLEKIT_ROOT}/host" "${PORTABLEKIT_ROOT}/third_party"
-        "${CMAKE_BINARY_DIR}/generated_nids")
+        "${CMAKE_CURRENT_BINARY_DIR}/host_check_nids")
     target_link_libraries(portablekit_host_check PRIVATE psprecomp_core ${CMAKE_DL_LIBS})
     find_package(Threads REQUIRED)
     target_link_libraries(portablekit_host_check PRIVATE Threads::Threads)

@@ -617,6 +617,29 @@ void register_lightweight_mutexes(HleRegistrar &hle) {
 }
 
 void register_kernel_library(HleRegistrar &hle) {
+    // Bytes left on the current thread's stack, which a game checks before it
+    // recurses. A stub returning 0 says the stack is exhausted, and the game
+    // believes it.
+    hle.add("Kernel_Library", "sceKernelCheckThreadStack", [](Runtime &, AllegrexContext &ctx) {
+        const Thread *thread = kernel().current_thread();
+        if (thread == nullptr) {
+            kernel().finish(ctx, 0u);
+            return;
+        }
+        const std::uint32_t sp = ctx.gpr[29];
+        const std::uint32_t free_bytes = sp > thread->stack_bottom ? sp - thread->stack_bottom : 0u;
+        kernel().finish(ctx, free_bytes);
+    });
+    // The intrinsic memcpy: returning without copying corrupts whatever the
+    // game expected to be copied.
+    hle.add("Kernel_Library", "sceKernelMemcpy", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t destination = arg(ctx, 0);
+        const std::uint32_t source = arg(ctx, 1);
+        const std::uint32_t size = arg(ctx, 2);
+        for (std::uint32_t i = 0; i < size; ++i) rt.memory().store8(destination + i, rt.memory().load8(source + i));
+        kernel().finish(ctx, destination);
+    });
+
     hle.add("Kernel_Library", "sceKernelCpuSuspendIntr", [](Runtime &, AllegrexContext &ctx) {
         const bool was_enabled = kernel().interrupts_enabled();
         kernel().set_interrupts_enabled(false);
