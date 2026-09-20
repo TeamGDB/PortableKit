@@ -207,9 +207,16 @@ void present_frame(Runtime &rt) {
         renderer.frames_presented() % screenshot_every == 0u) {
         const std::string path = std::string(screenshot_dir) + "/frame_" +
                                  std::to_string(renderer.frames_presented()) + ".bmp";
-        if (renderer.capture_frame(path))
+        if (renderer.capture_frame(path)) {
             std::cout << "[render] frame " << renderer.frames_presented() << " (" << renderer.draws_submitted()
                       << " draws) -> " << path << "\n";
+        } else {
+            // A capture that fails silently reads as "the game drew nothing",
+            // which is a different problem entirely and sends you looking in
+            // the wrong place.
+            log_once("capture-failed", "[render] cannot capture the frame to " + path +
+                                           "; no further capture is reported");
+        }
     }
     if (!renderer.pump_events()) {
         rt.stop("window closed");
