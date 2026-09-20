@@ -176,6 +176,9 @@ function(portablekit_add_game target)
     # change its compile commands and rebuild all of it. Its objects still link
     # straight into the executable, which exports their symbols to the overlays.
     add_library(${target}_generated OBJECT ${generated})
+    # The standard is stated per target: a game's own CMakeLists is the top
+    # level project and need not set CMAKE_CXX_STANDARD for the framework.
+    target_compile_features(${target}_generated PRIVATE cxx_std_20)
     target_include_directories(${target}_generated PRIVATE
         "${PORTABLEKIT_ROOT}/include" "${GAME_PROFILE_DIR}/generated")
     set_target_properties(${target}_generated PROPERTIES JOB_POOL_COMPILE psprecomp_generated)
@@ -186,6 +189,7 @@ function(portablekit_add_game target)
         ${profile_sources}
         ${renderer_sources}
         $<TARGET_OBJECTS:${target}_generated>)
+    target_compile_features(${target} PRIVATE cxx_std_20)
     add_dependencies(${target} ${target}_version)
     if(PORTABLEKIT_RENDERER)
         add_dependencies(${target} ${target}_shaders)
@@ -311,6 +315,7 @@ function(_portablekit_add_overlay host_target meta_path output_dir)
 
     set(target "overlay_${PORTABLEKIT_OVERLAY_PREFIX}")
     add_library(${target} MODULE ${sources} "${entry_point}")
+    target_compile_features(${target} PRIVATE cxx_std_20)
     # Headers only: linking psprecomp_core would give the module its own copy
     # of the runtime state the host already owns.
     target_include_directories(${target} PRIVATE

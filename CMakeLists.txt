@@ -129,6 +129,7 @@ add_library(psprecomp_core OBJECT
     "${PORTABLEKIT_ROOT}/src/sha256.cpp"
 )
 target_include_directories(psprecomp_core PUBLIC ${PORTABLEKIT_ROOT}/include)
+target_compile_features(psprecomp_core PUBLIC cxx_std_20)
 target_compile_definitions(psprecomp_core PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>)
 if(MSVC)
