@@ -70,9 +70,9 @@ std::string size_text(std::uint32_t scale) {
 RowOptions options_for(const char *key, std::string description) {
     RowOptions options;
     options.description = std::move(description);
-    if (const char *variable = settings::overridden_by(key)) {
+    if (const std::string variable = settings::overridden_by(key); !variable.empty()) {
         options.disabled = true;
-        options.note = std::string("Set by ") + variable;
+        options.note = "Set by " + variable;
     }
     return options;
 }
@@ -291,7 +291,7 @@ void Menu::video() {
     if (button_row("Restore video defaults", {false, {}, std::string("Every setting on this page back to how ") + portablekit::game().project_name + " ships."})) {
         const settings::Settings &d = settings::defaults();
         const auto restore = [&](const char *key, auto &value, const auto &fallback) {
-            if (settings::overridden_by(key) == nullptr) value = fallback;
+            if (settings::overridden_by(key).empty()) value = fallback;
         };
         restore("video.internal_scale", s.internal_scale, d.internal_scale);
         restore("video.fullscreen", s.fullscreen, d.fullscreen);
@@ -554,7 +554,7 @@ void Menu::controls() {
     if (button_row("Restore control defaults", {false, {}, std::string("Every gamepad and name setting back to how ") + portablekit::game().project_name + " ships."})) {
         const settings::Settings &d = settings::defaults();
         const auto restore = [&](const char *key, auto &value, const auto &fallback) {
-            if (settings::overridden_by(key) == nullptr) value = fallback;
+            if (settings::overridden_by(key).empty()) value = fallback;
         };
         restore("input.confirm", s.confirm_south, d.confirm_south);
         restore("input.dead_zone", s.dead_zone, d.dead_zone);
@@ -850,7 +850,7 @@ void Menu::network() {
     if (button_row("Restore network defaults", {false, {}, "Ad hoc play off and no server. Your address stays."})) {
         const settings::Settings &defaults = settings::defaults();
         const auto restore = [&](const char *key, auto &value, const auto &fallback) {
-            if (settings::overridden_by(key) == nullptr) value = fallback;
+            if (settings::overridden_by(key).empty()) value = fallback;
         };
         restore("network.adhoc", s.adhoc, defaults.adhoc);
         restore("network.server", s.adhoc_server, defaults.adhoc_server);

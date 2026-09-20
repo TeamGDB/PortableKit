@@ -85,6 +85,8 @@ void save();
 
 // The environment variable that decides the setting stored under `key`
 // (for example "video.internal_scale") for this run, or null.
-[[nodiscard]] const char *overridden_by(const char *key);
+// The environment variable that decided this setting, or empty when the
+// file or the default did. The name carries the game's own prefix.
+[[nodiscard]] std::string overridden_by(const char *key);
 
 } // namespace portablekit::settings

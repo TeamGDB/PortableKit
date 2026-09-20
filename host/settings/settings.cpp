@@ -343,11 +343,11 @@ void save() {
     }
 }
 
-const char *overridden_by(const char *key) {
+std::string overridden_by(const char *key) {
     State &s = state();
     if (!s.loaded) load(s);
     const auto found = s.overrides.find(key);
-    return found != s.overrides.end() ? found->second : nullptr;
+    return found != s.overrides.end() ? found->second : std::string();
 }
 
 } // namespace portablekit::settings

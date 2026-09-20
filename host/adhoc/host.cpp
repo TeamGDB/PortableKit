@@ -75,7 +75,7 @@ bool adhoc_host_start() {
         });
     }
     settings::Settings &s = settings::current();
-    if (!s.adhoc && settings::overridden_by("network.adhoc") == nullptr) {
+    if (!s.adhoc && settings::overridden_by("network.adhoc").empty()) {
         s.adhoc = true;
         settings::save();
     }
@@ -129,8 +129,8 @@ void adhoc_join(const std::string &address) {
         state.port = 0u;
     }
     settings::Settings &s = settings::current();
-    if (settings::overridden_by("network.server") == nullptr) s.adhoc_server = address;
-    if (settings::overridden_by("network.adhoc") == nullptr) s.adhoc = true;
+    if (settings::overridden_by("network.server").empty()) s.adhoc_server = address;
+    if (settings::overridden_by("network.adhoc").empty()) s.adhoc = true;
     remember(address);
     settings::save();
     adhoc::Client::log("[adhoc] joining the session at " + address, true);

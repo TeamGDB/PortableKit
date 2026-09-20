@@ -41,9 +41,9 @@ float px(float value) { return std::round(value * Layer::get().scale()); }
 RowOptions options_for(const char *key, std::string description) {
     RowOptions options;
     options.description = std::move(description);
-    if (const char *variable = settings::overridden_by(key)) {
+    if (const std::string variable = settings::overridden_by(key); !variable.empty()) {
         options.disabled = true;
-        options.note = std::string("Set by ") + variable;
+        options.note = "Set by " + variable;
     }
     return options;
 }

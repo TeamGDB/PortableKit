@@ -182,7 +182,7 @@ Mac own_mac() {
     mac[0] = static_cast<std::uint8_t>((mac[0] & 0xFCu) | 0x02u);
     if (mac[1] == 0u) mac[1] = 1u;
     cached = mac;
-    if (settings::overridden_by("network.mac") == nullptr) {
+    if (settings::overridden_by("network.mac").empty()) {
         s.adhoc_mac = adhoc::format_mac(mac);
         settings::save();
     }

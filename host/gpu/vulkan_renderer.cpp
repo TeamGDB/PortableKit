@@ -1,4 +1,5 @@
 #include "../profile.hpp"
+#include "ui/input_script.hpp"
 #include "vulkan_renderer.hpp"
 
 #include "texture_decode.hpp"

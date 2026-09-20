@@ -206,7 +206,7 @@ std::optional<install::ImageStorage> SetupScreens::choose_storage(const fs::path
             ImGui::Unindent(std::round(16.0f * layer.scale()));
             ImGui::Dummy({0.0f, font() * 0.4f});
             const std::string place_note =
-                "Saves " + human_size(info.size_bytes) + ". The image must then stay where it is; if it moves, "
+                "Saves " + human_size(info.size_bytes) + ". The image must then stay where it is; if it moves, " +
                 std::string(portablekit::game().project_name) + " asks you to set up again.";
             if (first && !room) focus_next_row();
             if (button_row("Use it where it is")) choice = install::ImageStorage::InPlace;

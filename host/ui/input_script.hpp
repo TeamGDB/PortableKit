@@ -25,6 +25,14 @@
 // `echo "0:shot now" >> file` captures the window within a few frames. It
 // always connects the virtual pad. Used to drive two instances side by side,
 // for example in ad hoc tests.
+namespace portablekit {
+
+// The name the virtual gamepad reports, so the renderer can tell it from a
+// real one. It is the framework's, not any game's.
+inline constexpr const char *kInputScriptName = "PortableKit input script";
+
+}
+
 namespace portablekit::ui::script {
 
 // Reads the script and, if it presses gamepad buttons, connects the virtual pad.
