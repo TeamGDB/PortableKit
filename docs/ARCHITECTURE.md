@@ -49,7 +49,7 @@ Some titles copy code into memory while they run — overlays swapped into a fix
 - `set_runtime_unsupported_hook` is called when generated code reaches an instruction it cannot execute, which is what stale code looks like after the memory under it was replaced. Returning true retries at the same address.
 - `Runtime::unregister_functions(start, end)` drops every generated function in a range, so code compiled for the previous contents of a window cannot run against the new ones.
 
-A profile typically builds each piece of run-time code as its own shared library, identifies which one is loaded by hashing guest memory, and swaps libraries through these three calls. `profiles/mhp3rd/README.md` describes one such scheme in full.
+A profile typically builds each piece of run-time code as its own shared library, identifies which one is loaded by hashing guest memory, and swaps libraries through these three calls. Yakumo, which loads 355 of them into 12 shared slots, describes its scheme in full in its own README.
 
 ## Native fast paths
 
