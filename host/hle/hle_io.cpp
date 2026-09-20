@@ -62,6 +62,21 @@ IoState &io() {
     return state;
 }
 
+// The drive: one image, present from the start, never ejected.
+std::uint32_t drive_status() {
+    constexpr std::uint32_t kNotPresent = 0x01u;
+    constexpr std::uint32_t kPresent = 0x02u;
+    constexpr std::uint32_t kReady = 0x10u;
+    constexpr std::uint32_t kReadable = 0x20u;
+    return io().disc ? (kPresent | kReady | kReadable) : kNotPresent;
+}
+
+// The one callback a game may register to hear about the drive; 0 for none.
+SceUID &umd_callback() {
+    static SceUID callback = 0;
+    return callback;
+}
+
 struct SplitPath {
     Device device{Device::Unknown};
     std::string path;  // without device, '/' separated, no leading '/'
@@ -443,13 +458,38 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
     });
 
     hle.add("sceUmdUser", "sceUmdActivate", [](Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, 0u); });
-    hle.add("sceUmdUser", "sceUmdGetDriveStat", [](Runtime &, AllegrexContext &ctx) {
-        constexpr std::uint32_t kPresent = 0x02u;
-        constexpr std::uint32_t kReady = 0x10u;
-        constexpr std::uint32_t kReadable = 0x20u;
-        kernel().finish(ctx, io().disc ? (kPresent | kReady | kReadable) : 0x01u);
-    });
+    hle.add("sceUmdUser", "sceUmdGetDriveStat",
+            [](Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, drive_status()); });
     hle.add("sceUmdUser", "sceUmdGetErrorStat", [](Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, 0u); });
+
+    // The disc never changes here: there is one image, it is present from the
+    // start and it is never ejected. A game registers a callback to hear about
+    // that, so it is notified once with the state it is already in, and then
+    // never again.
+    hle.add("sceUmdUser", "sceUmdRegisterUMDCallBack", [](Runtime &, AllegrexContext &ctx) {
+        const auto callback = static_cast<SceUID>(arg(ctx, 0));
+        if (kernel().callbacks.find(callback) == kernel().callbacks.end()) {
+            kernel().finish(ctx, error::kUnknownCbid);
+            return;
+        }
+        umd_callback() = callback;
+        kernel().notify_callback(callback, drive_status());
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("sceUmdUser", "sceUmdUnRegisterUMDCallBack", [](Runtime &, AllegrexContext &ctx) {
+        const auto callback = static_cast<SceUID>(arg(ctx, 0));
+        if (umd_callback() != callback) {
+            kernel().finish(ctx, error::kUnknownCbid);
+            return;
+        }
+        umd_callback() = 0;
+        kernel().finish(ctx, 0u);
+    });
+    // Waiting for the drive to reach a state it is already in returns at once,
+    // which is every state this host has.
+    hle.add("sceUmdUser", "sceUmdWaitDriveStatCB", [](Runtime &, AllegrexContext &ctx) {
+        kernel().finish(ctx, (drive_status() & arg(ctx, 0)) != 0u ? 0u : error::kWaitTimeout);
+    });
 }
 
 } // namespace portablekit

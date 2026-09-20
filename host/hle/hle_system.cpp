@@ -137,6 +137,9 @@ void register_platform(HleRegistrar &hle) {
         kernel().notify_callback(static_cast<SceUID>(arg(ctx, 1)), kAcPower | kBatteryExists | kBatteryPower);
         kernel().finish(ctx, 0u);
     });
+    // Nothing here ever changes the power state, so there is nothing to stop
+    // reporting; the slot is simply forgotten.
+    hle.add("scePower", "scePowerUnregisterCallback", success);
     hle.add("scePower", "scePowerSetClockFrequency630", success);
     hle.add("scePower", "scePowerCheckWlanCoexistenceClock", success);
 
@@ -161,6 +164,9 @@ void register_platform(HleRegistrar &hle) {
         kernel().finish(ctx, 0u);
     });
     hle.add("sceImpose", "sceImposeSetLanguageMode", success);
+    // The shell's "the disc has been ejected" popup. There is no shell and no
+    // disc to eject, so whether the game wants it makes no difference.
+    hle.add("sceImpose", "sceImposeSetUMDPopup", success);
     hle.add("sceOpenPSID", "sceOpenPSIDGetOpenPSID", [](Runtime &rt, AllegrexContext &ctx) {
         for (std::uint32_t i = 0; i < 16u; ++i) rt.memory().store8(arg(ctx, 0) + i, static_cast<std::uint8_t>(0x10u + i));
         kernel().finish(ctx, 0u);
