@@ -14,7 +14,7 @@ namespace psprecomp {
 class Runtime;
 }
 
-namespace mhp3rd {
+namespace portablekit {
 
 inline constexpr std::uint32_t kOverlayAbiVersion = 1u;
 
@@ -36,7 +36,7 @@ struct OverlayModuleInfo {
     const char *name;
 };
 
-} // namespace mhp3rd
+} // namespace portablekit
 
 // Only the library defines these; the host resolves them by name and uses the
 // declarations for the types alone.
@@ -51,6 +51,6 @@ struct OverlayModuleInfo {
 #endif
 
 extern "C" {
-MHP3RD_OVERLAY_EXPORT const mhp3rd::OverlayModuleInfo *mhp3rd_overlay_info();
+MHP3RD_OVERLAY_EXPORT const portablekit::OverlayModuleInfo *mhp3rd_overlay_info();
 MHP3RD_OVERLAY_EXPORT void mhp3rd_register_overlay(psprecomp::Runtime &runtime);
 }

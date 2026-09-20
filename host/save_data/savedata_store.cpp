@@ -9,7 +9,7 @@
 #include <fstream>
 #include <random>
 
-namespace mhp3rd::savedata {
+namespace portablekit::savedata {
 namespace {
 
 constexpr const char *kParamSfo = "PARAM.SFO";
@@ -230,4 +230,4 @@ std::uint64_t save_size(const std::filesystem::path &memory_stick, const SaveFil
     return total;
 }
 
-} // namespace mhp3rd::savedata
+} // namespace portablekit::savedata

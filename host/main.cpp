@@ -1,4 +1,4 @@
-#include "mhp3rd_profile.hpp"
+#include "system.hpp"
 
 #include "app_paths.hpp"
 
@@ -71,7 +71,7 @@ void ensure_main_stack(char **argv) {
     setenv(kMarker, "1", 1);
     // Through the resolved path: executing /proc/self/exe itself would rename
     // the process to "exe".
-    const std::filesystem::path self = mhp3rd::executable_path();
+    const std::filesystem::path self = portablekit::executable_path();
     execv(self.empty() ? "/proc/self/exe" : self.c_str(), argv);
     // Still here: carry on with the stack there is.
     std::cerr << "warning: could not restart with a larger stack; deep call chains may overflow\n";
@@ -122,7 +122,7 @@ Options parse_options(int argc, char **argv) {
         if (arg == "--install") options.install = true;
         else if (arg == "--in-place") options.in_place = true;
         else if (!arg.empty() && arg[0] == '-') throw UsageError("unknown option " + arg);
-        else if (options.install && !options.install_image) options.install_image = mhp3rd::install::path_from_utf8(arg);
+        else if (options.install && !options.install_image) options.install_image = portablekit::install::path_from_utf8(arg);
         else if (!options.install && !options.game_dir) options.game_dir = std::filesystem::path(arg);
         else throw UsageError("unexpected argument " + arg);
     }
@@ -137,12 +137,12 @@ struct GameFiles {
     std::filesystem::path memory_stick;
 };
 
-// The layout a game_dir has always had; profiles/mhp3rd/game by default.
+// The layout a game_dir has always had; the profile's game directory by default.
 GameFiles files_in_game_directory(const std::filesystem::path &game_dir) {
     GameFiles files;
     files.executable = game_dir / "EBOOT.ELF";
     files.disc_image = game_dir / "disc.iso";
-    files.memory_stick = mhp3rd::memory_stick_directory(game_dir);
+    files.memory_stick = portablekit::memory_stick_directory(game_dir);
     if (!std::filesystem::exists(files.disc_image)) {
         std::cerr << "warning: " << files.disc_image.string() << " not found; disc0: is unavailable\n";
         files.disc_image.clear();
@@ -156,12 +156,12 @@ bool has_game_data(const std::filesystem::path &game_dir) {
            std::filesystem::exists(std::filesystem::symlink_status(game_dir / "disc.iso", ec));
 }
 
-// profiles/mhp3rd/game in the checkout this was built from, for developer
+// the profile's game directory in the checkout this was built from, for developer
 // builds; empty in a release build, which must not depend on the machine it
 // was built on.
 std::filesystem::path checkout_game_directory() {
-#if defined(MHP3RD_DEFAULT_GAME_DIR)
-    return MHP3RD_DEFAULT_GAME_DIR;
+#if defined(PORTABLEKIT_DEFAULT_GAME_DIR)
+    return PORTABLEKIT_DEFAULT_GAME_DIR;
 #else
     return {};
 #endif
@@ -172,10 +172,10 @@ std::filesystem::path checkout_game_directory() {
 // until ms0 exists in the data directory.
 std::filesystem::path installed_memory_stick(const std::filesystem::path &data_dir,
                                              const std::filesystem::path &checkout_game_dir) {
-    const std::filesystem::path memory_stick = mhp3rd::memory_stick_directory(data_dir);
+    const std::filesystem::path memory_stick = portablekit::memory_stick_directory(data_dir);
     std::error_code ec;
     if (!checkout_game_dir.empty() && !std::filesystem::exists(memory_stick, ec)) {
-        const std::filesystem::path legacy = mhp3rd::memory_stick_directory(checkout_game_dir);
+        const std::filesystem::path legacy = portablekit::memory_stick_directory(checkout_game_dir);
         if (std::filesystem::is_directory(legacy / "PSP" / "SAVEDATA", ec)) {
             std::cerr << "note: using the saves in " << legacy.string() << "; move that directory to "
                       << memory_stick.string() << " to keep them with the installation\n";
@@ -186,10 +186,10 @@ std::filesystem::path installed_memory_stick(const std::filesystem::path &data_d
 }
 
 // Finds the game: an explicit game_dir, then the per-user data directory the
-// installer fills, then profiles/mhp3rd/game in a developer build. With none of
+// installer fills, then the profile's game directory in a developer build. With none of
 // them, runs the installer. Empty when the player quit or nothing could be set up.
 std::optional<GameFiles> locate_game(const Options &options) {
-    namespace install = mhp3rd::install;
+    namespace install = portablekit::install;
     if (options.game_dir) return files_in_game_directory(*options.game_dir);
     if (const char *dir = std::getenv("MHP3RD_GAME_DIR"); dir != nullptr && *dir != '\0')
         return files_in_game_directory(dir);
@@ -238,7 +238,7 @@ std::optional<GameFiles> locate_game(const Options &options) {
 }
 
 int install_from_command_line(const Options &options) {
-    namespace install = mhp3rd::install;
+    namespace install = portablekit::install;
     const std::filesystem::path data_dir = install::user_data_directory();
     try {
         install::install(*options.install_image,
@@ -258,7 +258,7 @@ extern "C" void on_stop_signal(int) { stop_server = true; }
 
 // The built-in ad hoc server without the game, for leaving it running.
 int run_adhoc_server(int argc, char **argv) {
-    using namespace mhp3rd::adhoc;
+    using namespace portablekit::adhoc;
     ServerConfig config;
     config.print_events = true;
     if (argc > 2) {
@@ -325,51 +325,51 @@ int main(int argc, char **argv) {
         const std::optional<GameFiles> files = locate_game(options);
         if (!files) return 1;
         const std::filesystem::path &executable = files->executable;
-        mhp3rd::ProfilePaths paths;
+        portablekit::ProfilePaths paths;
         paths.disc_image = files->disc_image;
         paths.memory_stick = files->memory_stick;
         if (!std::filesystem::is_regular_file(executable))
-            throw psprecomp::Error("Missing " + executable.string() + " (run profiles/mhp3rd/scripts/prepare_game.sh)");
+            throw psprecomp::Error("Missing " + executable.string() + " (run scripts/prepare_game.sh)");
 
         const std::string sha256 = psprecomp::sha256_file(executable);
-        if (sha256 != mhp3rd::install::kExecutableSha256)
+        if (sha256 != portablekit::install::kExecutableSha256)
             std::cerr << "warning: unsupported executable hash " << sha256 << "\n";
 
         const psprecomp::Elf32Image elf = psprecomp::Elf32Image::from_file(executable);
-        if (elf.required_ram_size(mhp3rd::kLoadBase) != mhp3rd::kGuestRamBytes)
+        if (elf.required_ram_size(portablekit::kLoadBase) != portablekit::kGuestRamBytes)
             throw psprecomp::Error("Executable does not match the 64 MiB MHP3rd HD layout");
 
-        psprecomp::Runtime runtime(mhp3rd::kGuestRamBytes);
+        psprecomp::Runtime runtime(portablekit::kGuestRamBytes);
         for (const EmbeddedNid &entry : kEmbeddedNids) runtime.nids().add(entry.library, entry.nid, entry.name);
-        (void)elf.load_and_relocate(runtime.memory(), mhp3rd::kLoadBase);
+        (void)elf.load_and_relocate(runtime.memory(), portablekit::kLoadBase);
         psprecomp::register_generated_functions(runtime);
-        mhp3rd::install_profile(runtime, elf, paths);
+        portablekit::install_profile(runtime, elf, paths);
 
         std::cout << "MHP3rdNative PSP bootstrap\n"
                   << "Executable: " << executable.string() << "\n"
                   << "SHA-256:    " << sha256 << "\n"
                   << "Disc image: " << (paths.disc_image.empty() ? "<none>" : paths.disc_image.string()) << "\n"
-                  << "Entry:      " << psprecomp::hex32(elf.runtime_entry(mhp3rd::kLoadBase)) << "\n"
+                  << "Entry:      " << psprecomp::hex32(elf.runtime_entry(portablekit::kLoadBase)) << "\n"
                   << "Functions:  " << runtime.function_count() << "\n";
         if (runtime.function_count() == 0u) {
-            std::cout << "No generated functions are linked. Run profiles/mhp3rd/scripts/generate.sh and rebuild.\n";
+            std::cout << "No generated functions are linked. Run scripts/generate.sh and rebuild.\n";
             return 3;
         }
 
-        runtime.run(elf.runtime_entry(mhp3rd::kLoadBase), configured_max_dispatches());
+        runtime.run(elf.runtime_entry(portablekit::kLoadBase), configured_max_dispatches());
         std::cout << "Runtime stopped: " << runtime.stop_reason() << "\n";
         // Quit from the menu, a closed window or the game ending: the network
         // threads stop here, while everything they use still exists.
-        mhp3rd::adhoc_shutdown();
+        portablekit::adhoc_shutdown();
         // "Set up game data again" in the in-game menu.
-        if (mhp3rd::install::setup_requested_on_exit()) return mhp3rd::install::restart_for_setup(argv[0]);
+        if (portablekit::install::setup_requested_on_exit()) return portablekit::install::restart_for_setup(argv[0]);
         // "Restart now" after importing a save.
-        if (mhp3rd::install::restart_requested_on_exit()) return mhp3rd::install::restart(argv);
-        std::cout << mhp3rd::kernel().describe_threads() << "\n";
+        if (portablekit::install::restart_requested_on_exit()) return portablekit::install::restart(argv);
+        std::cout << portablekit::kernel().describe_threads() << "\n";
         runtime.report_hle_histogram();
         return runtime.stop_reason().empty() ? 0 : 4;
     } catch (const std::exception &e) {
-        mhp3rd::adhoc_shutdown();
+        portablekit::adhoc_shutdown();
         std::cerr << "MHP3rdNative error: " << e.what() << "\n";
         return 1;
     }

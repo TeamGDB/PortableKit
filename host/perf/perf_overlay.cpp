@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <cstdio>
 
-namespace mhp3rd::perf {
+namespace portablekit::perf {
 namespace {
 
 // A 5x7 font written for this overlay: upper-case letters, digits and the
@@ -147,4 +147,4 @@ void draw_overlay(std::uint32_t *pixels) {
     }
 }
 
-} // namespace mhp3rd::perf
+} // namespace portablekit::perf

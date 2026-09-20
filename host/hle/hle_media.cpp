@@ -13,7 +13,7 @@
 
 #include "gpu/ge_state.hpp"
 #include "perf/frame_stats.hpp"
-#if defined(MHP3RD_HAS_RENDERER)
+#if defined(PORTABLEKIT_HAS_RENDERER)
 #include "gpu/vulkan_renderer.hpp"
 #include "ui/ui.hpp"
 #endif
@@ -26,7 +26,7 @@
 #include <memory>
 #include <vector>
 
-namespace mhp3rd {
+namespace portablekit {
 namespace {
 
 constexpr std::uint32_t kEdramBase = 0x04000000u;
@@ -76,7 +76,7 @@ struct MediaState {
     std::uint32_t next_ge_list{1u};
     std::array<AudioChannel, 8> audio{};
     gpu::GeState ge;
-#if defined(MHP3RD_HAS_RENDERER)
+#if defined(PORTABLEKIT_HAS_RENDERER)
     std::unique_ptr<gpu::VulkanRenderer> renderer;
 #endif
 };
@@ -93,7 +93,7 @@ MediaState &media() {
 // hunt this way and textures the quest reward screen's background from it.
 void block_transfer(Runtime &rt, const gpu::BlockTransfer &transfer) {
     psprecomp::GuestMemory &memory = rt.memory();
-#if defined(MHP3RD_HAS_RENDERER)
+#if defined(PORTABLEKIT_HAS_RENDERER)
     if (media().renderer && media().renderer->available())
         media().renderer->read_back_framebuffer(transfer.source, memory);
 #endif
@@ -113,7 +113,7 @@ void block_transfer(Runtime &rt, const gpu::BlockTransfer &transfer) {
         }
         std::memmove(destination, source, row_bytes);
     }
-#if defined(MHP3RD_HAS_RENDERER)
+#if defined(PORTABLEKIT_HAS_RENDERER)
     // Textures already looked up in this list may have changed.
     if (media().renderer && media().renderer->available()) media().renderer->begin_display_list();
 #endif
@@ -138,7 +138,7 @@ void run_ge_list(Runtime &rt, std::uint32_t id) {
         call.arguments = {signal & 0xFFFFu, finish ? callback->finish_argument : callback->signal_argument, pc, 0u};
         kernel().queue_interrupt(std::move(call));
     });
-#if defined(MHP3RD_HAS_RENDERER)
+#if defined(PORTABLEKIT_HAS_RENDERER)
     if (media().renderer && media().renderer->available()) {
         gpu::VulkanRenderer &renderer = *media().renderer;
         const psprecomp::GuestMemory &memory = rt.memory();
@@ -165,7 +165,7 @@ void run_ge_list(Runtime &rt, std::uint32_t id) {
 void present_frame(Runtime &rt) {
     // Overlays are swapped between frames; re-check before drawing the next one.
     revalidate_overlays(rt);
-#if defined(MHP3RD_HAS_RENDERER)
+#if defined(PORTABLEKIT_HAS_RENDERER)
     if (!media().renderer || !media().renderer->available()) {
         perf::end_frame(kernel().now_us());
         return;
@@ -274,7 +274,7 @@ void register_display_ctrl(HleRegistrar &hle) {
         std::uint8_t analog_y = 0x80u;
         std::uint8_t right_x = 0x80u;
         std::uint8_t right_y = 0x80u;
-#if defined(MHP3RD_HAS_RENDERER)
+#if defined(PORTABLEKIT_HAS_RENDERER)
         if (media().renderer && media().renderer->available()) {
             const gpu::PadState pad = media().renderer->pad();
             buttons = pad.buttons;
@@ -548,7 +548,7 @@ void register_audio(HleRegistrar &hle) {
 } // namespace
 
 void initialize_renderer() {
-#if defined(MHP3RD_HAS_RENDERER)
+#if defined(PORTABLEKIT_HAS_RENDERER)
     (void)ensure_renderer();
 #else
     std::cout << "Renderer: not built\n";
@@ -562,7 +562,7 @@ void register_media(HleRegistrar &hle) {
     register_audio(hle);
 }
 
-#if defined(MHP3RD_HAS_RENDERER)
+#if defined(PORTABLEKIT_HAS_RENDERER)
 gpu::VulkanRenderer *active_renderer() {
     return media().renderer && media().renderer->available() ? media().renderer.get() : nullptr;
 }
@@ -592,4 +592,4 @@ gpu::VulkanRenderer *ensure_renderer() {
 }
 #endif
 
-} // namespace mhp3rd
+} // namespace portablekit

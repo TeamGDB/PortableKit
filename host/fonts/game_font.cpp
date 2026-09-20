@@ -38,7 +38,7 @@
 #include <unistd.h>
 #endif
 
-namespace mhp3rd::fonts {
+namespace portablekit::fonts {
 namespace {
 
 // Default fonts, in order: the first that loads is the fallback for every
@@ -668,4 +668,4 @@ void parse_value(const std::string &value, std::string &path, int &face) {
     face = std::atoi(value.c_str() + hash + 1);
 }
 
-} // namespace mhp3rd::fonts
+} // namespace portablekit::fonts

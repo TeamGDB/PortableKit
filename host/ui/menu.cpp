@@ -22,7 +22,7 @@
 #include "perf/frame_stats.hpp"
 #include "save_data/save_transfer.hpp"
 #include "settings/settings.hpp"
-#include "yakumo_version.hpp"
+#include "portablekit_version.hpp"
 
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -45,7 +45,7 @@
 #include <utility>
 #include <vector>
 
-namespace mhp3rd::ui {
+namespace portablekit::ui {
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -907,7 +907,7 @@ void Menu::system() {
     save_rows();
 
     section("About");
-    info_row("Yakumo", std::string(kYakumoVersion));
+    info_row("Yakumo", std::string(kBuildVersion));
     info_row("Game", std::string(install::kGameTitle) + " (" + install::kDiscIdDisplay + ")");
     info_row("Data folder", data_dir);
     if (!savedata::memory_stick().empty())
@@ -1119,4 +1119,4 @@ bool run_menu() {
     return window_open && !menu.quit();
 }
 
-} // namespace mhp3rd::ui
+} // namespace portablekit::ui

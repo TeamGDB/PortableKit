@@ -13,11 +13,11 @@
 #include <string>
 #include <vector>
 
-#if defined(MHP3RD_HAS_SDL_AUDIO)
+#if defined(PORTABLEKIT_HAS_SDL_AUDIO)
 #include <SDL3/SDL.h>
 #endif
 
-namespace mhp3rd::audio {
+namespace portablekit::audio {
 namespace {
 
 // ~186 ms. Long enough that a slow guest frame does not underrun, short enough
@@ -116,7 +116,7 @@ struct AudioSink::Impl {
     std::uint64_t seconds{};
 
     float gain{1.0f};
-#if defined(MHP3RD_HAS_SDL_AUDIO)
+#if defined(PORTABLEKIT_HAS_SDL_AUDIO)
     SDL_AudioStream *stream{};
 #endif
 
@@ -176,7 +176,7 @@ struct AudioSink::Impl {
 
 namespace {
 
-#if defined(MHP3RD_HAS_SDL_AUDIO)
+#if defined(PORTABLEKIT_HAS_SDL_AUDIO)
 void SDLCALL feed_device(void *user, SDL_AudioStream *stream, int additional, int) {
     if (additional <= 0) return;
     auto *impl = static_cast<AudioSink::Impl *>(user);
@@ -219,7 +219,7 @@ void AudioSink::initialize() {
         std::cout << "Audio: disabled by MHP3RD_NO_AUDIO\n";
         return;
     }
-#if defined(MHP3RD_HAS_SDL_AUDIO)
+#if defined(PORTABLEKIT_HAS_SDL_AUDIO)
     if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
         std::cerr << "Audio: SDL_InitSubSystem failed (" << SDL_GetError() << "); running silent\n";
         return;
@@ -245,7 +245,7 @@ void AudioSink::shutdown() {
     Impl &impl = *impl_;
     if (impl.closed) return;
     impl.closed = true;
-#if defined(MHP3RD_HAS_SDL_AUDIO)
+#if defined(PORTABLEKIT_HAS_SDL_AUDIO)
     if (impl.stream != nullptr) {
         SDL_DestroyAudioStream(impl.stream);
         impl.stream = nullptr;
@@ -265,7 +265,7 @@ void AudioSink::shutdown() {
 void AudioSink::set_volume(float gain) {
     Impl &impl = *impl_;
     impl.gain = std::clamp(gain, 0.0f, 1.0f);
-#if defined(MHP3RD_HAS_SDL_AUDIO)
+#if defined(PORTABLEKIT_HAS_SDL_AUDIO)
     if (impl.stream != nullptr) {
         SDL_SetAudioStreamGain(impl.stream, impl.gain);
         std::cout << "Audio: output gain " << SDL_GetAudioStreamGain(impl.stream) << "\n";
@@ -274,7 +274,7 @@ void AudioSink::set_volume(float gain) {
 }
 
 bool AudioSink::has_device() const {
-#if defined(MHP3RD_HAS_SDL_AUDIO)
+#if defined(PORTABLEKIT_HAS_SDL_AUDIO)
     return impl_->stream != nullptr;
 #else
     return false;
@@ -282,7 +282,7 @@ bool AudioSink::has_device() const {
 }
 
 void AudioSink::set_paused(bool paused) {
-#if defined(MHP3RD_HAS_SDL_AUDIO)
+#if defined(PORTABLEKIT_HAS_SDL_AUDIO)
     Impl &impl = *impl_;
     if (impl.stream == nullptr) return;
     if (paused) SDL_PauseAudioStreamDevice(impl.stream);
@@ -334,7 +334,7 @@ void AudioSink::mix(std::uint64_t &cursor, const std::int16_t *frames, std::size
     impl.write_end = std::max(impl.write_end, cursor);
 
     // Without a device nothing drains the ring, so keep it moving here.
-#if defined(MHP3RD_HAS_SDL_AUDIO)
+#if defined(PORTABLEKIT_HAS_SDL_AUDIO)
     const bool draining = impl.stream != nullptr;
 #else
     const bool draining = false;
@@ -346,4 +346,4 @@ void AudioSink::mix(std::uint64_t &cursor, const std::int16_t *frames, std::size
     }
 }
 
-} // namespace mhp3rd::audio
+} // namespace portablekit::audio

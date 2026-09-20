@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cstring>
 
-namespace mhp3rd::savedata {
+namespace portablekit::savedata {
 namespace {
 
 Block block_from_hex(const char *hex) {
@@ -221,4 +221,4 @@ bool verify_param_sfo(std::span<const std::uint8_t> sfo, std::size_t params_offs
     return sfo_hash(copy, *mode) == read_block(sfo, params_offset + kParamsHashModeOffset);
 }
 
-} // namespace mhp3rd::savedata
+} // namespace portablekit::savedata

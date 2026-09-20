@@ -2,16 +2,16 @@
 
 #include <cstring>
 
-#if defined(MHP3RD_HAS_FFMPEG)
+#if defined(PORTABLEKIT_HAS_FFMPEG)
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/pixfmt.h>
 }
 #endif
 
-namespace mhp3rd::movie {
+namespace portablekit::movie {
 
-#if defined(MHP3RD_HAS_FFMPEG)
+#if defined(PORTABLEKIT_HAS_FFMPEG)
 
 struct AvcDecoder::Impl {
     AVCodecContext *context{};
@@ -111,7 +111,7 @@ void AvcDecoder::reset() {
     impl.draining = false;
 }
 
-#else // !MHP3RD_HAS_FFMPEG
+#else // !PORTABLEKIT_HAS_FFMPEG
 
 struct AvcDecoder::Impl {};
 
@@ -128,4 +128,4 @@ void AvcDecoder::reset() {}
 
 #endif
 
-} // namespace mhp3rd::movie
+} // namespace portablekit::movie

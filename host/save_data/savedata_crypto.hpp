@@ -24,7 +24,7 @@
 #include <span>
 #include <vector>
 
-namespace mhp3rd::savedata {
+namespace portablekit::savedata {
 
 enum class CryptMode : std::uint8_t {
     Mode1 = 1,  // no game key
@@ -73,4 +73,4 @@ void sign_param_sfo(std::vector<std::uint8_t> &sfo, std::size_t params_offset, C
 // console-specific one cannot be checked).
 [[nodiscard]] bool verify_param_sfo(std::span<const std::uint8_t> sfo, std::size_t params_offset);
 
-} // namespace mhp3rd::savedata
+} // namespace portablekit::savedata

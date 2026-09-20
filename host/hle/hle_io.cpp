@@ -16,7 +16,7 @@
 #include <optional>
 #include <vector>
 
-namespace mhp3rd {
+namespace portablekit {
 namespace {
 
 namespace io_error {
@@ -434,4 +434,4 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
     hle.add("sceUmdUser", "sceUmdGetErrorStat", [](Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, 0u); });
 }
 
-} // namespace mhp3rd
+} // namespace portablekit

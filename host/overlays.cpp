@@ -25,7 +25,7 @@
 #include <dlfcn.h>
 #endif
 
-namespace mhp3rd {
+namespace portablekit {
 
 void revalidate_overlays(Runtime &runtime);
 
@@ -236,7 +236,7 @@ void dump_slot(const psprecomp::GuestMemory &memory, std::uint32_t slot_start, s
     if (!out) throw psprecomp::Error("Cannot write overlay dump: " + path.string());
     out.write(reinterpret_cast<const char *>(image.data()), static_cast<std::streamsize>(image.size()));
     std::cout << "[overlay] dumped " << image.size() / 1024u << " KiB to " << path.string() << "\n"
-              << "[overlay] recompile it with: profiles/mhp3rd/tools/add_overlay.py <build_dir> "
+              << "[overlay] recompile it with: tools/add_overlay.py <build_dir> "
               << path.string() << " " << psprecomp::hex32(slot_start) << "\n";
 }
 
@@ -328,4 +328,4 @@ void install_overlay_support(Runtime &runtime) {
     psprecomp::set_runtime_unsupported_hook(&unsupported_instruction_hook);
 }
 
-} // namespace mhp3rd
+} // namespace portablekit

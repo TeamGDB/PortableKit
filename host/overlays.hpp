@@ -1,10 +1,10 @@
 #pragma once
 
-#include "mhp3rd_profile.hpp"
+#include "system.hpp"
 
 #include "psprecomp/runtime.hpp"
 
-namespace mhp3rd {
+namespace portablekit {
 
 // Loads the overlay libraries and installs the dispatch-miss hook that
 // recognises the overlay currently in a slot and registers its recompiled
@@ -18,4 +18,4 @@ void install_overlay_support(psprecomp::Runtime &runtime);
 // this is called; the next jump into the slot then installs the right corpus.
 void revalidate_overlays(psprecomp::Runtime &runtime);
 
-} // namespace mhp3rd
+} // namespace portablekit

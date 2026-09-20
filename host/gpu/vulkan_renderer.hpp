@@ -15,7 +15,7 @@ struct SDL_Window;
 struct SDL_Gamepad;
 struct ImDrawData;
 
-namespace mhp3rd::gpu {
+namespace portablekit::gpu {
 
 // PSP pad state gathered from the keyboard and the gamepad.
 struct PadState {
@@ -141,4 +141,4 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-} // namespace mhp3rd::gpu
+} // namespace portablekit::gpu

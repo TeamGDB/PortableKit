@@ -25,7 +25,7 @@
 #include <utility>
 #include <vector>
 
-namespace mhp3rd::ui {
+namespace portablekit::ui {
 namespace {
 
 // How long an Esc waits for a gamepad press that would mark it as sent by
@@ -281,4 +281,4 @@ bool Layer::run(const std::function<bool()> &frame, bool show_game) {
     }
 }
 
-} // namespace mhp3rd::ui
+} // namespace portablekit::ui

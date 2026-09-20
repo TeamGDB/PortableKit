@@ -2,7 +2,7 @@
 
 namespace psprecomp {
 
-// Linked only while profiles/mhp3rd/generated is empty so the host builds
+// Linked only while the profile's generated directory is empty so the host builds
 // before the first AOT generation.
 void register_generated_functions(Runtime &) {}
 

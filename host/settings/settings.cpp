@@ -12,7 +12,7 @@
 #include <string>
 #include <vector>
 
-namespace mhp3rd::settings {
+namespace portablekit::settings {
 namespace {
 
 // One setting: its key in settings.ini, the variable that overrides it, and
@@ -349,4 +349,4 @@ const char *overridden_by(const char *key) {
     return found != s.overrides.end() ? found->second : nullptr;
 }
 
-} // namespace mhp3rd::settings
+} // namespace portablekit::settings

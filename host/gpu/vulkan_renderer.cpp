@@ -25,7 +25,7 @@
 #include <string>
 #include <vector>
 
-namespace mhp3rd::gpu {
+namespace portablekit::gpu {
 namespace {
 
 constexpr std::uint32_t kPspWidth = 480u;
@@ -3397,4 +3397,4 @@ void VulkanRenderer::shutdown() {
     impl = Impl{};
 }
 
-} // namespace mhp3rd::gpu
+} // namespace portablekit::gpu

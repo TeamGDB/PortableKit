@@ -5,7 +5,7 @@
 #include <optional>
 #include <string>
 
-namespace mhp3rd::install {
+namespace portablekit::install {
 
 // The per-user data directory holds what the installer sets up:
 //
@@ -55,4 +55,4 @@ struct Installation {
 [[nodiscard]] std::string path_to_utf8(const std::filesystem::path &path);
 [[nodiscard]] std::filesystem::path path_from_utf8(const std::string &text);
 
-} // namespace mhp3rd::install
+} // namespace portablekit::install

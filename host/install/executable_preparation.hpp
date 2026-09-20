@@ -5,7 +5,7 @@
 #include <span>
 #include <vector>
 
-namespace mhp3rd::install {
+namespace portablekit::install {
 
 // Turns PSP_GAME/SYSDIR/EBOOT.BIN of the supported disc into the executable
 // the recompiled code was generated from.
@@ -19,4 +19,4 @@ namespace mhp3rd::install {
 prepare_executable(std::span<const std::uint8_t> eboot_bin,
                    const std::function<void(std::uint64_t done, std::uint64_t total)> &progress = {});
 
-} // namespace mhp3rd::install
+} // namespace portablekit::install

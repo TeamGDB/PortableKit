@@ -2,7 +2,7 @@
 
 // The menu's Text section: the font the game's text is drawn with, its
 // weight, a preview, and the list of fonts to choose from.
-namespace mhp3rd::ui {
+namespace portablekit::ui {
 
 // The section's rows, for the menu's Video page.
 void font_rows();
@@ -15,4 +15,4 @@ void font_rows();
 // the menu keeps itself open too.
 bool font_list(bool back);
 
-} // namespace mhp3rd::ui
+} // namespace portablekit::ui

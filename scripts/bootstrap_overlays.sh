@@ -11,7 +11,7 @@ set -euo pipefail
 profile_dir="$(cd "$(dirname "$0")/.." && pwd)"
 repo_dir="$(cd "$profile_dir/../.." && pwd)"
 iterations="${1:-10}"
-build_dir="${2:-$repo_dir/out/mhp3rd}"
+build_dir="${2:-$repo_dir/out/portablekit}"
 dump_dir="${MHP3RD_DUMP_OVERLAYS:-$profile_dir/analysis/overlays}"
 log_dir="$profile_dir/analysis"
 mkdir -p "$dump_dir" "$log_dir"

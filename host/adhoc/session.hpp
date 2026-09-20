@@ -6,7 +6,7 @@
 
 #include <string>
 
-namespace mhp3rd {
+namespace portablekit {
 
 // Applies changed network settings (hle_adhoc.cpp). Turning ad hoc play off
 // takes the game off line at once, as a normal disconnect; a new server or
@@ -49,4 +49,4 @@ void adhoc_shutdown() noexcept;
 // hosting first if this instance hosts.
 void adhoc_join(const std::string &address);
 
-} // namespace mhp3rd
+} // namespace portablekit

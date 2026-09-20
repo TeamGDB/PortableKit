@@ -34,7 +34,7 @@
 #include <sstream>
 #include <string>
 
-namespace mhp3rd {
+namespace portablekit {
 namespace {
 
 using adhoc::Client;
@@ -917,4 +917,4 @@ void register_adhoc(HleRegistrar &hle) {
     register_netconf(hle);
 }
 
-} // namespace mhp3rd
+} // namespace portablekit

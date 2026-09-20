@@ -6,12 +6,12 @@
 #include <fstream>
 #include <system_error>
 
-#if defined(MHP3RD_HAS_SDL)
+#if defined(PORTABLEKIT_HAS_SDL)
 #include <SDL3/SDL_filesystem.h>
 #include <SDL3/SDL_stdinc.h>
 #endif
 
-namespace mhp3rd::install {
+namespace portablekit::install {
 namespace {
 
 constexpr const char *kOrganization = "Yakumo";
@@ -24,7 +24,7 @@ std::string trim(const std::string &text) {
     return text.substr(first, last - first + 1u);
 }
 
-#if !defined(MHP3RD_HAS_SDL)
+#if !defined(PORTABLEKIT_HAS_SDL)
 std::filesystem::path environment_path(const char *name) {
     const char *value = std::getenv(name);
     return value != nullptr && *value != '\0' ? path_from_utf8(value) : std::filesystem::path{};
@@ -44,7 +44,7 @@ std::filesystem::path path_from_utf8(const std::string &text) {
 
 std::filesystem::path user_data_directory() {
     if (const char *dir = std::getenv("MHP3RD_DATA_DIR"); dir != nullptr && *dir != '\0') return path_from_utf8(dir);
-#if defined(MHP3RD_HAS_SDL)
+#if defined(PORTABLEKIT_HAS_SDL)
     char *pref = SDL_GetPrefPath(kOrganization, kApplication);
     if (pref == nullptr) throw psprecomp::Error(std::string("Cannot determine the user data directory: ") + SDL_GetError());
     std::filesystem::path result = path_from_utf8(pref);
@@ -121,4 +121,4 @@ std::optional<Installation> find_installation(const std::filesystem::path &data_
     return installation;
 }
 
-} // namespace mhp3rd::install
+} // namespace portablekit::install

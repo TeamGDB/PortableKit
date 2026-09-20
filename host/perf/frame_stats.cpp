@@ -8,7 +8,7 @@
 #include <cstring>
 #include <iostream>
 
-namespace mhp3rd::perf {
+namespace portablekit::perf {
 namespace {
 
 double to_ms(Clock::duration duration) {
@@ -172,4 +172,4 @@ const Summary &last_second() { return state().summary; }
 const std::array<float, kHistoryFrames> &frame_history() { return state().history; }
 std::size_t history_cursor() { return state().cursor; }
 
-} // namespace mhp3rd::perf
+} // namespace portablekit::perf

@@ -39,7 +39,7 @@
 #include <string>
 #include <vector>
 
-namespace mhp3rd::adhoc {
+namespace portablekit::adhoc {
 
 inline constexpr std::uint16_t kDiscoveryPort = 27314;
 
@@ -117,4 +117,4 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-} // namespace mhp3rd::adhoc
+} // namespace portablekit::adhoc

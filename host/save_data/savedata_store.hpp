@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-namespace mhp3rd::savedata {
+namespace portablekit::savedata {
 
 struct SaveFiles {
     std::string game_name;   // e.g. "ULJM05800"
@@ -54,4 +54,4 @@ bool delete_save(const std::filesystem::path &memory_stick, const SaveFiles &fil
 // Total size of the folder's files in bytes, 0 when it does not exist.
 [[nodiscard]] std::uint64_t save_size(const std::filesystem::path &memory_stick, const SaveFiles &files);
 
-} // namespace mhp3rd::savedata
+} // namespace portablekit::savedata

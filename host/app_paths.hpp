@@ -3,7 +3,7 @@
 #include <filesystem>
 #include <vector>
 
-namespace mhp3rd {
+namespace portablekit {
 
 // The running executable, resolved through the operating system rather than
 // argv[0]; empty if it cannot be determined.
@@ -17,4 +17,4 @@ namespace mhp3rd {
 // after the system's own fonts.
 [[nodiscard]] std::vector<std::filesystem::path> bundled_fonts();
 
-} // namespace mhp3rd
+} // namespace portablekit

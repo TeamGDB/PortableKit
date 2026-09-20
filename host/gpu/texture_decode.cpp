@@ -5,7 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 
-namespace mhp3rd::gpu {
+namespace portablekit::gpu {
 namespace {
 
 std::uint32_t expand_5650(std::uint16_t value) {
@@ -293,4 +293,4 @@ std::uint64_t texture_key(const GuestMemory &memory, const TextureState &texture
     return key;
 }
 
-} // namespace mhp3rd::gpu
+} // namespace portablekit::gpu

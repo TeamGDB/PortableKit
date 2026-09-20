@@ -18,7 +18,7 @@
 #include <string_view>
 #include <vector>
 
-namespace mhp3rd::savedata {
+namespace portablekit::savedata {
 
 // The folders this game keeps on a memory stick: the game data, the
 // downloaded quests, and the install data (a cache the game can rebuild).
@@ -130,4 +130,4 @@ struct BackupResult {
 BackupResult back_up_saves(const std::filesystem::path &memory_stick, const std::filesystem::path &folder,
                            bool replace);
 
-} // namespace mhp3rd::savedata
+} // namespace portablekit::savedata

@@ -38,7 +38,7 @@
 // large as the buffer and never overlap, and fits every glyph inside the cell,
 // away from its edges, by shifting it and, if it is still too large, scaling it
 // down. The metrics reported are those of the bitmap drawn.
-namespace mhp3rd::fonts {
+namespace portablekit::fonts {
 
 // The game's glyph buffer and, with the metrics below, its atlas cell.
 inline constexpr int kCell = 20;
@@ -118,4 +118,4 @@ void start_catalog();
 // Splits a stored value into path and face index.
 void parse_value(const std::string &value, std::string &path, int &face);
 
-} // namespace mhp3rd::fonts
+} // namespace portablekit::fonts

@@ -21,7 +21,7 @@
 #include <net/if.h>
 #endif
 
-namespace mhp3rd::adhoc {
+namespace portablekit::adhoc {
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -563,4 +563,4 @@ DiscoveryStatus Discovery::status() const {
     return impl_->stats;
 }
 
-} // namespace mhp3rd::adhoc
+} // namespace portablekit::adhoc

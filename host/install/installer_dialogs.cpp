@@ -11,7 +11,7 @@
 #include <cstdlib>
 #include <iostream>
 
-#if defined(MHP3RD_HAS_SDL)
+#if defined(PORTABLEKIT_HAS_SDL)
 #include <SDL3/SDL.h>
 
 #include <atomic>
@@ -19,9 +19,9 @@
 #include <vector>
 #endif
 
-namespace mhp3rd::install {
+namespace portablekit::install {
 
-#if defined(MHP3RD_HAS_SDL)
+#if defined(PORTABLEKIT_HAS_SDL)
 namespace {
 
 constexpr const char *kTitle = "Yakumo setup";
@@ -188,4 +188,4 @@ bool report_problem_in_dialog(const std::string &, const std::string &, bool) { 
 
 #endif
 
-} // namespace mhp3rd::install
+} // namespace portablekit::install

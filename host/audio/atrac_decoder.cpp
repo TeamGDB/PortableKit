@@ -4,7 +4,7 @@
 #include <cmath>
 #include <cstring>
 
-#if defined(MHP3RD_HAS_FFMPEG)
+#if defined(PORTABLEKIT_HAS_FFMPEG)
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/channel_layout.h>
@@ -12,9 +12,9 @@ extern "C" {
 }
 #endif
 
-namespace mhp3rd::audio {
+namespace portablekit::audio {
 
-#if defined(MHP3RD_HAS_FFMPEG)
+#if defined(PORTABLEKIT_HAS_FFMPEG)
 
 struct AtracDecoder::Impl {
     AtracCodec codec{AtracCodec::Atrac3};
@@ -125,7 +125,7 @@ void AtracDecoder::reset() {
     if (impl_->context != nullptr) avcodec_flush_buffers(impl_->context);
 }
 
-#else // !MHP3RD_HAS_FFMPEG
+#else // !PORTABLEKIT_HAS_FFMPEG
 
 struct AtracDecoder::Impl {};
 
@@ -141,4 +141,4 @@ void AtracDecoder::reset() {}
 
 #endif
 
-} // namespace mhp3rd::audio
+} // namespace portablekit::audio

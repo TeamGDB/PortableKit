@@ -23,7 +23,7 @@
 #include <sstream>
 #include <vector>
 
-namespace mhp3rd {
+namespace portablekit {
 namespace {
 
 namespace atrac_error {
@@ -496,4 +496,4 @@ void register_atrac(HleRegistrar &hle) {
     register_atrac_functions(hle);
 }
 
-} // namespace mhp3rd
+} // namespace portablekit

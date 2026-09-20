@@ -10,7 +10,7 @@
 #include <mutex>
 #include <system_error>
 
-namespace mhp3rd::savedata {
+namespace portablekit::savedata {
 namespace {
 
 namespace fs = std::filesystem;
@@ -455,4 +455,4 @@ BackupResult back_up_saves(const fs::path &memory_stick, const fs::path &folder,
     return result;
 }
 
-} // namespace mhp3rd::savedata
+} // namespace portablekit::savedata

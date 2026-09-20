@@ -7,7 +7,7 @@
 #include <filesystem>
 #include <iterator>
 
-namespace mhp3rd {
+namespace portablekit {
 
 inline constexpr std::uint32_t kLoadBase = psprecomp::kDefaultPspUserLoadBase;
 inline constexpr std::uint32_t kGuestRamBytes = 64u * 1024u * 1024u;
@@ -48,4 +48,4 @@ inline constexpr std::uint32_t kOverlaySlots[] = {
     0x0A285200u,  // end of the load image
 };
 
-} // namespace mhp3rd
+} // namespace portablekit

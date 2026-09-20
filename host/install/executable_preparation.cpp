@@ -22,7 +22,7 @@
 #include <cstring>
 #include <string>
 
-namespace mhp3rd::install {
+namespace portablekit::install {
 namespace {
 
 using Block = std::array<std::uint8_t, 16>;
@@ -157,4 +157,4 @@ std::vector<std::uint8_t> prepare_executable(std::span<const std::uint8_t> eboot
     return executable;
 }
 
-} // namespace mhp3rd::install
+} // namespace portablekit::install

@@ -15,7 +15,7 @@ set -euo pipefail
 
 profile_dir="$(cd "$(dirname "$0")/.." && pwd)"
 repo_dir="$(cd "$profile_dir/../.." && pwd)"
-build_dir="${1:-$repo_dir/out/mhp3rd}"
+build_dir="${1:-$repo_dir/out/portablekit}"
 jobs="${2:-2}"
 iso="$profile_dir/game/disc.iso"
 extract_dir="$profile_dir/analysis/overlays"

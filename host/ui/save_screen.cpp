@@ -25,11 +25,11 @@
 #include <utility>
 #include <vector>
 
-namespace mhp3rd::ui {
+namespace portablekit::ui {
 namespace {
 
 namespace fs = std::filesystem;
-namespace sd = mhp3rd::savedata;
+namespace sd = portablekit::savedata;
 
 enum class Stage {
     Closed,
@@ -535,4 +535,4 @@ bool save_screen(bool back) {
 
 bool take_restart_request() { return std::exchange(state().restart, false); }
 
-} // namespace mhp3rd::ui
+} // namespace portablekit::ui

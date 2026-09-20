@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace mhp3rd {
+namespace portablekit {
 
 // Read-only ISO9660 view of a PSP UMD image. Paths are case-insensitive and
 // use '/' separators relative to the image root (e.g. "PSP_GAME/USRDIR/DATA.BIN").
@@ -40,4 +40,4 @@ private:
     std::map<std::string, Entry> entries_;
 };
 
-} // namespace mhp3rd
+} // namespace portablekit

@@ -6,7 +6,7 @@
 
 #include <cstring>
 
-namespace mhp3rd {
+namespace portablekit {
 namespace {
 
 constexpr std::uint32_t kEventFlagWaitMulti = 0x200u;
@@ -474,4 +474,4 @@ void register_threadman(HleRegistrar &hle) {
     register_kernel_library(hle);
 }
 
-} // namespace mhp3rd
+} // namespace portablekit

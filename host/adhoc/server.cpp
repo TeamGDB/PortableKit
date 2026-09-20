@@ -10,7 +10,7 @@
 #include <mutex>
 #include <thread>
 
-namespace mhp3rd::adhoc {
+namespace portablekit::adhoc {
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -777,4 +777,4 @@ ServerStatus Server::status() const {
     return impl_->status_snapshot;
 }
 
-} // namespace mhp3rd::adhoc
+} // namespace portablekit::adhoc

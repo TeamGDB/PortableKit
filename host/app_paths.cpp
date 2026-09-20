@@ -11,7 +11,7 @@
 #include <mach-o/dyld.h>
 #endif
 
-namespace mhp3rd {
+namespace portablekit {
 
 std::filesystem::path executable_path() {
 #if defined(_WIN32)
@@ -53,4 +53,4 @@ std::vector<std::filesystem::path> bundled_fonts() {
     return fonts;
 }
 
-} // namespace mhp3rd
+} // namespace portablekit

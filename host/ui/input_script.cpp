@@ -16,7 +16,7 @@
 #include <string>
 #include <vector>
 
-namespace mhp3rd::ui::script {
+namespace portablekit::ui::script {
 namespace {
 
 // Frames a scripted button stays down: ImGui samples the pad once per frame.
@@ -250,4 +250,4 @@ void tick() {
     }
 }
 
-} // namespace mhp3rd::ui::script
+} // namespace portablekit::ui::script

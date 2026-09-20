@@ -2,7 +2,7 @@
 
 #include <algorithm>
 
-namespace mhp3rd::movie {
+namespace portablekit::movie {
 namespace {
 
 constexpr std::uint8_t kPackStart = 0xBAu;
@@ -175,4 +175,4 @@ std::optional<AccessUnit> PsmfDemuxer::pop_audio() {
 bool PsmfDemuxer::video_ready() const { return !video_units_.empty(); }
 bool PsmfDemuxer::audio_ready() const { return !audio_units_.empty(); }
 
-} // namespace mhp3rd::movie
+} // namespace portablekit::movie

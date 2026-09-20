@@ -36,7 +36,7 @@
 #include <string>
 #include <vector>
 
-namespace mhp3rd::adhoc {
+namespace portablekit::adhoc {
 
 struct ServerConfig {
     std::uint16_t adhocctl_port{kAdhocctlPort};  // the relay listens on relay_port_for() this
@@ -91,4 +91,4 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-} // namespace mhp3rd::adhoc
+} // namespace portablekit::adhoc

@@ -4,12 +4,12 @@
 #   generate.sh [build_dir]
 #
 # Requires a framework build (psp_analyze/psp_recomp) in build_dir, default
-# out/mhp3rd. Output: profiles/mhp3rd/analysis and profiles/mhp3rd/generated.
+# out/portablekit. Output: profiles/portablekit/analysis and the profile's generated directory.
 set -euo pipefail
 
 profile_dir="$(cd "$(dirname "$0")/.." && pwd)"
 repo_dir="$(cd "$profile_dir/../.." && pwd)"
-build_dir="${1:-$repo_dir/out/mhp3rd}"
+build_dir="${1:-$repo_dir/out/portablekit}"
 elf="$profile_dir/game/EBOOT.ELF"
 
 if [[ ! -f "$elf" ]]; then

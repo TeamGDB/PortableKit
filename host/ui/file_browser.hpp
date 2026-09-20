@@ -14,7 +14,7 @@
 // common places (home, downloads, SD cards and other removable drives) are one
 // press away, and only .iso files are listed unless the player asks for all.
 // The menu's save import and export use it to choose folders.
-namespace mhp3rd::ui {
+namespace portablekit::ui {
 
 class FileBrowser {
 public:
@@ -84,4 +84,4 @@ private:
 // "1.3 GB", "532 MB", "12 KB".
 std::string human_size(std::uint64_t bytes);
 
-} // namespace mhp3rd::ui
+} // namespace portablekit::ui

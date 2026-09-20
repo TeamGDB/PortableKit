@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <string>
 
-namespace mhp3rd::perf {
+namespace portablekit::perf {
 
 using Clock = std::chrono::steady_clock;
 
@@ -74,4 +74,4 @@ inline constexpr std::size_t kHistoryFrames = 192u;
 [[nodiscard]] const std::array<float, kHistoryFrames> &frame_history();
 [[nodiscard]] std::size_t history_cursor();
 
-} // namespace mhp3rd::perf
+} // namespace portablekit::perf

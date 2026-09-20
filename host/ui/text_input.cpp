@@ -19,7 +19,7 @@
 #include <utility>
 #include <vector>
 
-namespace mhp3rd::ui {
+namespace portablekit::ui {
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -570,4 +570,4 @@ void text_input_frame() {
     ImGui::End();
 }
 
-} // namespace mhp3rd::ui
+} // namespace portablekit::ui

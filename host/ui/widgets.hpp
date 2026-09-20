@@ -8,7 +8,7 @@
 // The look of the interface and the controls its screens are built from.
 // Everything is sized from the current text size, so it scales with the
 // window, and every control works with a gamepad, a keyboard and a mouse.
-namespace mhp3rd::ui {
+namespace portablekit::ui {
 
 // Colours from the project's logo: dark brown, bronze and gold.
 namespace colors {
@@ -109,4 +109,4 @@ struct Hint {
 };
 void hints(std::initializer_list<Hint> list);
 
-} // namespace mhp3rd::ui
+} // namespace portablekit::ui

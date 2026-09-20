@@ -23,7 +23,7 @@
 // frame in place of drawing the screen until it closes. Over the running game,
 // for the game's own keyboard requests: open_game_text_input() takes the pad
 // from the game and draws the keyboard with every presented game frame.
-namespace mhp3rd::ui {
+namespace portablekit::ui {
 
 struct TextInputRequest {
     std::string title;           // what is being entered, e.g. "Nickname"
@@ -61,4 +61,4 @@ bool open_game_text_input(TextInputRequest request, TextInputDone on_done);
 // the game draws faithfully and that has no special meaning in text.
 [[nodiscard]] bool hunter_name_character(char32_t c);
 
-} // namespace mhp3rd::ui
+} // namespace portablekit::ui

@@ -14,7 +14,7 @@
 // choice back.
 //
 // Only the main thread reads or writes these.
-namespace mhp3rd::settings {
+namespace portablekit::settings {
 
 enum class PresentMode { Fifo, Mailbox, Immediate };
 enum class PerfDisplay { Off, Overlay, OverlayAndLog, Log };
@@ -87,4 +87,4 @@ void save();
 // (for example "video.internal_scale") for this run, or null.
 [[nodiscard]] const char *overridden_by(const char *key);
 
-} // namespace mhp3rd::settings
+} // namespace portablekit::settings

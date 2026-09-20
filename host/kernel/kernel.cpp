@@ -10,7 +10,7 @@
 #include <iostream>
 #include <thread>
 
-namespace mhp3rd {
+namespace portablekit {
 namespace {
 
 constexpr std::uint32_t kMemoryGranularity = 0x100u;
@@ -922,4 +922,4 @@ void Kernel::idle_stub(AllegrexContext &ctx) {
     schedule(ctx);
 }
 
-} // namespace mhp3rd
+} // namespace portablekit

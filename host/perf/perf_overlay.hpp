@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-namespace mhp3rd::perf {
+namespace portablekit::perf {
 
 // The overlay is drawn on the CPU into a small RGBA image, which the renderer
 // scales onto the top-left corner of the presented frame.
@@ -17,4 +17,4 @@ void draw_overlay(std::uint32_t *pixels);
 // stays readable from a 544-line window up to a 4K screen.
 [[nodiscard]] std::uint32_t overlay_scale(std::uint32_t height);
 
-} // namespace mhp3rd::perf
+} // namespace portablekit::perf

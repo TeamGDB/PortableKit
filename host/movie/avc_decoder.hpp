@@ -6,7 +6,7 @@
 #include <span>
 #include <vector>
 
-namespace mhp3rd::movie {
+namespace portablekit::movie {
 
 // A decoded picture as planar 4:2:0: a full-size luma plane, then the two
 // half-size chroma planes, all tightly packed.
@@ -46,4 +46,4 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-} // namespace mhp3rd::movie
+} // namespace portablekit::movie

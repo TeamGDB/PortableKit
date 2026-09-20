@@ -5,7 +5,7 @@
 #include <memory>
 #include <span>
 
-namespace mhp3rd::audio {
+namespace portablekit::audio {
 
 enum class AtracCodec {
     Atrac3,     // baseline ATRAC3: 1024 samples per channel per frame
@@ -49,4 +49,4 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-} // namespace mhp3rd::audio
+} // namespace portablekit::audio

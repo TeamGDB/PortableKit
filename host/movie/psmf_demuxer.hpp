@@ -7,7 +7,7 @@
 #include <span>
 #include <vector>
 
-namespace mhp3rd::movie {
+namespace portablekit::movie {
 
 // Size of one MPEG program stream pack in a PSMF file.
 inline constexpr std::size_t kPackSize = 2048u;
@@ -77,4 +77,4 @@ private:
     unsigned audio_channels_{};
 };
 
-} // namespace mhp3rd::movie
+} // namespace portablekit::movie

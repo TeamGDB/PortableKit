@@ -2,7 +2,7 @@
 
 // Identity of the one release this profile supports. The hashes match
 // config/mhp3rd_npjb40001.toml and the profile README.
-namespace mhp3rd::install {
+namespace portablekit::install {
 
 // DISC_ID in PSP_GAME/PARAM.SFO.
 inline constexpr const char *kDiscId = "NPJB40001";
@@ -19,4 +19,4 @@ inline constexpr const char *kEncryptedExecutableSha256 =
 inline constexpr const char *kExecutableSha256 =
     "55c0598436c0753b04331f8e95d406f832d9217806e3a896fed0e88b33637d8c";
 
-} // namespace mhp3rd::install
+} // namespace portablekit::install

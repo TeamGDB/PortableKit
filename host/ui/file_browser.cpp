@@ -18,7 +18,7 @@
 #include <mutex>
 #include <system_error>
 
-namespace mhp3rd::ui {
+namespace portablekit::ui {
 namespace {
 
 namespace fs = std::filesystem;
@@ -343,4 +343,4 @@ FileBrowser::Result FileBrowser::frame(bool back) {
     return Result::Browsing;
 }
 
-} // namespace mhp3rd::ui
+} // namespace portablekit::ui

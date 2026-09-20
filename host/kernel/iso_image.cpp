@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <cctype>
 
-namespace mhp3rd {
+namespace portablekit {
 namespace {
 
 std::uint32_t read_le32(const std::vector<std::uint8_t> &data, std::size_t offset) {
@@ -93,4 +93,4 @@ std::vector<std::string> IsoImage::list(std::string directory) const {
     return names;
 }
 
-} // namespace mhp3rd
+} // namespace portablekit

@@ -21,7 +21,7 @@
 #include <string>
 #include <vector>
 
-namespace mhp3rd::ui {
+namespace portablekit::ui {
 namespace {
 
 // The preview line: English as the patched game shows it, and some of the
@@ -291,4 +291,4 @@ bool font_list(bool back) {
     return true;
 }
 
-} // namespace mhp3rd::ui
+} // namespace portablekit::ui

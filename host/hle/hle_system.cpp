@@ -13,7 +13,7 @@
 #include <ctime>
 #include <iostream>
 
-namespace mhp3rd {
+namespace portablekit {
 namespace {
 
 // Epoch the virtual PSP clock starts at, so guest wall time advances with it.
@@ -192,4 +192,4 @@ void register_system(HleRegistrar &hle) {
     register_platform(hle);
 }
 
-} // namespace mhp3rd
+} // namespace portablekit

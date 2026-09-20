@@ -10,7 +10,7 @@
 #include <algorithm>
 #include <mutex>
 
-namespace mhp3rd {
+namespace portablekit {
 namespace {
 
 // The product code other players see in the announcement. Players of the
@@ -136,4 +136,4 @@ void adhoc_join(const std::string &address) {
     adhoc_apply_settings(true);
 }
 
-} // namespace mhp3rd
+} // namespace portablekit

@@ -6,7 +6,7 @@
 #include <iostream>
 #include <unordered_set>
 
-namespace mhp3rd {
+namespace portablekit {
 
 std::string read_cstring(const psprecomp::GuestMemory &memory, std::uint32_t address, std::size_t max_length) {
     std::string text;
@@ -76,4 +76,4 @@ void log_once(const std::string &key, const std::string &message) {
     if (seen.insert(key).second) std::cerr << message << "\n";
 }
 
-} // namespace mhp3rd
+} // namespace portablekit

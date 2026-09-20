@@ -15,7 +15,7 @@
 // The logic here knows nothing about how questions are asked. InstallerUi is
 // the only thing a front end implements: the port's own setup screens
 // (host/ui), or SDL message boxes where those cannot be shown.
-namespace mhp3rd::install {
+namespace portablekit::install {
 
 // A problem the player can act on; what() is written for them.
 class InstallError final : public std::runtime_error {
@@ -115,4 +115,4 @@ void request_restart_on_exit();
 // Returns only on failure, with the exit code to use.
 int restart(char **argv);
 
-} // namespace mhp3rd::install
+} // namespace portablekit::install

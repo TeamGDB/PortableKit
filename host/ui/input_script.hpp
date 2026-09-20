@@ -25,11 +25,11 @@
 // `echo "0:shot now" >> file` captures the window within a few frames. It
 // always connects the virtual pad. Used to drive two instances side by side,
 // for example in ad hoc tests.
-namespace mhp3rd::ui::script {
+namespace portablekit::ui::script {
 
 // Reads the script and, if it presses gamepad buttons, connects the virtual pad.
 void attach();
 // Runs the steps due at this frame. Called before each pump.
 void tick();
 
-} // namespace mhp3rd::ui::script
+} // namespace portablekit::ui::script

@@ -26,7 +26,7 @@
 #include <mutex>
 #include <thread>
 
-namespace mhp3rd::ui {
+namespace portablekit::ui {
 namespace {
 
 namespace fs = std::filesystem;
@@ -427,4 +427,4 @@ ProblemAnswer show_problem(const std::string &title, const std::string &message,
     return run_problem(title, message, ask_setup);
 }
 
-} // namespace mhp3rd::ui
+} // namespace portablekit::ui

@@ -19,7 +19,7 @@
 #include <thread>
 
 
-namespace mhp3rd::adhoc {
+namespace portablekit::adhoc {
 
 std::string format_mac(const Mac &mac) {
     char text[18];
@@ -1584,4 +1584,4 @@ std::vector<int> Client::ptp_handles() const {
     return handles;
 }
 
-} // namespace mhp3rd::adhoc
+} // namespace portablekit::adhoc

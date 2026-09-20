@@ -19,7 +19,7 @@
 #include <string>
 #include <vector>
 
-namespace mhp3rd::adhoc {
+namespace portablekit::adhoc {
 
 struct Identity {
     std::string server;    // host name or address, optionally host:port for adhocctl
@@ -221,4 +221,4 @@ private:
 // Picks a free port for a socket opened on port 0.
 inline constexpr std::uint16_t kFirstEphemeralPort = 0x8000u;
 
-} // namespace mhp3rd::adhoc
+} // namespace portablekit::adhoc

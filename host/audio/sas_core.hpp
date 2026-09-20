@@ -5,7 +5,7 @@
 #include <array>
 #include <cstdint>
 
-namespace mhp3rd::audio {
+namespace portablekit::audio {
 
 inline constexpr std::uint32_t kSasMaxVoices = 32u;
 // SAS envelope heights are 0..0x40000000 on hardware; the rate encoding it
@@ -90,4 +90,4 @@ private:
 // an argument to every call, so it is keyed rather than assumed.
 [[nodiscard]] SasCore &sas_core(std::uint32_t handle);
 
-} // namespace mhp3rd::audio
+} // namespace portablekit::audio

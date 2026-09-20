@@ -28,7 +28,7 @@
 #include <string>
 #include <vector>
 
-namespace mhp3rd {
+namespace portablekit {
 namespace {
 
 // SceUtilitySavedataParam, after the common dialog header.
@@ -415,4 +415,4 @@ void register_savedata(HleRegistrar &hle, const std::filesystem::path &memory_st
     });
 }
 
-} // namespace mhp3rd
+} // namespace portablekit

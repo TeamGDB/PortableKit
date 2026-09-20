@@ -29,7 +29,7 @@
 #include <cstring>
 #include <string>
 
-namespace mhp3rd::adhoc::net {
+namespace portablekit::adhoc::net {
 
 #if defined(_WIN32)
 using Socket = SOCKET;
@@ -173,4 +173,4 @@ inline bool is_loopback_ipv4(std::uint32_t network_order) {
     return (ntohl(network_order) >> 24u) == 127u;
 }
 
-} // namespace mhp3rd::adhoc::net
+} // namespace portablekit::adhoc::net

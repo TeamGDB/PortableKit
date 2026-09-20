@@ -1,4 +1,4 @@
-#include "mhp3rd_profile.hpp"
+#include "system.hpp"
 
 #include "hle/hle_common.hpp"
 #include "kernel/kernel.hpp"
@@ -16,7 +16,7 @@
 #include <string>
 #include <string_view>
 
-namespace mhp3rd {
+namespace portablekit {
 namespace {
 
 // "No recompiled function registered at 0x0A002118" -> 0x0A002118
@@ -106,4 +106,4 @@ void install_profile(Runtime &runtime, const psprecomp::Elf32Image &elf, const P
     kernel().start_loader_thread(ctx, elf.runtime_entry(kLoadBase), 0u);
 }
 
-} // namespace mhp3rd
+} // namespace portablekit

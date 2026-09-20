@@ -9,7 +9,7 @@
 
 // Graphics Engine state machine: turns a PSP display list into draw calls with
 // decoded vertices, independent of any rendering backend.
-namespace mhp3rd::gpu {
+namespace portablekit::gpu {
 
 using psprecomp::GuestMemory;
 
@@ -294,4 +294,4 @@ std::uint32_t decode_vertices(const GuestMemory &memory, std::uint32_t address, 
                               std::uint32_t count, std::vector<Vertex> &out,
                               const float *bone_matrices = nullptr);
 
-} // namespace mhp3rd::gpu
+} // namespace portablekit::gpu

@@ -29,7 +29,7 @@
 #include <sstream>
 #include <vector>
 
-namespace mhp3rd {
+namespace portablekit {
 namespace {
 
 namespace mpeg_error {
@@ -610,4 +610,4 @@ void register_mpeg(HleRegistrar &hle) {
     register_jpeg(hle);
 }
 
-} // namespace mhp3rd
+} // namespace portablekit

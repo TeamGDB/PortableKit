@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-namespace mhp3rd::savedata {
+namespace portablekit::savedata {
 
 class ParamSfo {
 public:
@@ -41,4 +41,4 @@ private:
     std::map<std::string, Entry> entries_;  // PSP files keep keys sorted
 };
 
-} // namespace mhp3rd::savedata
+} // namespace portablekit::savedata

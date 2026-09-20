@@ -8,7 +8,7 @@
 #include <cstdlib>
 #include <iostream>
 
-namespace mhp3rd {
+namespace portablekit {
 namespace {
 
 std::uint32_t as_unsigned(std::int32_t value) { return static_cast<std::uint32_t>(value); }
@@ -117,4 +117,4 @@ void register_sysmem(HleRegistrar &hle) {
     });
 }
 
-} // namespace mhp3rd
+} // namespace portablekit

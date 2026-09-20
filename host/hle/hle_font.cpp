@@ -15,7 +15,7 @@
 #include <cstring>
 #include <iostream>
 
-namespace mhp3rd {
+namespace portablekit {
 namespace {
 
 // FontPixelFormat values used by SceFontGlyphImage.
@@ -333,4 +333,4 @@ void register_font(HleRegistrar &hle) {
     });
 }
 
-} // namespace mhp3rd
+} // namespace portablekit

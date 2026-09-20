@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <memory>
 
-namespace mhp3rd::audio {
+namespace portablekit::audio {
 
 inline constexpr std::uint32_t kSampleRate = 44'100u;
 inline constexpr std::uint32_t kChannels = 2u;
@@ -55,4 +55,4 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-} // namespace mhp3rd::audio
+} // namespace portablekit::audio

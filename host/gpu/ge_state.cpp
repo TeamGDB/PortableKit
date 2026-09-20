@@ -7,7 +7,7 @@
 #include <map>
 #include <vector>
 
-namespace mhp3rd::gpu {
+namespace portablekit::gpu {
 namespace {
 
 // Display list opcodes (command = word >> 24).
@@ -898,4 +898,4 @@ std::uint32_t GeState::execute(const GuestMemory &memory, std::uint32_t pc, std:
     return pc;
 }
 
-} // namespace mhp3rd::gpu
+} // namespace portablekit::gpu

@@ -11,7 +11,7 @@
 // on: every path, errors included, reaches QUIT within a few polls.
 #include <cstdint>
 
-namespace mhp3rd {
+namespace portablekit {
 
 namespace dialog_status {
 inline constexpr std::uint32_t kNone = 0u;
@@ -59,4 +59,4 @@ private:
     std::uint32_t status_{dialog_status::kNone};
 };
 
-} // namespace mhp3rd
+} // namespace portablekit

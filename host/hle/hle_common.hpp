@@ -12,7 +12,7 @@
 #include <string_view>
 #include <utility>
 
-namespace mhp3rd {
+namespace portablekit {
 
 using HleFunction = std::function<void(Runtime &, AllegrexContext &)>;
 
@@ -74,7 +74,7 @@ void register_utility(HleRegistrar &hle, const std::filesystem::path &memory_sti
 void register_savedata(HleRegistrar &hle, const std::filesystem::path &memory_stick);
 void register_adhoc(HleRegistrar &hle);
 
-#if defined(MHP3RD_HAS_RENDERER)
+#if defined(PORTABLEKIT_HAS_RENDERER)
 namespace gpu { class VulkanRenderer; }
 // The renderer owns the window, so HLE that needs host input goes through it.
 [[nodiscard]] gpu::VulkanRenderer *active_renderer();
@@ -84,4 +84,4 @@ namespace gpu { class VulkanRenderer; }
 gpu::VulkanRenderer *ensure_renderer();
 #endif
 
-} // namespace mhp3rd
+} // namespace portablekit

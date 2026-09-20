@@ -7,7 +7,7 @@
 
 #include "settings/settings.hpp"
 
-#if defined(MHP3RD_HAS_RENDERER)
+#if defined(PORTABLEKIT_HAS_RENDERER)
 #include "ui/text_input.hpp"
 #endif
 
@@ -20,7 +20,7 @@
 #include <string>
 #include <vector>
 
-namespace mhp3rd {
+namespace portablekit {
 namespace {
 
 // The on-screen keyboard's parameters, as the game's requests show them
@@ -238,7 +238,7 @@ void answer_request(psprecomp::GuestMemory &memory, std::uint32_t field) {
     const settings::Settings &s = settings::current();
     const std::string initial = field != 0u ? read_utf16(memory, memory.load32(field + osk::kInitialText)) : "";
     const std::size_t max_length = field != 0u ? field_max_length(memory, field) : 0u;
-#if defined(MHP3RD_HAS_RENDERER)
+#if defined(PORTABLEKIT_HAS_RENDERER)
     if (s.name_entry == settings::NameEntry::Keyboard && field != 0u && max_length > 0u) {
         ui::TextInputRequest request;
         request.prompt = read_utf16(memory, memory.load32(field + osk::kDescription));
@@ -381,4 +381,4 @@ void register_utility(HleRegistrar &hle, const std::filesystem::path &memory_sti
     register_savedata(hle, memory_stick);
 }
 
-} // namespace mhp3rd
+} // namespace portablekit

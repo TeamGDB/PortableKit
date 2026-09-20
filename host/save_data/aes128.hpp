@@ -7,7 +7,7 @@
 #include <array>
 #include <cstdint>
 
-namespace mhp3rd::savedata {
+namespace portablekit::savedata {
 
 using Block = std::array<std::uint8_t, 16>;
 
@@ -28,4 +28,4 @@ private:
     return out;
 }
 
-} // namespace mhp3rd::savedata
+} // namespace portablekit::savedata

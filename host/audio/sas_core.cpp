@@ -6,7 +6,7 @@
 #include <cstdlib>
 #include <map>
 
-namespace mhp3rd::audio {
+namespace portablekit::audio {
 namespace {
 
 // The five SPU ADPCM predictor coefficient pairs, in 1/64ths.
@@ -378,4 +378,4 @@ SasCore &sas_core(std::uint32_t handle) {
     return cores[handle];
 }
 
-} // namespace mhp3rd::audio
+} // namespace portablekit::audio

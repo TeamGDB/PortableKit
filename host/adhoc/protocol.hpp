@@ -19,7 +19,7 @@
 #include <string>
 #include <string_view>
 
-namespace mhp3rd::adhoc {
+namespace portablekit::adhoc {
 
 using Mac = std::array<std::uint8_t, 6>;
 
@@ -249,4 +249,4 @@ inline constexpr std::size_t kPtpHeaderSize = 4u;
 
 } // namespace relay
 
-} // namespace mhp3rd::adhoc
+} // namespace portablekit::adhoc

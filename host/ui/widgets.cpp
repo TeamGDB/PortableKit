@@ -13,7 +13,7 @@
 #include <cstdio>
 #include <cstring>
 
-namespace mhp3rd::ui {
+namespace portablekit::ui {
 namespace {
 
 bool focus_next = false;
@@ -685,4 +685,4 @@ void hints(std::initializer_list<Hint> list) {
     ImGui::Dummy({std::max(0.0f, at.x - start.x - px(24.0f)), font()});
 }
 
-} // namespace mhp3rd::ui
+} // namespace portablekit::ui

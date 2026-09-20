@@ -3,7 +3,7 @@
 # Each `library,nid,name` line becomes {"library", 0xNIDu, "name"},
 # and the file is only rewritten when its content changes.
 file(STRINGS "${INPUT}" lines)
-set(content "// Generated from configs/nids.csv by profiles/mhp3rd/tools/embed_nids.cmake.\n")
+set(content "// Generated from configs/nids.csv by tools/embed_nids.cmake.\n")
 set(line_number 0)
 foreach(line IN LISTS lines)
     math(EXPR line_number "${line_number} + 1")

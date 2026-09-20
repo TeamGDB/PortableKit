@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cstring>
 
-namespace mhp3rd::savedata {
+namespace portablekit::savedata {
 namespace {
 
 constexpr std::uint32_t kMagic = 0x46535000u;  // "\0PSF"
@@ -151,4 +151,4 @@ const std::vector<std::uint8_t> *ParamSfo::binary(const std::string &key) const 
     return &found->second.data;
 }
 
-} // namespace mhp3rd::savedata
+} // namespace portablekit::savedata

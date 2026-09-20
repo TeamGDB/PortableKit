@@ -25,7 +25,7 @@
 #include <unistd.h>
 #endif
 
-namespace mhp3rd::install {
+namespace portablekit::install {
 namespace {
 
 constexpr std::uint64_t kMiB = 1024u * 1024u;
@@ -362,4 +362,4 @@ void print_progress(const std::string &stage, std::uint64_t done, std::uint64_t 
     std::cout << std::endl;
 }
 
-} // namespace mhp3rd::install
+} // namespace portablekit::install
