@@ -573,7 +573,7 @@ gpu::VulkanRenderer *ensure_renderer() {
     if (tried) return active_renderer();
     tried = true;
     if (portablekit::env("NO_RENDER") != nullptr) {
-        std::cout << "Renderer: disabled by <prefix>_NO_RENDER\n";
+        std::cout << "Renderer: disabled by " << portablekit::env_name("NO_RENDER") << "\n";
         return nullptr;
     }
     auto renderer = std::make_unique<gpu::VulkanRenderer>();

@@ -188,7 +188,7 @@ const std::vector<Field> &fields() {
          [](Settings &s, const std::string &t) { return kNameEntries.parse(t, s.name_entry); },
          [](const Settings &s) { return kNameEntries.format(s.name_entry); },
          [](Settings &s, const char *t) {
-             if (!kNameEntries.parse(t, s.name_entry)) std::cerr << "[settings] <prefix>_OSK_MODE: keyboard or fixed\n";
+             if (!kNameEntries.parse(t, s.name_entry)) std::cerr << "[settings] " << env_name("OSK_MODE") << ": keyboard or fixed\n";
          }},
         {"input.name", "OSK_TEXT",
          [](Settings &s, const std::string &t) {

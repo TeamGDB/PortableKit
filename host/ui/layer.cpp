@@ -74,7 +74,7 @@ void load_fonts() {
     ImGuiIO &io = ImGui::GetIO();
     const char *text_font = portablekit::env("UI_FONT");
     if (text_font != nullptr && !exists(text_font)) {
-        std::cout << "[ui] <prefix>_UI_FONT " << text_font << " not found\n";
+        std::cout << "[ui] " << portablekit::env_name("UI_FONT") << " " << text_font << " not found\n";
         text_font = nullptr;
     }
     for (const char *candidate : kTextFonts) {

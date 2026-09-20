@@ -217,7 +217,7 @@ void AudioSink::initialize() {
     }
 
     if (!impl.enabled) {
-        std::cout << "Audio: disabled by <prefix>_NO_AUDIO\n";
+        std::cout << "Audio: disabled by " << portablekit::env_name("NO_AUDIO") << "\n";
         return;
     }
 #if defined(PORTABLEKIT_HAS_SDL_AUDIO)
