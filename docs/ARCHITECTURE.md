@@ -1,6 +1,6 @@
-# PSPRecomp architecture
+# Architecture
 
-PSPRecomp has two layers: a reusable PSP execution framework and one or more title profiles.
+PortableKit has two layers: the framework, in this repository, and a profile per game, each in the game's own repository.
 
 ## Framework
 
@@ -11,16 +11,18 @@ PSPRecomp has two layers: a reusable PSP execution framework and one or more tit
 - guest memory and EDRAM address handling;
 - NID/import registration;
 - generated-function registration and dispatch;
-- an Allegrex interpreter used as a last-resort fallback for guest addresses the corpus does not cover;
+- an Allegrex interpreter, which runs guest addresses the corpus does not cover and runs a whole game that has not been recompiled yet (see [BRINGING_UP_A_GAME.md](BRINGING_UP_A_GAME.md));
 - bounded generated-unit chaining;
 - scheduler visibility boundaries;
 - AOT hot-register and fast-memory support.
 
-The root tools provide executable analysis and generic C++ generation. Nothing in the framework is supposed to require a specific game address or game asset.
+`host/` provides the rest of the console: the kernel and its scheduler, the HLE modules, a Vulkan renderer driven by the GE's display lists, audio, save data, ad hoc networking, the interface and the installer.
+
+The root tools provide executable analysis and generic C++ generation. **Nothing in the framework may require a specific game's address, name or asset.** Where it needs to know something about the game it is running, it asks `portablekit::game()` — a `GameProfile` the port defines, described in [`host/profile.hpp`](../host/profile.hpp) and in [PROFILE_GUIDE.md](PROFILE_GUIDE.md).
 
 ## Profiles
 
-A profile supplies everything needed to turn the framework into a native build for one title: generated guest code, HLE functions, title bootstrap, compatibility behavior, renderer/audio/input integration, native guest-leaf replacements and build packaging.
+A profile supplies what only the game can answer, and as little else as possible: its identity and hashes, the key its executable's tag selects, where it loads and how much memory it wants, its overlay slots, its save folders, and the names the port goes by. Two hooks let it add HLE calls the framework does not implement and patch its own loaded image. Its recompiled code and its release packaging live with it.
 
 The profile boundary is intentional. Optimizations that are valid because of a measured address, ABI or data layout in one game stay in that game's profile even when they use reusable runtime APIs.
 
