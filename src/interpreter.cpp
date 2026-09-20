@@ -13,6 +13,7 @@
 #include <iostream>
 #include <limits>
 #include <unordered_map>
+#include <vector>
 
 namespace psprecomp {
 
@@ -30,6 +31,29 @@ std::size_t g_announced = 0u;
 constexpr std::size_t kMaxProfiledEntries = 4096u;
 std::unordered_map<std::uint32_t, std::uint64_t> g_entry_profile;
 
+// Addresses to report every time interpreted code reaches them, with the
+// registers a caller would care about. Bringing a game up means finding out
+// which branch of the game's own code never goes the way it should, and this
+// is the cheapest way to see it: a game's remaining question is usually
+// "which of these two paths does it take, and with what".
+std::vector<std::uint32_t> g_watch;
+std::uint64_t g_watch_limit = 40u;
+std::uint32_t g_watch_words = 0u;
+std::unordered_map<std::uint32_t, std::uint64_t> g_watch_seen;
+
+void load_watch_list(const char *text) {
+    while (*text != '\0') {
+        char *end = nullptr;
+        const unsigned long long value = std::strtoull(text, &end, 0);
+        if (end == text) break;
+        g_watch.push_back(static_cast<std::uint32_t>(value));
+        text = end;
+        while (*text == ',' || *text == ' ') ++text;
+    }
+    std::sort(g_watch.begin(), g_watch.end());
+    g_watch.erase(std::unique(g_watch.begin(), g_watch.end()), g_watch.end());
+}
+
 void load_settings() {
     if (g_settings_loaded) return;
     g_settings_loaded = true;
@@ -41,6 +65,41 @@ void load_settings() {
         if (end != text && *end == '\0' && value != 0ull)
             g_budget = static_cast<std::uint64_t>(value);
     }
+    if (const char *text = std::getenv("PSPRECOMP_INTERPRETER_WATCH")) load_watch_list(text);
+    if (const char *text = std::getenv("PSPRECOMP_INTERPRETER_WATCH_LIMIT")) {
+        char *end = nullptr;
+        const unsigned long long value = std::strtoull(text, &end, 0);
+        if (end != text) g_watch_limit = static_cast<std::uint64_t>(value);
+    }
+    if (const char *text = std::getenv("PSPRECOMP_INTERPRETER_WATCH_WORDS")) {
+        char *end = nullptr;
+        const unsigned long long value = std::strtoull(text, &end, 0);
+        if (end != text) g_watch_words = static_cast<std::uint32_t>(std::min(value, 64ull));
+    }
+}
+
+// Reports a watched address the first few times it is reached. The limit is
+// there because these sit in a frame loop: without it the run drowns in its
+// own diagnostic and nothing is legible.
+void report_watch(Runtime &runtime, const AllegrexContext &ctx, std::uint32_t pc) {
+    const std::uint64_t seen = ++g_watch_seen[pc];
+    if (g_watch_limit != 0u && seen > g_watch_limit) return;
+    std::cerr << "[watch] " << hex32(pc) << " #" << seen << " v0=" << hex32(ctx.gpr[2])
+              << " a0=" << hex32(ctx.gpr[4]) << " a1=" << hex32(ctx.gpr[5])
+              << " a2=" << hex32(ctx.gpr[6]) << " a3=" << hex32(ctx.gpr[7])
+              << " s0=" << hex32(ctx.gpr[16]) << " s1=" << hex32(ctx.gpr[17])
+              << " s2=" << hex32(ctx.gpr[18]) << " ra=" << hex32(ctx.gpr[31]);
+    // What a0 points at, when it is a pointer to an object: the field that is
+    // never what the game waits for is usually visible right here.
+    if (g_watch_words != 0u && runtime.memory().contains(ctx.gpr[4], g_watch_words * 4u)) {
+        std::cerr << "\n         [a0]";
+        for (std::uint32_t i = 0; i < g_watch_words; ++i) {
+            if (i % 8u == 0u && i != 0u) std::cerr << "\n              ";
+            std::cerr << " +" << std::hex << (i * 4u) << std::dec << "="
+                      << hex32(runtime.memory().load32(ctx.gpr[4] + i * 4u));
+        }
+    }
+    std::cerr << "\n";
 }
 
 void note_entry(std::uint32_t pc) {
@@ -834,6 +893,8 @@ InterpreterExit interpret_allegrex(Runtime &rt, AllegrexContext &ctx,
         }
 
         ctx.pc = pc;
+        if (!g_watch.empty() && std::binary_search(g_watch.begin(), g_watch.end(), pc))
+            report_watch(rt, ctx, pc);
         const DecodedInstruction decoded = decode_allegrex(memory.aot_load32(pc));
         ++executed;
 
