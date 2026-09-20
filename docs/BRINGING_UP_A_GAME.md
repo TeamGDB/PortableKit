@@ -81,6 +81,27 @@ Every one of these takes the profile's own prefix, so `TENKAWA_TRACE_KERNEL` for
 | `<PREFIX>_TRACE_SYNC` | Every kernel object a thread waits on, which is how a deadlock is read |
 | `PSPRECOMP_NO_INTERPRETER=1` | Turn the interpreter off. Nothing runs without a corpus; with one, the runtime stops at the first address the recompiler missed and names it |
 | `PSPRECOMP_MAX_DISPATCHES` | Stop after this many dispatches, for a bounded run |
+| `PSPRECOMP_INTERPRETER_WATCH` | Guest addresses, comma separated: report the registers each time interpreted code reaches one. `PSPRECOMP_INTERPRETER_WATCH_WORDS=N` also dumps N words at `a0`, and `PSPRECOMP_INTERPRETER_WATCH_LIMIT` bounds how many times each address is reported (40 by default, 0 for no limit) |
+
+## Reading what the game itself decides
+
+A game that boots, draws and then will not go on has usually taken one
+branch of its own code where it should have taken the other, and the last
+step of finding out which is not something a trace of the system calls can
+tell you. Disassemble outwards from what it last did, narrow it to the
+compare, then watch that address with `PSPRECOMP_INTERPRETER_WATCH` and read
+the registers.
+
+This found the whole of one game's opening: an object waiting for a field to
+become `-1`, the scene that would have set it sitting on a message screen,
+and that screen's state 1 reading the pad and doing nothing at all until the
+confirm button is pressed. None of that is visible in an I/O trace, and all
+of it took three runs once the addresses were known.
+
+It only sees interpreted code. For a game with no corpus that is everything;
+for a game with one it is whatever the recompiler did not cover, which
+includes any module the game loads and runs at run time. Run without a
+corpus when you need to watch an address in the executable itself.
 
 ## A warning about a run with a window
 
