@@ -208,3 +208,43 @@ if(PSPRECOMP_BUILD_TESTS)
     set_target_properties(portablekit_adhoc_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
     add_test(NAME portablekit_adhoc_tests COMMAND portablekit_adhoc_tests)
 endif()
+
+# The system layer belongs to a game's target, so nothing above compiles
+# host/main.cpp or most of host/. That let two compile errors through until a
+# second game was built. This target builds the whole backend-independent
+# system layer against the stand-in profile and links it, so a framework build
+# catches them on its own. It is not a port: no renderer, no FFmpeg, no game,
+# and it is never meant to be run.
+if(PSPRECOMP_BUILD_TESTS)
+    set(_check_nids "${CMAKE_BINARY_DIR}/generated_nids/nid_table.inc")
+    add_custom_command(
+        OUTPUT "${_check_nids}"
+        COMMAND ${CMAKE_COMMAND} "-DINPUT=${PORTABLEKIT_ROOT}/configs/nids.csv" -DOUTPUT=${_check_nids}
+                -P "${PORTABLEKIT_ROOT}/tools/embed_nids.cmake"
+        DEPENDS "${PORTABLEKIT_ROOT}/configs/nids.csv" "${PORTABLEKIT_ROOT}/tools/embed_nids.cmake"
+        COMMENT "Embedding the NID table for the host check")
+
+    set(_check_sources
+        "${PORTABLEKIT_ROOT}/host/main.cpp"
+        "${PORTABLEKIT_ROOT}/host/generated_stub.cpp"
+        "${PORTABLEKIT_ROOT}/tests/test_profile.cpp"
+        "${_check_nids}")
+    foreach(_source IN LISTS PORTABLEKIT_HOST_SOURCES)
+        list(APPEND _check_sources "${PORTABLEKIT_ROOT}/${_source}")
+    endforeach()
+
+    # tiny-AES-c is C; the project only enables C++, which compiles it unchanged.
+    set_source_files_properties("${PORTABLEKIT_ROOT}/third_party/tiny_aes/aes.c" PROPERTIES LANGUAGE CXX)
+    add_executable(portablekit_host_check ${_check_sources})
+    target_compile_features(portablekit_host_check PRIVATE cxx_std_20)
+    target_include_directories(portablekit_host_check PRIVATE
+        "${PORTABLEKIT_ROOT}/host" "${PORTABLEKIT_ROOT}/third_party"
+        "${CMAKE_BINARY_DIR}/generated_nids")
+    target_link_libraries(portablekit_host_check PRIVATE psprecomp_core ${CMAKE_DL_LIBS})
+    find_package(Threads REQUIRED)
+    target_link_libraries(portablekit_host_check PRIVATE Threads::Threads)
+    if(WIN32)
+        target_link_libraries(portablekit_host_check PRIVATE ws2_32 iphlpapi)
+    endif()
+    set_target_properties(portablekit_host_check PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+endif()

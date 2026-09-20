@@ -25,7 +25,9 @@ ctest --test-dir out
 
 That builds the recompiler (`psp_analyze`, `psp_recomp`, `dump_function`), the runtime, and the tests that need no game: the codegen tests, the save-data crypto and round trips, and the ad hoc client, server and discovery over loopback. `tests/test_profile.cpp` is a stand-in game, so host code that asks the profile for names can be tested without one.
 
-**This build does not compile `host/main.cpp` or most of `host/`.** Those belong to a game's target. A change to the system layer is not built until a port builds it, so build at least one port before calling a change done.
+It also builds `portablekit_host_check`: the whole backend-independent system layer, including `host/main.cpp`, compiled and linked against the stand-in profile with no renderer, no FFmpeg and no game. It is never run; it exists because two compile errors in `host/` once survived a green framework build and were only found when a second game was built.
+
+**It does not build the renderer, the interface or any generated code.** Those need a game's target, so build at least one port before calling a system-layer change done.
 
 ## Building a port
 
