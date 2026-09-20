@@ -493,6 +493,88 @@ Mutex *find(std::uint32_t work_area, SceUID &uid) {
 // calls entry(argument), then puts sp back. Stubbing it out returns without
 // running entry at all, which for this game meant module_start finished
 // without ever creating the game's main thread.
+// Mailboxes: a queue a thread can post a message pointer to and another can
+// wait on. The message itself belongs to the guest and is never touched here.
+void register_mailboxes(HleRegistrar &hle) {
+    // Ordering messages by the priority byte in the guest's own message header
+    // would mean knowing that header's layout. FIFO is what this does, and it
+    // says so rather than pretending.
+    constexpr std::uint32_t kMbxAttrMessagePriority = 0x400u;
+    hle.add("ThreadManForUser", "sceKernelCreateMbx", [](Runtime &rt, AllegrexContext &ctx) {
+        const SceUID uid = kernel().allocate_uid();
+        Mailbox mailbox;
+        mailbox.name = read_cstring(rt.memory(), arg(ctx, 0), 32u);
+        mailbox.attributes = arg(ctx, 1);
+        if ((mailbox.attributes & kMbxAttrMessagePriority) != 0u)
+            log_once("mbx-priority", "[kernel] mailbox \"" + mailbox.name +
+                                         "\" asks for messages in priority order; they are delivered in the order "
+                                         "they were sent");
+        kernel().mailboxes[uid] = std::move(mailbox);
+        kernel().finish(ctx, as_unsigned(uid));
+    });
+    hle.add("ThreadManForUser", "sceKernelDeleteMbx", [](Runtime &, AllegrexContext &ctx) {
+        auto found = kernel().mailboxes.find(as_signed(arg(ctx, 0)));
+        if (found == kernel().mailboxes.end()) {
+            kernel().finish(ctx, error::kUnknownMbxid);
+            return;
+        }
+        kernel().cancel_waiters(found->second.waiters, error::kWaitDelete);
+        kernel().mailboxes.erase(found);
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("ThreadManForUser", "sceKernelSendMbx", [](Runtime &, AllegrexContext &ctx) {
+        const SceUID uid = as_signed(arg(ctx, 0));
+        auto found = kernel().mailboxes.find(uid);
+        if (found == kernel().mailboxes.end()) {
+            kernel().finish(ctx, error::kUnknownMbxid);
+            return;
+        }
+        found->second.messages.push_back(arg(ctx, 1));
+        kernel().finish(ctx, 0u);
+        kernel().release_mailbox_waiters(uid);
+    });
+    hle.add("ThreadManForUser", "sceKernelPollMbx", [](Runtime &rt, AllegrexContext &ctx) {
+        auto found = kernel().mailboxes.find(as_signed(arg(ctx, 0)));
+        if (found == kernel().mailboxes.end()) {
+            kernel().finish(ctx, error::kUnknownMbxid);
+            return;
+        }
+        Mailbox &mailbox = found->second;
+        if (mailbox.messages.empty()) {
+            kernel().finish(ctx, error::kMbxNoMessage);
+            return;
+        }
+        if (arg(ctx, 1) != 0u) rt.memory().store32(arg(ctx, 1), mailbox.messages.front());
+        mailbox.messages.pop_front();
+        kernel().finish(ctx, 0u);
+    });
+    const auto receive = [](Runtime &rt, AllegrexContext &ctx) {
+        const SceUID uid = as_signed(arg(ctx, 0));
+        auto found = kernel().mailboxes.find(uid);
+        if (found == kernel().mailboxes.end()) {
+            kernel().finish(ctx, error::kUnknownMbxid);
+            return;
+        }
+        Mailbox &mailbox = found->second;
+        // A thread already queued has waited longer, so it goes first.
+        if (mailbox.waiters.empty() && !mailbox.messages.empty()) {
+            if (arg(ctx, 1) != 0u) rt.memory().store32(arg(ctx, 1), mailbox.messages.front());
+            mailbox.messages.pop_front();
+            kernel().finish(ctx, 0u);
+            return;
+        }
+        mailbox.waiters.push_back(kernel().current_uid());
+        WaitState wait{};
+        wait.type = WaitType::Mailbox;
+        wait.object = uid;
+        wait.out_address = arg(ctx, 1);
+        wait.timeout_address = arg(ctx, 2);
+        kernel().block(ctx, wait, 0u);
+    };
+    hle.try_add("ThreadManForUser", "sceKernelReceiveMbx", receive);
+    hle.add("ThreadManForUser", "sceKernelReceiveMbxCB", receive);
+}
+
 void register_stack_extension(HleRegistrar &hle) {
     hle.add("ThreadManForUser", "sceKernelExtendThreadStack", [](Runtime &, AllegrexContext &ctx) {
         const std::uint32_t size = arg(ctx, 0);
@@ -668,6 +750,7 @@ void register_threadman(HleRegistrar &hle) {
     register_mutexes(hle);
     register_lightweight_mutexes(hle);
     register_stack_extension(hle);
+    register_mailboxes(hle);
     register_callbacks_and_timers(hle);
     register_kernel_library(hle);
 }

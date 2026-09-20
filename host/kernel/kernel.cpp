@@ -68,6 +68,7 @@ const char *wait_name(WaitType type) {
     case WaitType::EventFlag: return "eventflag";
     case WaitType::Mutex: return "mutex";
     case WaitType::VBlank: return "vblank";
+    case WaitType::Mailbox: return "mailbox";
     case WaitType::ThreadEnd: return "thread-end";
     case WaitType::Host: return "host";
     }
@@ -678,6 +679,24 @@ void Kernel::release_event_flag_waiters(SceUID uid) {
         if ((thread->wait.mode & 0x10u) != 0u) flag.pattern = 0u;
         else if ((thread->wait.mode & 0x20u) != 0u) flag.pattern &= ~thread->wait.value;
         it = flag.waiters.erase(it);
+        wake(*thread, 0u);
+    }
+}
+
+void Kernel::release_mailbox_waiters(SceUID uid) {
+    auto found = mailboxes.find(uid);
+    if (found == mailboxes.end()) return;
+    Mailbox &mailbox = found->second;
+    while (!mailbox.waiters.empty() && !mailbox.messages.empty()) {
+        Thread *thread = find_thread(mailbox.waiters.front());
+        if (thread == nullptr || thread->status != ThreadStatus::Waiting) {
+            mailbox.waiters.pop_front();
+            continue;
+        }
+        const std::uint32_t message = mailbox.messages.front();
+        mailbox.messages.pop_front();
+        mailbox.waiters.pop_front();
+        if (thread->wait.out_address != 0u) runtime_->memory().store32(thread->wait.out_address, message);
         wake(*thread, 0u);
     }
 }

@@ -43,6 +43,7 @@ inline constexpr std::uint32_t kIllegalThid = 0x80020197u;
 inline constexpr std::uint32_t kUnknownThid = 0x80020198u;
 inline constexpr std::uint32_t kUnknownSemid = 0x80020199u;
 inline constexpr std::uint32_t kUnknownEvfid = 0x8002019Au;
+inline constexpr std::uint32_t kUnknownMbxid = 0x8002019Bu;
 inline constexpr std::uint32_t kUnknownCbid = 0x800201A1u;
 inline constexpr std::uint32_t kDormant = 0x800201A2u;
 inline constexpr std::uint32_t kNotDormant = 0x800201A4u;
@@ -53,6 +54,7 @@ inline constexpr std::uint32_t kSemaOverflow = 0x800201AEu;
 inline constexpr std::uint32_t kEvfCond = 0x800201AFu;
 inline constexpr std::uint32_t kEvfMulti = 0x800201B0u;
 inline constexpr std::uint32_t kEvfIllegalPattern = 0x800201B1u;
+inline constexpr std::uint32_t kMbxNoMessage = 0x800201B2u;
 inline constexpr std::uint32_t kWaitDelete = 0x800201B5u;
 inline constexpr std::uint32_t kIllegalMemblock = 0x800201B6u;
 inline constexpr std::uint32_t kIllegalCount = 0x800201BDu;
@@ -94,6 +96,7 @@ enum class WaitType {
     Semaphore,
     EventFlag,
     Mutex,
+    Mailbox,
     VBlank,
     ThreadEnd,
     Host,  // a condition only the host can check, such as network data arriving
@@ -155,6 +158,19 @@ struct Mutex {
     std::uint32_t attributes{};
     SceUID owner{};
     std::int32_t lock_count{};
+    std::deque<SceUID> waiters;
+};
+
+// A mailbox: a queue of pointers to messages the guest owns.
+//
+// On a PSP the kernel links the messages together through a header at the
+// front of each one. Nothing here does: every send and receive comes through
+// this module, so the queue lives on the host and the guest's header is never
+// read or written. That keeps a struct layout out of the framework.
+struct Mailbox {
+    std::string name;
+    std::uint32_t attributes{};
+    std::deque<std::uint32_t> messages;  // guest pointers, in the order sent
     std::deque<SceUID> waiters;
 };
 
@@ -259,12 +275,15 @@ public:
     std::map<SceUID, Semaphore> semaphores;
     std::map<SceUID, EventFlag> event_flags;
     std::map<SceUID, Mutex> mutexes;
+    std::map<SceUID, Mailbox> mailboxes;
     std::map<SceUID, Callback> callbacks;
     std::map<SceUID, VTimer> vtimers;
     // Re-evaluates the waiters of an object after its state changed.
     void release_semaphore_waiters(SceUID uid);
     void release_event_flag_waiters(SceUID uid);
     void release_mutex_waiters(SceUID uid);
+    // Hands queued messages to waiting threads, oldest message first.
+    void release_mailbox_waiters(SceUID uid);
     void cancel_waiters(std::deque<SceUID> &waiters, std::uint32_t result);
     [[nodiscard]] static bool event_flag_matches(std::uint32_t pattern, std::uint32_t bits, std::uint32_t mode) noexcept;
     [[nodiscard]] std::uint64_t vtimer_value(const VTimer &timer) const noexcept;
