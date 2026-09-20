@@ -10,6 +10,8 @@
 #include "psprecomp/common.hpp"
 
 #include <algorithm>
+#include <map>
+#include <vector>
 #include <charconv>
 #include <cstdlib>
 #include <fstream>
@@ -93,11 +95,29 @@ void install_system(Runtime &runtime, const psprecomp::Elf32Image &elf, const Pr
 
     const bool strict = env_set("STRICT_HLE");
     std::size_t stubbed = 0u;
+    // Every import this game makes that nothing implements, by library. It is
+    // the list a port is worked through, and reading it off the executable
+    // beats inferring it from the source: a call registered in a loop, or
+    // under a name that does not appear as a literal, is easy to miss by eye.
+    std::map<std::string, std::vector<std::string>> unimplemented;
     const auto imports = elf.scan_imports(runtime.memory(), *module);
     for (const auto &import : imports) {
-        if (hle.bound(import.library, import.nid) || strict) continue;
+        if (hle.bound(import.library, import.nid)) continue;
+        unimplemented[import.library].push_back(
+            runtime.nids().resolve(import.library, import.nid).value_or(psprecomp::hex32(import.nid)));
+        if (strict) continue;
         register_logging_stub(runtime, import);
         ++stubbed;
+    }
+    if (env_set("LIST_STUBS")) {
+        std::size_t total = 0u;
+        for (const auto &[library, names] : unimplemented) total += names.size();
+        std::cout << "Unimplemented imports: " << total << " of " << imports.size() << "\n";
+        for (auto &[library, names] : unimplemented) {
+            std::sort(names.begin(), names.end());
+            std::cout << "  " << library << " (" << names.size() << ")\n";
+            for (const std::string &name : names) std::cout << "    " << name << "\n";
+        }
     }
     // Without a corpus there is nothing at the import stubs, so the
     // interpreter would run their own two instructions and carry on with
