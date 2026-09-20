@@ -30,16 +30,27 @@ The profile boundary is intentional. Optimizations that are valid because of a m
 
 Guest functions are emitted ahead of time as C++ and registered at their guest addresses. Generated units may chain directly when the runtime can prove that the target has not been replaced by an import/HLE/host override. Visibility boundaries materialize cached architectural state before host code or scheduling can inspect or replace the guest context.
 
-## Interpreted fallback
+## The interpreter
 
-A corpus only contains the code that was visible when it was generated, so a title that
+The interpreter has two jobs, and the second is not a fallback at all.
+
+**Running what the corpus missed.** A corpus only contains the code that was visible when it was generated, so a title that
 swaps overlays into a guest address window will eventually jump somewhere no generated
 function claims. The outer dispatcher then interprets that code instead of stopping, in
 bounded slices so scheduling and preemption still happen between them. Reaching any
 registered address - an AOT unit, a host override or a PSP import stub - leaves the
 interpreter through normal dispatch, so imports still run their HLE wrappers and thread
 switching is unaffected. `PSPRECOMP_NO_INTERPRETER=1` restores the strict stop, and the
-end-of-run report names the addresses that ran interpreted.
+end-of-run report names the addresses that ran interpreted. A finished port should
+never reach the interpreter during normal play, and that switch is how it is checked.
+
+**Running a game that has no corpus yet.** Recompiling a whole game takes hours, and
+nothing about what the game needs can be learned until it runs. With no generated code at
+all, the runtime binds the executable's import stubs itself and interprets from the entry
+point, reaching the same kernel, HLE and renderer as recompiled code would. The first run
+of a brand-new port therefore already names the system calls it is missing, in the order
+the game asks for them. It is roughly twenty times slower, which does not matter for
+that. See [BRINGING_UP_A_GAME.md](BRINGING_UP_A_GAME.md).
 
 ## Code that changes at run time
 
