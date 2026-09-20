@@ -122,6 +122,11 @@ DecodedInstruction decode_allegrex(std::uint32_t word) {
     case 0x15: d.kind = OpcodeKind::Bnel; d.mnemonic = "bnel"; break;
     case 0x16: d.kind = OpcodeKind::Blezl; d.mnemonic = "blezl"; break;
     case 0x17: d.kind = OpcodeKind::Bgtzl; d.mnemonic = "bgtzl"; break;
+    // ADDI differs from ADDIU only in trapping on signed overflow. No
+    // compiler-generated PSP code relies on that trap, and the wrapped result
+    // is the same, so both lower the same way. The mnemonic still says which
+    // one it was.
+    case 0x08: d.kind = OpcodeKind::Addiu; d.mnemonic = "addi"; break;
     case 0x09: d.kind = OpcodeKind::Addiu; d.mnemonic = "addiu"; break;
     case 0x0A: d.kind = OpcodeKind::Slti; d.mnemonic = "slti"; break;
     case 0x0B: d.kind = OpcodeKind::Sltiu; d.mnemonic = "sltiu"; break;
