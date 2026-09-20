@@ -72,6 +72,18 @@ enum Mode : std::uint32_t {
     kSizes = 8,
     kAutoDelete = 9,
     kSingleDelete = 10,
+    kList = 11,
+    kFiles = 12,
+    kMakeDataSecure = 13,
+    kMakeData = 14,
+    kReadDataSecure = 15,
+    kReadData = 16,
+    kWriteDataSecure = 17,
+    kWriteData = 18,
+    kEraseSecure = 19,
+    kErase = 20,
+    kDeleteData = 21,
+    kGetSize = 22,
 };
 
 const char *mode_name(std::uint32_t mode) {
@@ -363,6 +375,14 @@ std::uint32_t run_request(psprecomp::GuestMemory &memory, std::uint32_t params) 
     case kSingleDelete:
         return do_delete(memory, params, save_name);
     case kSizes:
+    // GETSIZE asks the same question as SIZES and is answered from the same
+    // three blocks of the parameter: what the card has free, what the save
+    // already on it takes, and what this one would need. What the two modes
+    // do differently on a PSP is not established here; what is established
+    // is that a game asks GETSIZE while checking the memory stick, and that
+    // answering it with a parameter error puts an error dialog on the screen
+    // and stops the game there.
+    case kGetSize:
         return do_sizes(memory, params);
     default:
         // Not used by this game. Report a parameter error so the guest takes
