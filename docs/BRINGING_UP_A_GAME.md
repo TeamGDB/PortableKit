@@ -39,7 +39,7 @@ With no corpus, the program says so and runs the whole game under the interprete
 
 What you get out of this first run:
 
-- **`HLE imports: N total, M implemented, S logging stubs`** — the size of the gap before a single instruction has run.
+- **`HLE imports: N total, M implemented, S logging stubs`** — the size of the gap before a single instruction has run. Add `<PREFIX>_LIST_STUBS=1` and it names every one of them, grouped by library. That is the executable's own answer; do not try to work it out by grepping the framework for `hle.add`, because calls registered in a loop do not appear as literals and you will overstate the gap.
 - **`[hle-stub] Library::name a0=… a1=… ra=…`** — printed the first time the game calls something that is not implemented, with its arguments. This is the list you are after, in the order the game needs it.
 - **`[interpreter] instructions=… entries=… unique_addresses=…`** and the addresses with the most instructions — where the game actually spent its time before it stopped.
 - **`Runtime stopped: …`** — why it stopped. `PSP scheduler deadlock: no runnable thread` usually means an unimplemented call returned a lie and the game gave up; the last `[hle-stub]` line before it names the culprit.
@@ -64,6 +64,10 @@ grep -rho 'unsupported(0x[0-9A-Fa-f]*u, 0x[0-9A-Fa-f]*u, "[^"]*"' generated/*.cp
 
 A handful of sites is normal; they are reached, if ever, through the interpreter. A category with thousands of sites is a real gap in the recompiler and worth knowing about before you spend three hours compiling.
 
+Two things to know about these. First, an unsupported site is not always survivable: the interpreter refuses the same instruction the recompiler could not lower, so a site the game actually executes stops the run rather than slowing it. Second, the count collapses once you look: 435 sites in one game turned out to be six instructions.
+
+**Decode them, do not recall them.** The check that tells you your reference uses the same convention as this decoder is that it reproduces the entries `src/decoder.cpp` already has. If it does not, you are reading a different encoding and everything else you take from it is wrong. Then confirm against the corpus itself — the instructions around a site usually say what it must be doing.
+
 ## Useful switches while bringing a game up
 
 Every one of these takes the profile's own prefix, so `TENKAWA_TRACE_KERNEL` for one port and `MHP3RD_TRACE_KERNEL` for another, and two ports can run side by side without sharing them.
@@ -71,11 +75,16 @@ Every one of these takes the profile's own prefix, so `TENKAWA_TRACE_KERNEL` for
 | Variable | What it does |
 | --- | --- |
 | `<PREFIX>_NO_RENDER`, `<PREFIX>_NO_AUDIO` | No window, no sound: a boot check that runs anywhere |
+| `<PREFIX>_LIST_STUBS` | Name every import nothing implements, at start-up |
 | `<PREFIX>_STRICT_HLE` | Do not bind logging stubs for unimplemented imports, so the game stops at the first one instead of carrying on with a wrong answer |
 | `<PREFIX>_TRACE_KERNEL`, `_TRACE_IO`, `_TRACE_GE`, `_TRACE_SAVEDATA`, … | One subsystem each |
 | `<PREFIX>_TRACE_SYNC` | Every kernel object a thread waits on, which is how a deadlock is read |
 | `PSPRECOMP_NO_INTERPRETER=1` | Turn the interpreter off. Nothing runs without a corpus; with one, the runtime stops at the first address the recompiler missed and names it |
 | `PSPRECOMP_MAX_DISPATCHES` | Stop after this many dispatches, for a bounded run |
+
+## A warning about a run with a window
+
+A run with the renderer up does not always die on `SIGTERM`, so `timeout 90` can leave the game running. Use `timeout -s KILL`. Never leave a game running.
 
 ## What this does not tell you
 
