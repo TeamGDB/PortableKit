@@ -26,6 +26,14 @@ inline void game_camera_frame(psprecomp::Runtime &runtime) {
     return driver != nullptr && driver->driving != nullptr && driver->driving();
 }
 
+// The game is aiming under the driver: the second stick goes to the game
+// stretched to full length, so the game's aim code steps at any push and the
+// driver can size each step.
+[[nodiscard]] inline bool game_camera_aim_boost() {
+    const CameraDriver *driver = game().camera;
+    return driver != nullptr && driver->aim_boost != nullptr && driver->aim_boost();
+}
+
 // Full-deflection speed for the current camera: the driver's (Aim speed while
 // a game aims, say), or Camera speed.
 [[nodiscard]] inline float game_camera_degrees_per_second() {
