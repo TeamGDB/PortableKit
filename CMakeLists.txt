@@ -239,6 +239,15 @@ if(PSPRECOMP_BUILD_TESTS)
     add_test(NAME portablekit_texture_pack_tests COMMAND portablekit_texture_pack_tests)
 endif()
 
+# Renderer helpers that need no GPU.
+if(PSPRECOMP_BUILD_TESTS)
+    add_executable(portablekit_render_tests "${PORTABLEKIT_ROOT}/tests/render_tests.cpp")
+    target_include_directories(portablekit_render_tests PRIVATE "${PORTABLEKIT_ROOT}/host")
+    target_link_libraries(portablekit_render_tests PRIVATE psprecomp_core)
+    set_target_properties(portablekit_render_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME portablekit_render_tests COMMAND portablekit_render_tests)
+endif()
+
 # Keyboard and mouse bindings: names, settings.ini spelling, the menu's
 # assignment rules and what held keys press. No SDL or game data.
 if(PSPRECOMP_BUILD_TESTS)
