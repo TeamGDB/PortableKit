@@ -13,6 +13,9 @@
 #include "psprecomp/common.hpp"
 
 #include "camera_probe.hpp"
+#include "camera/camera_input.hpp"
+#include "camera/camera_driver.hpp"
+#include "settings/settings.hpp"
 #include "gpu/ge_state.hpp"
 #include "perf/frame_stats.hpp"
 #if defined(PORTABLEKIT_HAS_RENDERER)
@@ -197,6 +200,19 @@ void present_frame(Runtime &rt) {
     // The frame's camera has been measured by now, so the hunt for the guest
     // variables behind it can compare RAM against it.
     probe::camera_frame(rt, media().ge.view_matrix_source());
+    // The game's flip is the camera's frame: the camera update runs once
+    // between two flips, however many presents interpolation adds. The stick is
+    // already shaped and inverted by the input layer; its rate becomes degrees
+    // over the real time since the previous flip.
+    {
+        static perf::Clock::time_point previous_flip = present_start;
+        const float seconds = std::chrono::duration<float>(present_start - previous_flip).count();
+        previous_flip = present_start;
+        camera::set_rate(camera::Source::Stick, (static_cast<int>(renderer.pad().right_x) - 0x80) / 127.0f,
+                         (static_cast<int>(renderer.pad().right_y) - 0x80) / 127.0f);
+        camera::game_camera_frame(rt);
+        camera::advance(seconds, settings::current().camera_speed);
+    }
     perf::add_render_time(perf::Clock::now() - present_start);
     // A frame ends when its image has been handed to the swapchain.
     perf::end_frame(kernel().now_us());
@@ -297,6 +313,14 @@ void register_display_ctrl(HleRegistrar &hle) {
             analog_y = pad.analog_y;
             right_x = pad.right_x;
             right_y = pad.right_y;
+            // Keep the game's digital commands neutral while the analog
+            // camera consumes these axes: otherwise the game's one-shot
+            // vertical command fires from the same push and glides the camera
+            // against what the port is doing. The physical D-pad stays available.
+            if (camera::game_camera_driving()) {
+                right_x = 0x80u;
+                right_y = 0x80u;
+            }
         }
 #endif
         auto &memory = rt.memory();

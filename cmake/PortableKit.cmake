@@ -31,6 +31,7 @@ set(PORTABLEKIT_HOST_SOURCES
     host/audio/audio_sink.cpp
     host/audio/sas_core.cpp
     host/camera_probe.cpp
+    host/camera/camera_input.cpp
     host/gpu/ge_state.cpp
     host/gpu/texture_decode.cpp
     host/perf/frame_stats.cpp
