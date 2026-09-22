@@ -26,6 +26,12 @@ inline void game_camera_frame(psprecomp::Runtime &runtime) {
     return driver != nullptr && driver->driving != nullptr && driver->driving();
 }
 
+// Once per game frame, at the flip: gives the game's 3D view `aspect`, width
+// over height of the picture it is drawn into, through the game's own hook.
+inline void game_aspect_frame(psprecomp::Runtime &runtime, float aspect) {
+    if (game().view_aspect_frame != nullptr) game().view_aspect_frame(runtime, aspect);
+}
+
 // The game is aiming under the driver: the second stick goes to the game
 // stretched to full length, so the game's aim code steps at any push and the
 // driver can size each step.
