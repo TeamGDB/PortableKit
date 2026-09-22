@@ -27,6 +27,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <set>
 #include <vector>
 
 namespace portablekit::gpu {
@@ -1774,7 +1775,20 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
         return found->second;
     }
     std::vector<std::uint32_t> pixels;
-    if (!decode_texture(memory, state, pixels) || pixels.empty()) return white_texture;
+    if (!decode_texture(memory, state, pixels) || pixels.empty()) {
+        // <prefix>_TRACE_WHITE_TEXTURES: each texture that could not be decoded
+        // and is drawn white instead, once.
+        static const bool trace_white = portablekit::env("TRACE_WHITE_TEXTURES") != nullptr;
+        static std::set<std::uint64_t> reported;
+        if (trace_white && reported.insert(key).second) {
+            std::cerr << "[white-texture] addr=0x" << std::hex << state.address << " buffer_width=" << std::dec
+                      << state.buffer_width << " size=" << state.width << "x" << state.height
+                      << " format=" << static_cast<int>(state.format) << " swizzled=" << state.swizzled << " clut=0x"
+                      << std::hex << state.clut_address << " clut_format=" << state.clut_format << std::dec
+                      << " in_memory=" << memory.contains(state.address, 1u) << "\n";
+        }
+        return white_texture;
+    }
 
     if (textures.size() >= kMaxCachedTextures) {
         auto oldest = textures.begin();
