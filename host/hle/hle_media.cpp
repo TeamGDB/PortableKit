@@ -12,6 +12,7 @@
 
 #include "psprecomp/common.hpp"
 
+#include "camera_probe.hpp"
 #include "gpu/ge_state.hpp"
 #include "perf/frame_stats.hpp"
 #if defined(PORTABLEKIT_HAS_RENDERER)
@@ -193,6 +194,9 @@ void present_frame(Runtime &rt) {
     ui::draw_over_game();
     renderer.write_back_frame(rt.memory());
     renderer.present(address);
+    // The frame's camera has been measured by now, so the hunt for the guest
+    // variables behind it can compare RAM against it.
+    probe::camera_frame(rt, media().ge.view_matrix_source());
     perf::add_render_time(perf::Clock::now() - present_start);
     // A frame ends when its image has been handed to the swapchain.
     perf::end_frame(kernel().now_us());
