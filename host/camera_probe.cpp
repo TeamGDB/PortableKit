@@ -17,6 +17,12 @@
 #include <iostream>
 #include <vector>
 
+namespace psprecomp {
+// Defined in the core library; declared here rather than in the header so that
+// arming a watch does not rebuild every generated unit and every overlay.
+void set_write_watch(std::uint32_t address, std::uint32_t size);
+} // namespace psprecomp
+
 namespace portablekit::probe {
 #if defined(PORTABLEKIT_HAS_RENDERER)
 using portablekit::active_renderer;
@@ -61,6 +67,10 @@ constexpr std::size_t kPrintable = 24u;
 // a kind that overflows this had nothing to say and is dropped whole rather
 // than truncated.
 constexpr std::size_t kMostPerKind = 400u * 1000u;
+// Once a hunt is down to this few, the best of them is worth watching: the guest
+// code that writes it is what the hunt was really after, and watching it in the
+// same run needs no assumption that the address still means this tomorrow.
+constexpr std::size_t kWorthWatching = 6u;
 // A hunt that has not collapsed by now was started from a movement too weak to
 // discriminate; carrying it costs a read per candidate per frame for nothing.
 constexpr std::uint64_t kCollapseBy = 4u;
@@ -97,6 +107,7 @@ struct Hunt {
     float snapshot_signal{};
     int attempts{};
     int cooldown{};
+    bool watching{};
     std::uint64_t frames{};
     std::vector<std::uint8_t> snapshot;
     std::vector<Candidate> candidates;
@@ -278,6 +289,15 @@ void step(Hunt &h, const std::uint8_t *ram, std::uint32_t size, float signal, st
         h.candidates.shrink_to_fit();
     }
 
+    // The point of narrowing is to get somewhere worth watching.
+    if (!h.watching && !h.candidates.empty() && h.candidates.size() <= kWorthWatching) {
+        const Candidate &best = h.candidates.front();
+        std::cout << "[find-camera] " << h.name << ": watching guest writes to 0x" << std::hex
+                  << (base + best.offset) << std::dec << " (" << name_of(best.kind) << " "
+                  << shape_of(best.shape) << ")\n";
+        psprecomp::set_write_watch(base + best.offset, best.kind == Kind::Int16 ? 2u : 4u);
+        h.watching = true;
+    }
     if (thinned) {
         std::cout << "[find-camera] " << h.name << " after " << h.frames << " moving frames (" << signal
                   << " deg): " << h.candidates.size() << " left\n";
