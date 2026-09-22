@@ -34,6 +34,7 @@ set(PORTABLEKIT_HOST_SOURCES
     host/camera/camera_input.cpp
     host/gpu/ge_state.cpp
     host/gpu/texture_decode.cpp
+    host/input/bindings.cpp
     host/perf/frame_stats.cpp
     host/perf/perf_overlay.cpp
     host/overlays.cpp

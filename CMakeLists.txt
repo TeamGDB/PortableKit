@@ -209,6 +209,17 @@ if(PSPRECOMP_BUILD_TESTS)
     add_test(NAME portablekit_adhoc_tests COMMAND portablekit_adhoc_tests)
 endif()
 
+# Keyboard and mouse bindings: names, settings.ini spelling, the menu's
+# assignment rules and what held keys press. No SDL or game data.
+if(PSPRECOMP_BUILD_TESTS)
+    add_executable(portablekit_input_tests
+        "${PORTABLEKIT_ROOT}/tests/input_tests.cpp"
+        "${PORTABLEKIT_ROOT}/host/input/bindings.cpp")
+    target_include_directories(portablekit_input_tests PRIVATE "${PORTABLEKIT_ROOT}/host")
+    set_target_properties(portablekit_input_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME portablekit_input_tests COMMAND portablekit_input_tests)
+endif()
+
 # The system layer belongs to a game's target, so nothing above compiles
 # host/main.cpp or most of host/. That let two compile errors through until a
 # second game was built. This target builds the whole backend-independent
