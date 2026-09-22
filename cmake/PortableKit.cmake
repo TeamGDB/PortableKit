@@ -365,6 +365,11 @@ function(_portablekit_add_overlay host_target meta_path output_dir)
         target_link_libraries(${target} PRIVATE ${host_target})
     else()
         add_dependencies(${target} ${host_target})
+        if(ANDROID)
+            # The NDK links every shared library with --no-undefined; these
+            # leave the host's symbols to the loader like any other ELF.
+            target_link_options(${target} PRIVATE "LINKER:-z,undefs")
+        endif()
     endif()
     if(MSVC)
         target_compile_definitions(${target} PRIVATE PSPRECOMP_IMPORT_HOST_SYMBOLS=1)
