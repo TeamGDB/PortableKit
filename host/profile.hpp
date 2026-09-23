@@ -104,6 +104,14 @@ struct GameProfile {
     // next, so the last entry is the end of the load image. Empty for a game
     // that loads no overlays.
     std::span<const std::uint32_t> overlay_slots;
+    // Overlay libraries export <prefix>_overlay_info and
+    // <prefix>_register_overlay. The framework's own are "portablekit_"; a
+    // port that built its overlay libraries before it moved onto the framework
+    // names the prefix they were built with, so they load without being
+    // rebuilt. Null: only the framework's own names are looked for.
+    // Temporary: meant to go at a port's next planned rebuild of its overlays
+    // (for Yakumo, the next release build), and then from here as well.
+    const char *legacy_overlay_symbol_prefix = nullptr;
 
     // --- Save data ---------------------------------------------------------
     const char *save_game_name;             // the main folder, e.g. "ULJM05800"

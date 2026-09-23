@@ -174,10 +174,19 @@ void load_overlay_library(const std::filesystem::path &path) {
         std::cerr << "[overlay] cannot load " << path.filename().string() << ": " << library_error() << "\n";
         return;
     }
-    const auto info_of = reinterpret_cast<decltype(&portablekit_overlay_info)>(
+    auto info_of = reinterpret_cast<decltype(&portablekit_overlay_info)>(
         library_symbol(handle, "portablekit_overlay_info"));
-    const auto install = reinterpret_cast<decltype(&portablekit_register_overlay)>(
+    auto install = reinterpret_cast<decltype(&portablekit_register_overlay)>(
         library_symbol(handle, "portablekit_register_overlay"));
+    // A library built before its port moved onto the framework names the same
+    // two functions after the port. Nothing else about it differs.
+    if ((info_of == nullptr || install == nullptr) && game().legacy_overlay_symbol_prefix != nullptr) {
+        const std::string prefix = game().legacy_overlay_symbol_prefix;
+        info_of = reinterpret_cast<decltype(&portablekit_overlay_info)>(
+            library_symbol(handle, (prefix + "_overlay_info").c_str()));
+        install = reinterpret_cast<decltype(&portablekit_register_overlay)>(
+            library_symbol(handle, (prefix + "_register_overlay").c_str()));
+    }
     if (info_of == nullptr || install == nullptr) {
         std::cerr << "[overlay] " << path.filename().string() << " is not an overlay library\n";
         return;
