@@ -310,7 +310,7 @@ void review_screen(bool back) {
         if (r.current.source != TexturePackLocation::Source::Installed)
             info_row("Used from", utf8(r.current.folder));
         if (r.current.source == TexturePackLocation::Source::Variable)
-            indented("<prefix>_TEXTURE_PACK names this folder, so it stays in use until the variable is unset.",
+            indented(portablekit::env_name("TEXTURE_PACK") + " names this folder, so it stays in use until the variable is unset.",
                      colors::kDanger);
     }
 

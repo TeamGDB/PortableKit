@@ -1413,7 +1413,9 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
         const std::uint32_t valid_bits = families[impl.queue_family].timestampValidBits;
         const float period = timer_properties.limits.timestampPeriod;
         const char *why = nullptr;
-        if (portablekit::env("NO_GPU_TIMESTAMPS") != nullptr) why = "turned off (<prefix>_NO_GPU_TIMESTAMPS)";
+        // The variable's real name, kept alive for as long as why may point at it.
+        static const std::string turned_off = "turned off (" + portablekit::env_name("NO_GPU_TIMESTAMPS") + ")";
+        if (portablekit::env("NO_GPU_TIMESTAMPS") != nullptr) why = turned_off.c_str();
         else if (valid_bits == 0u) why = "the graphics queue has no timestamps";
         else if (!(period > 0.0f)) why = "the device reports no timestamp period";
         if (why == nullptr) {
