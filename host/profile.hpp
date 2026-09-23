@@ -32,6 +32,29 @@ struct SaveFolder {
     bool exported;           // included when the player exports or backs up
 };
 
+// A driver for the game's own camera. Every member may be null; the framework
+// reads camera/camera_driver.hpp's defaults for those.
+struct CameraDriver {
+    // Once per game frame, at the flip (never per interpolated present).
+    void (*frame)(psprecomp::Runtime &) = nullptr;
+    // The port is driving the camera right now, so the game must not also act
+    // on the second stick: its own turn would fight the driver's.
+    bool (*driving)() = nullptr;
+    // The game is aiming under the driver: the second stick goes to the game
+    // stretched to full length, so the game's aim code steps and the driver
+    // sizes each step.
+    bool (*aim_boost)() = nullptr;
+    // While aiming with the mouse, the direction (-1..1 each axis) the second
+    // stick should show the game this sample. False: the mouse has not moved.
+    bool (*mouse_aim)(float &x, float &y) = nullptr;
+    // Where the port does not drive the camera, the mouse can only switch the
+    // game's own turn: -1 or +1 while it moves left or right, 0 otherwise.
+    int (*mouse_stock_turn)() = nullptr;
+    // Full-deflection speed of the current camera, in degrees a second. Null:
+    // the Camera speed setting.
+    float (*degrees_per_second)() = nullptr;
+};
+
 struct GameProfile {
     // --- What the port is called -------------------------------------------
     const char *app_name;          // the executable: "MHP3rdNative"
@@ -86,6 +109,18 @@ struct GameProfile {
     // Called once the executable is in memory and before it runs, for the
     // per-game patches that have no better home. Null means there are none.
     void (*patch_loaded_image)(psprecomp::Runtime &, const psprecomp::Elf32Image &) = nullptr;
+
+    // --- The game's camera and view ----------------------------------------
+    // Drives the game's own camera from what the player asks of it
+    // (camera/camera_input.hpp). Only a game knows where its camera lives and
+    // when it may be moved. Null: the framework never touches the camera, and
+    // the second stick and the mouse reach the game as they are.
+    const CameraDriver *camera = nullptr;
+    // Once per game frame, at the flip: gives the game's 3D view `aspect`
+    // (width over height of the picture it is drawn into). Only a game knows
+    // where it keeps its projection. Null: the game draws only the PSP's
+    // 480:272, and the renderer does not offer to widen it.
+    void (*view_aspect_frame)(psprecomp::Runtime &, float aspect) = nullptr;
 };
 
 // Defined by the port, exactly once. Everything under host/ reads the game
