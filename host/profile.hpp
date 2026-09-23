@@ -32,6 +32,15 @@ struct SaveFolder {
     bool exported;           // included when the player exports or backs up
 };
 
+// A choice of what LT/RT (L2/R2) press past the trigger point, beside the
+// framework's own: L and R, like the shoulders.
+struct TriggerProfile {
+    const char *key;     // settings.ini and <prefix>_PAD_TRIGGERS, e.g. "bows"
+    const char *label;   // the menu, e.g. "Bows (R / △)"
+    std::uint32_t left;  // the PSP buttons L2 presses, as SceCtrlButtons bits
+    std::uint32_t right; // and R2
+};
+
 // Another release of the game than the one a port supports, and what the
 // installer tells a player who hands it that one.
 struct OtherRelease {
@@ -122,6 +131,14 @@ struct GameProfile {
     // agree on it, so it is the original release's code even when the port's
     // disc id is a different one.
     const char *adhoc_product_code;
+
+    // --- Controls ----------------------------------------------------------
+    // What the triggers may press instead of L and R, for the way this game is
+    // played. Empty: they press L and R, and the menu offers nothing else.
+    std::span<const TriggerProfile> trigger_profiles = {};
+    // What the menu says about them, after "Standard: L and R, like the
+    // shoulders."
+    const char *trigger_profiles_note = nullptr;
 
     // --- Hooks -------------------------------------------------------------
     // Called after the framework has registered its own HLE, so a game can add

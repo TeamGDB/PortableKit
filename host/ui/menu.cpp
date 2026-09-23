@@ -510,15 +510,17 @@ void Menu::controls() {
         s.trigger = static_cast<float>(trigger) / 100.0f;
         settings::save();
     }
-    {
-        static const char *const kProfiles[] = {"Standard (L / R)", "Bows (R / △)", "Bowguns (R / ○)"};
-        const int current = static_cast<int>(s.trigger_profile);
-        if (const int delta = choice_row(
-                "Trigger profile", kProfiles[current],
-                options_for("input.trigger_profile",
-                            "What LT/RT (L2/R2) press. Standard: L and R, like the shoulders. Bows: R to aim and △ "
-                            "to shoot. Bowguns: R to aim and ○ to fire. R1, △ and ○ keep working."))) {
-            s.trigger_profile = static_cast<settings::TriggerProfile>(cycle(current, delta, 3));
+    // Only a game with trigger profiles of its own has anything to choose.
+    if (const std::span<const TriggerProfile> profiles = portablekit::game().trigger_profiles; !profiles.empty()) {
+        const int count = static_cast<int>(profiles.size()) + 1;
+        const int current = std::min(static_cast<int>(s.trigger_profile), count - 1);
+        std::string description = "What LT/RT (L2/R2) press. Standard: L and R, like the shoulders.";
+        if (const char *note = portablekit::game().trigger_profiles_note; note != nullptr)
+            description += std::string(" ") + note;
+        if (const int delta = choice_row("Trigger profile",
+                                         current == 0 ? "Standard (L / R)" : profiles[current - 1].label,
+                                         options_for("input.trigger_profile", description))) {
+            s.trigger_profile = static_cast<std::uint32_t>(cycle(current, delta, count));
             settings::save();
         }
     }

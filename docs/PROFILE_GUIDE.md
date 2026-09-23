@@ -60,6 +60,8 @@ Two more are for a port that goes further than the PSP did, and both are null un
 - `camera`, a `CameraDriver`: drives the game's own camera from what the player asks of it. The framework turns every device — the second stick, camera keys, the mouse — into one request (`host/camera/camera_input.hpp`); the driver takes it at each flip and says whether the game must stop acting on the second stick meanwhile, whether the game is aiming, and how fast the current camera turns (`host/camera/camera_driver.hpp` has the framework's side and its defaults). Where a game keeps its camera is the game's, so the driver is too. Without one, Analog camera and its rows are not offered and what the devices ask of the camera is dropped. Yakumo's `host/camera/game_camera.cpp` is the example.
 - `view_aspect_frame`: called at each flip with the shape of the picture the game is drawn into, so a game that can widen its own view does. Without it the renderer does not offer Fill. Yakumo's `host/camera/game_aspect.cpp` is the example.
 
+`trigger_profiles` are for how a game is played rather than how it is run: what the triggers may press instead of L and R, each with the key settings.ini keeps and the label the menu shows. Yakumo offers Bows (R on L2 to hold the aim, △ on R2 to shoot) and Bowguns (R and ○). Without any, the triggers press L and R and the menu has no row for them.
+
 A driver writes into the game's memory, so check the code it relies on before it writes anything — Yakumo compares every instruction and constant it depends on at start-up, from `patch_loaded_image`, and stays out, saying why, if one differs.
 
 ## Generated code stays out of the repository

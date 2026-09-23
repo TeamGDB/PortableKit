@@ -111,9 +111,26 @@ const Names<PerfDisplay> kPerfDisplays{{{PerfDisplay::Off, "off"},
                                         {PerfDisplay::Log, "log"}}};
 const Names<RightStick> kRightSticks{
     {{RightStick::Camera, "camera"}, {RightStick::DPad, "dpad"}, {RightStick::Off, "off"}}};
-const Names<TriggerProfile> kTriggerProfiles{{{TriggerProfile::Standard, "standard"},
-                                              {TriggerProfile::Bows, "bows"},
-                                              {TriggerProfile::Bowguns, "bowguns"}}};
+// A trigger profile by the key the game gives it, or "standard" for L and R.
+bool parse_trigger_profile(const std::string &text, std::uint32_t &out) {
+    if (text == "standard") {
+        out = 0u;
+        return true;
+    }
+    const std::span<const TriggerProfile> profiles = game().trigger_profiles;
+    for (std::size_t i = 0; i < profiles.size(); ++i) {
+        if (text == profiles[i].key) {
+            out = static_cast<std::uint32_t>(i + 1u);
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string format_trigger_profile(std::uint32_t profile) {
+    const std::span<const TriggerProfile> profiles = game().trigger_profiles;
+    return profile == 0u || profile > profiles.size() ? std::string("standard") : std::string(profiles[profile - 1u].key);
+}
 const Names<NameEntry> kNameEntries{{{NameEntry::Keyboard, "keyboard"}, {NameEntry::Fixed, "fixed"}}};
 
 // Written by earlier versions: 1 typed the name into the window, which the
@@ -205,10 +222,10 @@ const std::vector<Field> &fields() {
          [](const Settings &s) { return format_float(s.trigger); },
          [](Settings &s, const char *t) { s.trigger = variable_float(t, 0.25f, 0.05f, 1.0f); }},
         {"input.trigger_profile", "PAD_TRIGGERS",
-         [](Settings &s, const std::string &t) { return kTriggerProfiles.parse(t, s.trigger_profile); },
-         [](const Settings &s) { return kTriggerProfiles.format(s.trigger_profile); },
+         [](Settings &s, const std::string &t) { return parse_trigger_profile(t, s.trigger_profile); },
+         [](const Settings &s) { return format_trigger_profile(s.trigger_profile); },
          [](Settings &s, const char *t) {
-             if (!kTriggerProfiles.parse(t, s.trigger_profile)) s.trigger_profile = TriggerProfile::Standard;
+             if (!parse_trigger_profile(t, s.trigger_profile)) s.trigger_profile = 0u;
          }},
         {"input.right_stick", "PAD_RSTICK_DPAD",
          [](Settings &s, const std::string &t) { return kRightSticks.parse(t, s.right_stick); },

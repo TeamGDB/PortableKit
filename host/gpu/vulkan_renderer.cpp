@@ -331,7 +331,7 @@ bool write_bmp(const std::string &path, const std::uint8_t *pixels, std::uint32_
 struct PadTuning {
     float dead_zone{0.15f};
     float trigger{0.25f};
-    settings::TriggerProfile triggers{settings::TriggerProfile::Standard};
+    std::uint32_t triggers{};
     float right_stick{0.5f};
     settings::RightStick right_stick_mode{settings::RightStick::Camera};
     bool invert_x{};
@@ -389,17 +389,14 @@ void read_gamepad(SDL_Gamepad *device, PadState &pad, int &analog_x, int &analog
     const auto axis = [&](SDL_GamepadAxis id) {
         return std::clamp(static_cast<float>(SDL_GetGamepadAxis(device, id)) / 32767.0f, -1.0f, 1.0f);
     };
-    // The trigger profiles copy other buttons for shooting: R on L2, where it
-    // is held to aim, and the weapon's attack on R2 -- triangle for a bow,
-    // circle for a bowgun. The buttons copied keep working.
+    // A game's trigger profiles put other buttons on them, such as a weapon's
+    // attack for shooting. The buttons copied keep working.
     std::uint32_t left_trigger = 0x0100u;   // L
     std::uint32_t right_trigger = 0x0200u;  // R
-    if (tuning.triggers == settings::TriggerProfile::Bows) {
-        left_trigger = 0x0200u;
-        right_trigger = 0x1000u;  // triangle
-    } else if (tuning.triggers == settings::TriggerProfile::Bowguns) {
-        left_trigger = 0x0200u;
-        right_trigger = 0x2000u;  // circle
+    const std::span<const TriggerProfile> profiles = portablekit::game().trigger_profiles;
+    if (tuning.triggers != 0u && tuning.triggers <= profiles.size()) {
+        left_trigger = profiles[tuning.triggers - 1u].left;
+        right_trigger = profiles[tuning.triggers - 1u].right;
     }
     if (axis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > tuning.trigger) buttons |= left_trigger;
     if (axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > tuning.trigger) buttons |= right_trigger;
