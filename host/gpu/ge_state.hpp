@@ -249,7 +249,11 @@ private:
     void handle_command(const GuestMemory &memory, std::uint32_t command, std::uint32_t data);
     void trace_unhandled(std::uint32_t command, std::uint32_t data);
     void draw_primitive(const GuestMemory &memory, std::uint32_t data);
-    void draw_bezier_or_spline(std::uint32_t command);
+    // Copies the state every draw is made with into call_.
+    void fill_draw_state(DrawCall &call) const;
+    // BEZIER and SPLINE: tessellates the surface the control points describe
+    // and draws it as triangles (or lines or points, as PATCHPRIMITIVE says).
+    void draw_patch(const GuestMemory &memory, std::uint32_t command, std::uint32_t data);
 
     std::array<std::uint32_t, 256> registers_{};
     RenderTarget target_{};
