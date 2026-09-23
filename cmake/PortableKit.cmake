@@ -35,6 +35,7 @@ set(PORTABLEKIT_HOST_SOURCES
     host/gpu/ge_state.cpp
     host/gpu/texture_decode.cpp
     host/input/bindings.cpp
+    host/input/touch_controls.cpp
     host/gpu/texture_pack.cpp
     host/gpu/texture_pack_import.cpp
     host/perf/frame_stats.cpp
@@ -88,6 +89,7 @@ set(PORTABLEKIT_RENDERER_SOURCES
     host/ui/save_screen.cpp
     host/ui/setup_screens.cpp
     host/ui/text_input.cpp
+    host/ui/touch_overlay.cpp
     host/ui/texture_pack_screen.cpp
     host/ui/widgets.cpp
     third_party/imgui/imgui.cpp

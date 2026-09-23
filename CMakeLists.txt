@@ -222,6 +222,16 @@ if(PSPRECOMP_BUILD_TESTS)
     add_test(NAME portablekit_adhoc_tests COMMAND portablekit_adhoc_tests)
 endif()
 
+# The on-screen touch controls: layout, fingers and the stick's maths.
+if(PSPRECOMP_BUILD_TESTS)
+    add_executable(portablekit_touch_tests
+        "${PORTABLEKIT_ROOT}/tests/touch_controls_tests.cpp"
+        "${PORTABLEKIT_ROOT}/host/input/touch_controls.cpp")
+    target_include_directories(portablekit_touch_tests PRIVATE "${PORTABLEKIT_ROOT}/host")
+    set_target_properties(portablekit_touch_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME portablekit_touch_tests COMMAND portablekit_touch_tests)
+endif()
+
 # Texture pack import: finding a pack in the layouts packs come in, the
 # checks made before copying, and the copy, swap and backup. No game data.
 if(PSPRECOMP_BUILD_TESTS)
