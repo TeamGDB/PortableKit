@@ -1175,9 +1175,9 @@ void Menu::system() {
     (void)data_dir;
     const std::string project = portablekit::game().project_name;
     const std::string log_name = std::string(portablekit::game().app_name) + ".log";
-    if (button_row("Save the log…", {false, {}, "Copies " + project + "'s log (" + log_name +
-                                                " and the logs folder) to a folder you pick, such as Downloads, "
-                                                "to send with a problem report."})) {
+    const std::string previous_log_name = std::string(portablekit::game().app_name) + "-previous.log";
+    if (button_row("Save the log…", {false, {}, "Copies " + project + "'s logs (this run's, the previous run's and "
+                                                "the logs folder) to a folder you pick, to send with a problem report."})) {
         std::fflush(stdout);
         std::fflush(stderr);
         std::error_code ec;
@@ -1187,6 +1187,7 @@ void Menu::system() {
         std::filesystem::remove_all(local.parent_path(), ec);
         std::filesystem::create_directories(local, ec);
         std::filesystem::copy_file(storage / log_name, local / log_name, ec);
+        std::filesystem::copy_file(storage / previous_log_name, local / previous_log_name, ec);
         if (std::filesystem::is_directory(storage / "logs", ec))
             std::filesystem::copy(storage / "logs", local / "logs", std::filesystem::copy_options::recursive, ec);
         const auto copied = android::pick_folder_and_copy(local);

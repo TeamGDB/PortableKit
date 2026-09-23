@@ -37,11 +37,15 @@ void *run_game(void *argument) {
 }
 
 // An app has no terminal: what the program prints goes to <app_name>.log in
-// its internal storage, where `adb shell run-as` can read it.
+// its internal storage, where `adb shell run-as` and the menu's Save the log
+// reach it; the one before is kept as <app_name>-previous.log.
 void redirect_output() {
     const char *storage = SDL_GetAndroidInternalStoragePath();
     if (storage == nullptr) return;
     const std::string log = std::string(storage) + "/" + portablekit::game().app_name + ".log";
+    // The previous run's log survives one start, for reporting a crash.
+    std::rename(log.c_str(),
+                (std::string(storage) + "/" + portablekit::game().app_name + "-previous.log").c_str());
     if (std::freopen(log.c_str(), "w", stdout) != nullptr) std::setvbuf(stdout, nullptr, _IOLBF, 0);
     if (std::freopen(log.c_str(), "a", stderr) != nullptr) std::setvbuf(stderr, nullptr, _IONBF, 0);
 }
