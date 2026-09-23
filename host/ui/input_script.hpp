@@ -7,10 +7,15 @@
 // frame counts window-event pumps: one per game frame while the game runs, one
 // per interface frame while a screen is up. Actions:
 //
-//   key NAME          press and release a key (SDL key names: Escape, Down, Return, Q)
-//   pad BUTTON[+...]  press and release buttons of a virtual gamepad (SDL names:
-//                     a, b, x, y, start, leftstick, rightstick, leftshoulder,
-//                     dpup, dpdown, dpleft, dpright, ...)
+//   key NAME [N]      press a key and release it N frames later, 4 by default
+//                     (SDL key names: Escape, Down, Return, Q). While the game
+//                     has input it reaches the game through the bindings too
+//   mouse DX DY       move the mouse by DX, DY counts
+//   click BUTTON [N]  press a mouse button (left, middle, right, x1, x2) for N
+//                     frames, 4 by default
+//   pad BUTTON[+...] [N]  press buttons of a virtual gamepad and release them N
+//                     frames later, 4 by default (SDL names: a, b, x, y, start,
+//                     leftstick, rightstick, leftshoulder, dpup, dpdown, ...)
 //   axis NAME VALUE   hold an axis of the virtual gamepad at VALUE, -1 to 1
 //                     (leftx, lefty, rightx, righty, lefttrigger, righttrigger)
 //   text STRING       type text
@@ -19,6 +24,10 @@
 //   quit              close the window
 //
 // For example: <prefix>_INPUT_SCRIPT="300:key Escape;330:shot menu;360:pad leftstick+rightstick"
+//
+// A script with mouse steps counts the pointer as captured for the game
+// without taking the real one, so it works with the window in the background,
+// and only its own mouse steps reach the game.
 //
 // <prefix>_INPUT_LIVE names a file read while the game runs: each line appended
 // to it is one step, and its frame counts from when the line is read, so

@@ -78,6 +78,12 @@ void register_sysmem(HleRegistrar &hle) {
     hle.add("SysMemUserForUser", "sceKernelFreeMemoryBlock", [](Runtime &, AllegrexContext &ctx) {
         kernel().finish(ctx, as_unsigned(kernel().free_block(static_cast<SceUID>(arg(ctx, 0)))));
     });
+    hle.add("SysMemUserForUser", "sceKernelMaxFreeMemSize", [](Runtime &, AllegrexContext &ctx) {
+        kernel().finish(ctx, kernel().largest_free_memory());
+    });
+    hle.add("SysMemUserForUser", "sceKernelTotalFreeMemSize", [](Runtime &, AllegrexContext &ctx) {
+        kernel().finish(ctx, kernel().free_memory());
+    });
     const auto success = [](Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, 0u); };
     hle.add("SysMemUserForUser", "sceKernelSetCompilerVersion", success);
     hle.add("SysMemUserForUser", "sceKernelSetCompiledSdkVersion603_605", success);

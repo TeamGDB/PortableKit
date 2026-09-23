@@ -1,6 +1,7 @@
-// sceMpeg and sceJpeg: the game's PSMF movie player (demo_sub.ovl).
+// sceMpeg and sceJpeg: a movie player a game builds itself on the MPEG
+// library, as opposed to the stock scePsmfPlayer (hle_psmfplayer.cpp).
 //
-// The player runs three threads: a feeder that reads the movie into a
+// Such a player typically runs three threads: a feeder that reads the movie into a
 // ring buffer through sceMpegRingbufferPut, which calls the game's own read
 // callback, and a video and an audio thread that take access units out of
 // that ring and decode them. The library's demultiplexer and decoders are

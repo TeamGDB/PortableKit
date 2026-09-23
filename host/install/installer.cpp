@@ -10,6 +10,7 @@
 
 #include "psprecomp/sha256.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <cstring>
@@ -121,9 +122,15 @@ Inspection inspect(const std::filesystem::path &path) {
         std::string what = "\"" + name + "\" is ";
         what += title != sfo.end() && !title->second.empty() ? title->second + " (" + disc_id->second + ")"
                                                               : "disc " + disc_id->second;
-        what += ". " + std::string(portablekit::game().project_name) + " supports only " + std::string(portablekit::game().game_title) + ", the Japanese release with disc id " +
-                portablekit::game().disc_id_display + ".";
-        what += " Other releases and regions are not supported.";
+        const GameProfile &profile = portablekit::game();
+        what += ". " + std::string(profile.project_name) + " supports only " + std::string(profile.game_title) +
+                (profile.release_name != nullptr ? ", " + std::string(profile.release_name) + " with disc id "
+                                                 : std::string(", disc id ")) +
+                profile.disc_id_display + ".";
+        const auto other = std::find_if(profile.other_releases.begin(), profile.other_releases.end(),
+                                        [&](const OtherRelease &release) { return disc_id->second == release.disc_id; });
+        what += other != profile.other_releases.end() ? " " + std::string(other->note)
+                                                      : std::string(" Other releases and regions are not supported.");
         throw InstallError(what);
     }
 

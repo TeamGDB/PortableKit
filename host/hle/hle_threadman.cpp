@@ -4,7 +4,10 @@
 
 #include "psprecomp/common.hpp"
 
+#include <algorithm>
 #include <cstring>
+#include <map>
+#include <optional>
 
 namespace portablekit {
 namespace {
@@ -64,6 +67,39 @@ void register_threads(HleRegistrar &hle) {
         else if (thread->status != ThreadStatus::Dormant) kernel().finish(ctx, error::kNotDormant);
         else kernel().finish(ctx, as_unsigned(thread->exit_status));
     });
+
+    // Waits until the thread has ended and answers its exit status. A thread
+    // that deletes itself as it ends is gone by the time the waiter looks, and
+    // its status with it; that answers 0. The timeout is in microseconds at a1.
+    const auto wait_thread_end = [](Runtime &rt, AllegrexContext &ctx) {
+        const SceUID uid = as_signed(arg(ctx, 0));
+        const Thread *thread = kernel().find_thread(uid);
+        if (thread == nullptr) {
+            kernel().finish(ctx, error::kUnknownThid);
+            return;
+        }
+        if (uid == kernel().current_uid()) {
+            kernel().finish(ctx, error::kIllegalThid);
+            return;
+        }
+        const std::uint32_t timeout_address = arg(ctx, 1);
+        std::optional<std::uint64_t> timeout;
+        if (timeout_address != 0u) timeout = rt.memory().load32(timeout_address);
+        auto &memory = rt.memory();
+        kernel().wait_host(ctx, timeout, [uid, timeout_address, &memory](bool timed_out) -> std::optional<std::uint32_t> {
+            const Thread *waited = kernel().find_thread(uid);
+            if (waited == nullptr) return 0u;
+            if (waited->status == ThreadStatus::Dormant || waited->status == ThreadStatus::Dead)
+                return as_unsigned(waited->exit_status);
+            if (timed_out) {
+                if (timeout_address != 0u) memory.store32(timeout_address, 0u);
+                return error::kWaitTimeout;
+            }
+            return std::nullopt;
+        });
+    };
+    hle.add("ThreadManForUser", "sceKernelWaitThreadEnd", wait_thread_end);
+    hle.add("ThreadManForUser", "sceKernelWaitThreadEndCB", wait_thread_end);
 
     // The *CB variants run the thread's notified callbacks before waiting.
     const auto sleep_cb = [](Runtime &, AllegrexContext &ctx) {
@@ -740,6 +776,205 @@ void register_kernel_library(HleRegistrar &hle) {
     });
 }
 
+
+// Variable-size memory pools. The pool is a block of partition memory; what
+// is allocated inside it is kept here, on the host, so the guest's memory
+// holds only what the game writes into its allocations.
+//
+// A PSP keeps its own management records inside the pool, so it reports
+// less free space than it was given. That overhead is not documented where
+// this project can use it, so this pool charges its own: every allocation is
+// rounded up to 8 bytes and costs 8 more, and the free size it reports is the
+// largest allocation that would succeed. A game that allocates exactly what
+// sceKernelReferVplStatus reported therefore gets it.
+struct Vpl {
+    std::string name;
+    std::uint32_t attributes{};
+    SceUID block{};
+    std::uint32_t address{};
+    std::uint32_t size{};
+    std::map<std::uint32_t, std::uint32_t> used; // start -> bytes, including the overhead
+};
+
+constexpr std::uint32_t kVplOverhead = 8u;
+constexpr std::uint32_t kVplAttrHighMemory = 0x4000u;
+constexpr std::uint32_t kUnknownVplid = 0x8002019Cu;
+
+std::map<SceUID, Vpl> &vpls() {
+    static std::map<SceUID, Vpl> pools;
+    return pools;
+}
+
+// The largest free gap, in bytes.
+std::uint32_t vpl_largest_gap(const Vpl &pool) {
+    std::uint32_t largest = 0u;
+    std::uint32_t cursor = pool.address;
+    for (const auto &[start, bytes] : pool.used) {
+        largest = std::max(largest, start - cursor);
+        cursor = start + bytes;
+    }
+    return std::max(largest, pool.address + pool.size - cursor);
+}
+
+std::uint32_t vpl_free_size(const Vpl &pool) {
+    const std::uint32_t gap = vpl_largest_gap(pool);
+    return gap > kVplOverhead ? gap - kVplOverhead : 0u;
+}
+
+// First fit. Returns the address the game gets, past the overhead.
+std::optional<std::uint32_t> vpl_allocate(Vpl &pool, std::uint32_t size) {
+    const std::uint64_t needed = ((static_cast<std::uint64_t>(size) + 7u) & ~std::uint64_t{7u}) + kVplOverhead;
+    std::uint32_t cursor = pool.address;
+    const auto take = [&](std::uint32_t start) {
+        pool.used.emplace(start, static_cast<std::uint32_t>(needed));
+        return start + kVplOverhead;
+    };
+    for (const auto &[start, bytes] : pool.used) {
+        if (start - cursor >= needed) return take(cursor);
+        cursor = start + bytes;
+    }
+    if (pool.address + pool.size - cursor >= needed) return take(cursor);
+    return std::nullopt;
+}
+
+void register_vpls(HleRegistrar &hle) {
+    hle.add("ThreadManForUser", "sceKernelCreateVpl", [](Runtime &rt, AllegrexContext &ctx) {
+        Vpl pool;
+        pool.name = read_cstring(rt.memory(), arg(ctx, 0), 32u);
+        pool.attributes = arg(ctx, 2);
+        const std::uint32_t size = arg(ctx, 3);
+        if (size == 0u || size > 0x7FFFFFFFu) {
+            kernel().finish(ctx, error::kIllegalArgument);
+            return;
+        }
+        const std::int32_t block = kernel().allocate_block(
+            "vpl:" + pool.name, (pool.attributes & kVplAttrHighMemory) != 0u ? 1u : 0u, size, 0u);
+        if (block < 0) {
+            kernel().finish(ctx, as_unsigned(block));
+            return;
+        }
+        pool.block = block;
+        pool.address = kernel().find_block(block)->address;
+        pool.size = size;
+        const SceUID uid = kernel().allocate_uid();
+        if (trace_sync())
+            log_sync("[kernel] vpl " + pool.name + " size=" + psprecomp::hex32(size) + " at " +
+                     psprecomp::hex32(pool.address) + " uid=" + std::to_string(uid));
+        vpls().emplace(uid, std::move(pool));
+        kernel().finish(ctx, as_unsigned(uid));
+    });
+    hle.add("ThreadManForUser", "sceKernelDeleteVpl", [](Runtime &, AllegrexContext &ctx) {
+        const auto found = vpls().find(as_signed(arg(ctx, 0)));
+        if (found == vpls().end()) {
+            kernel().finish(ctx, kUnknownVplid);
+            return;
+        }
+        (void)kernel().free_block(found->second.block);
+        vpls().erase(found);
+        kernel().finish(ctx, 0u);
+    });
+    // Blocking allocation. A waiter polls until the pool has room, the pool is
+    // deleted, or the timeout (microseconds, at a3, rewritten with what is
+    // left, as every other timed wait does) runs out.
+    const auto allocate = [](Runtime &rt, AllegrexContext &ctx) {
+        const SceUID uid = as_signed(arg(ctx, 0));
+        const auto found = vpls().find(uid);
+        if (found == vpls().end()) {
+            kernel().finish(ctx, kUnknownVplid);
+            return;
+        }
+        const std::uint32_t size = arg(ctx, 1);
+        if (size == 0u || size > found->second.size) {
+            kernel().finish(ctx, error::kIllegalArgument);
+            return;
+        }
+        const std::uint32_t out = arg(ctx, 2);
+        const std::uint32_t timeout_address = arg(ctx, 3);
+        std::optional<std::uint64_t> timeout;
+        if (timeout_address != 0u) timeout = rt.memory().load32(timeout_address);
+        auto &memory = rt.memory();
+        kernel().wait_host(ctx, timeout, [uid, size, out, timeout_address, &memory](bool timed_out) -> std::optional<std::uint32_t> {
+            const auto pool = vpls().find(uid);
+            if (pool == vpls().end()) return error::kWaitDelete;
+            if (const auto address = vpl_allocate(pool->second, size)) {
+                if (out != 0u) memory.store32(out, *address);
+                return 0u;
+            }
+            if (timed_out) {
+                if (timeout_address != 0u) memory.store32(timeout_address, 0u);
+                return error::kWaitTimeout;
+            }
+            return std::nullopt;
+        });
+    };
+    hle.add("ThreadManForUser", "sceKernelAllocateVpl", allocate);
+    hle.add("ThreadManForUser", "sceKernelAllocateVplCB", allocate);
+    hle.add("ThreadManForUser", "sceKernelTryAllocateVpl", [](Runtime &rt, AllegrexContext &ctx) {
+        const auto found = vpls().find(as_signed(arg(ctx, 0)));
+        if (found == vpls().end()) {
+            kernel().finish(ctx, kUnknownVplid);
+            return;
+        }
+        const std::uint32_t size = arg(ctx, 1);
+        if (size == 0u || size > found->second.size) {
+            kernel().finish(ctx, error::kIllegalArgument);
+            return;
+        }
+        const auto address = vpl_allocate(found->second, size);
+        if (!address) {
+            kernel().finish(ctx, error::kNoMemory);
+            return;
+        }
+        if (arg(ctx, 2) != 0u) rt.memory().store32(arg(ctx, 2), *address);
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("ThreadManForUser", "sceKernelFreeVpl", [](Runtime &, AllegrexContext &ctx) {
+        const auto found = vpls().find(as_signed(arg(ctx, 0)));
+        if (found == vpls().end()) {
+            kernel().finish(ctx, kUnknownVplid);
+            return;
+        }
+        const auto used = found->second.used.find(arg(ctx, 1) - kVplOverhead);
+        if (used == found->second.used.end()) {
+            kernel().finish(ctx, error::kIllegalMemblock);
+            return;
+        }
+        found->second.used.erase(used);
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("ThreadManForUser", "sceKernelCancelVpl", [](Runtime &rt, AllegrexContext &ctx) {
+        // Waiters poll; nothing here tracks them, so there are none to count.
+        const auto found = vpls().find(as_signed(arg(ctx, 0)));
+        if (found == vpls().end()) {
+            kernel().finish(ctx, kUnknownVplid);
+            return;
+        }
+        log_once("vpl-cancel", "[kernel] sceKernelCancelVpl does not release waiting threads");
+        if (arg(ctx, 1) != 0u) rt.memory().store32(arg(ctx, 1), 0u);
+        kernel().finish(ctx, 0u);
+    });
+    // SceKernelVplInfo: size, name[32], attr, poolSize, freeSize, numWaitThreads.
+    hle.add("ThreadManForUser", "sceKernelReferVplStatus", [](Runtime &rt, AllegrexContext &ctx) {
+        const auto found = vpls().find(as_signed(arg(ctx, 0)));
+        if (found == vpls().end()) {
+            kernel().finish(ctx, kUnknownVplid);
+            return;
+        }
+        const Vpl &pool = found->second;
+        const std::uint32_t info = arg(ctx, 1);
+        auto &memory = rt.memory();
+        if (memory.load32(info) != 0u) {
+            for (std::uint32_t i = 0; i < 32u; ++i)
+                memory.store8(info + 4u + i, i < pool.name.size() ? static_cast<std::uint8_t>(pool.name[i]) : 0u);
+            memory.store32(info + 36u, pool.attributes);
+            memory.store32(info + 40u, pool.size);
+            memory.store32(info + 44u, vpl_free_size(pool));
+            memory.store32(info + 48u, 0u);
+        }
+        kernel().finish(ctx, 0u);
+    });
+}
+
 } // namespace
 
 void register_threadman(HleRegistrar &hle) {
@@ -751,6 +986,7 @@ void register_threadman(HleRegistrar &hle) {
     register_lightweight_mutexes(hle);
     register_stack_extension(hle);
     register_mailboxes(hle);
+    register_vpls(hle);
     register_callbacks_and_timers(hle);
     register_kernel_library(hle);
 }

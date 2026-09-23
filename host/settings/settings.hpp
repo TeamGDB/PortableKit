@@ -1,5 +1,7 @@
 #pragma once
 
+#include "input/bindings.hpp"
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -16,22 +18,40 @@
 // Only the main thread reads or writes these.
 namespace portablekit::settings {
 
+// The profile's default player name (GameProfile::default_player_name), for
+// the fixed name before the player sets one.
+[[nodiscard]] std::string game_default_name();
+
 enum class PresentMode { Fifo, Mailbox, Immediate };
+// How the game's picture meets the window. Original keeps the PSP's shape with
+// black bars, Stretch fills the window by stretching it, and Fill gives the
+// game the window's shape: its view widens or narrows to match (the vertical
+// field of view stays), and the 2D interface keeps the PSP's proportions.
+enum class Aspect { Original, Stretch, Fill };
 enum class PerfDisplay { Off, Overlay, OverlayAndLog, Log };
 enum class RightStick { Camera, DPad, Off };
-// What answers the game when it asks for text such as the hunter's name.
+// What answers the game when it asks for text such as the player's name.
 enum class NameEntry { Keyboard, Fixed };
+// Presents per second. The game makes 30 frames a second; the faster rates
+// add frames in between with blended movement (frame interpolation), and
+// Display follows the display's refresh rate. 30 presents the game's frames
+// as they are, as before interpolation existed.
+enum class FrameRate { Fps30, Fps45, Fps60, Fps90, Fps120, Display };
 
 struct Settings {
     // Video
-    std::uint32_t internal_scale{2u};  // render resolution, multiples of 480x272
+    std::uint32_t internal_scale{2u};  // render resolution, multiples of 480x272 (272 lines each); 0: the window's
     std::uint32_t window_scale{2u};    // windowed size, multiples of 480x272
     bool fullscreen{};
     PresentMode present_mode{PresentMode::Fifo};
-    bool keep_aspect{true};            // letterbox rather than stretch to the window
+    Aspect aspect{Aspect::Original};
     bool sharp_screen{};               // nearest instead of linear scaling to the window
     bool sharp_textures{};             // nearest instead of linear texture sampling
+    bool texture_pack{true};           // draw an installed HD texture pack's images instead of the game's
+    std::string texture_pack_folder;   // a pack used where it is instead of textures/<disc id>; empty: none
     bool unthrottled{};                // let emulated time run ahead of real time
+    FrameRate frame_rate{FrameRate::Fps30};
+    bool frame_rate_auto{true};        // lower the frame rate rather than slow the game
     PerfDisplay perf{PerfDisplay::Off};
 
     // Text
@@ -46,17 +66,36 @@ struct Settings {
     bool confirm_south{};              // confirm (circle) on the south face button
     float dead_zone{0.15f};
     float trigger{0.25f};
+    // What LT/RT (L2/R2) press past the trigger point: 0 is L and R like the
+    // shoulders, n the game's GameProfile::trigger_profiles[n - 1].
+    std::uint32_t trigger_profile{};
     RightStick right_stick{RightStick::Camera};
     float right_stick_zone{0.5f};
+    // Drives the ordinary quest camera's yaw and pitch from how far the stick
+    // is pushed, instead of the game's fixed-speed turn and vertical presets.
+    // On by default. Off writes nothing at all, so the camera is exactly as
+    // the game made it.
+    bool analog_camera{true};
+    // Degrees per second at full deflection, before the stick's own curve.
+    float camera_speed{190.0f};
+    // Degrees per second at full deflection while a bow or a bowgun aims.
+    float aim_speed{90.0f};
     bool invert_camera_x{};
     bool invert_camera_y{};
+    // Keyboard and mouse. With the mouse on, the window captures the pointer
+    // while the game runs and the mouse turns the camera; Esc frees it.
+    bool mouse{true};
+    float mouse_sensitivity{0.10f};    // degrees of camera turn per count of mouse motion
+    bool invert_mouse_x{};
+    bool invert_mouse_y{};
+    input::Bindings bindings{input::default_bindings()};
     NameEntry name_entry{NameEntry::Keyboard};  // on-screen keyboard, or the name below at once
-    std::string name{"Hunter"};        // the fixed name
+    std::string name{game_default_name()};  // the fixed name
 
     // Network (ad hoc play through a PSP ad hoc server)
     bool adhoc{};                      // wireless switch on: the game may go on line
     std::string adhoc_server;          // host or host:port of the server; empty: none
-    std::string adhoc_nickname;        // shown to other players; empty: the hunter name
+    std::string adhoc_nickname;        // shown to other players; empty: the player name
     std::string adhoc_mac;             // this player's virtual MAC, made up on first use
     std::vector<std::string> adhoc_recent;  // sessions joined lately, the latest first
     std::uint32_t adhoc_host_port{27312};   // the built-in server's adhocctl port; the relay is on the next
@@ -74,6 +113,8 @@ struct Settings {
 inline constexpr std::uint32_t kMaxInternalScale = 8u;
 inline constexpr std::uint32_t kMaxWindowScale = 4u;
 inline constexpr std::uint32_t kMaxFontWeight = 2u;
+inline constexpr float kMinMouseSensitivity = 0.01f;
+inline constexpr float kMaxMouseSensitivity = 0.99f;
 
 // Loads the settings on first use.
 [[nodiscard]] Settings &current();

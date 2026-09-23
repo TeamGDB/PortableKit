@@ -1,7 +1,9 @@
-// sceAtrac3plus: the game's streamed music. Each track is a whole ATRAC3 WAVE
-// file the game has already read into guest memory; the library decodes it one
-// frame per call into 16-bit stereo PCM, which the game's own decode threads
-// then hand to sceAudio. Frames are decoded with FFmpeg (audio/atrac_decoder),
+// sceAtrac3plus: a game's music. A track is an ATRAC3 or ATRAC3plus WAVE file,
+// either read whole into guest memory (sceAtracSetDataAndGetID) or streamed:
+// the start of the file in a buffer, and the rest added by the game as it
+// plays (sceAtracSetHalfwayBufferAndGetID, sceAtracAddStreamData). The library
+// decodes it one frame per call into 16-bit stereo PCM, which the game's own
+// decode threads then hand to sceAudio. Frames are decoded with FFmpeg (audio/atrac_decoder),
 // so without it nothing here is bound and the imports stay logging stubs.
 //
 // Sample positions follow the library's convention: position 0 is the first
@@ -21,6 +23,7 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <span>
 #include <sstream>
 #include <vector>
 
@@ -75,6 +78,8 @@ struct TrackInfo {
 };
 
 struct AtracContext {
+    // False for an id sceAtracGetAtracID has handed out with no data yet.
+    bool loaded{};
     TrackInfo track;
     std::uint32_t buffer{};
     std::uint32_t buffer_size{};
@@ -86,6 +91,16 @@ struct AtracContext {
     std::int64_t next_frame{};
     std::int64_t cached_frame{-1};
     std::vector<std::int16_t> cached;
+
+    // Streaming: the buffer holds only part of the file, and the game adds
+    // the rest as it plays. Every byte it adds is copied here when it is
+    // added, so frames decode from this copy and what the game does to its
+    // buffer afterwards cannot change them. The buffer is used as a ring only
+    // to tell the game where to write next.
+    bool streaming{};
+    std::uint32_t written{};              // bytes of the file delivered, from its start
+    std::uint32_t stored_from{};          // file offset of stored[0]
+    std::vector<std::uint8_t> stored;
 };
 
 std::array<std::unique_ptr<AtracContext>, kMaxAtracIds> &contexts() {
@@ -93,9 +108,14 @@ std::array<std::unique_ptr<AtracContext>, kMaxAtracIds> &contexts() {
     return table;
 }
 
+// An id with data set; an id with none behaves as unknown data.
 AtracContext *find_context(std::uint32_t id) {
-    return id < kMaxAtracIds ? contexts()[id].get() : nullptr;
+    AtracContext *context = id < kMaxAtracIds ? contexts()[id].get() : nullptr;
+    return context != nullptr && context->loaded ? context : nullptr;
 }
+
+// Any id handed out, with data or not.
+bool id_in_use(std::uint32_t id) { return id < kMaxAtracIds && contexts()[id] != nullptr; }
 
 // Unknown ids and released ids fail differently on hardware.
 std::uint32_t context_error(std::uint32_t id) {
@@ -194,6 +214,14 @@ bool load_frame(const psprecomp::GuestMemory &memory, AtracContext &context, std
     std::vector<std::uint8_t> bytes(track.block_align);
     const auto decode = [&](std::int64_t index) {
         const std::uint64_t offset = track.data_offset + static_cast<std::uint64_t>(index) * track.block_align;
+        if (context.streaming) {
+            if (offset < context.stored_from ||
+                offset + track.block_align > context.stored_from + context.stored.size())
+                return false;
+            const auto start = context.stored.begin() + static_cast<std::ptrdiff_t>(offset - context.stored_from);
+            std::copy(start, start + track.block_align, bytes.begin());
+            return context.decoder.decode(bytes, context.cached.data()) != 0u;
+        }
         if (offset + track.block_align > std::min(context.buffer_size, track.data_offset + track.data_size)) return false;
         memory.copy_out(context.buffer + static_cast<std::uint32_t>(offset), bytes);
         return context.decoder.decode(bytes, context.cached.data()) != 0u;
@@ -217,6 +245,102 @@ void release_context(std::uint32_t id) {
     if (id < kMaxAtracIds) contexts()[id].reset();
 }
 
+// The file offset of the frame the next DecodeData starts in.
+std::uint32_t current_frame_offset(const AtracContext &context) {
+    const TrackInfo &track = context.track;
+    const auto frame_samples = static_cast<std::int64_t>(audio::atrac_frame_samples(track.codec));
+    const std::int64_t frame = (static_cast<std::int64_t>(context.position) + track.skip) / frame_samples;
+    return track.data_offset + static_cast<std::uint32_t>(frame) * track.block_align;
+}
+
+// Drops stored bytes the decoder can no longer need: everything before the
+// current frame, less the two frames of warm-up a seek decodes first.
+void trim_stored(AtracContext &context) {
+    const std::uint32_t keep_from_wanted = current_frame_offset(context);
+    const std::uint32_t warm_up = 2u * context.track.block_align;
+    const std::uint32_t keep_from = keep_from_wanted > warm_up ? keep_from_wanted - warm_up : 0u;
+    if (keep_from <= context.stored_from) return;
+    const std::uint32_t drop = std::min<std::uint32_t>(keep_from - context.stored_from,
+                                                       static_cast<std::uint32_t>(context.stored.size()));
+    context.stored.erase(context.stored.begin(), context.stored.begin() + drop);
+    context.stored_from += drop;
+}
+
+// Copies `size` bytes the game has just written at `address` as the file's
+// bytes from `written` on.
+void store_added(const psprecomp::GuestMemory &memory, AtracContext &context, std::uint32_t address,
+                 std::uint32_t size) {
+    if (context.stored.empty()) context.stored_from = context.written;
+    const std::size_t at = context.stored.size();
+    context.stored.resize(at + size);
+    memory.copy_out(address, std::span(context.stored).subspan(at, size));
+    context.written += size;
+}
+
+// Frames in the buffer the game has not decoded yet, or "all of it" once the
+// whole file has been delivered.
+std::int32_t remain_frames(const AtracContext &context) {
+    if (!context.streaming || context.written >= context.track.file_size) return kRemainAllDataOnMemory;
+    const std::uint32_t from = current_frame_offset(context);
+    if (context.written <= from) return 0;
+    return static_cast<std::int32_t>((context.written - from) / context.track.block_align);
+}
+
+// Where the game writes next, how much fits without overwriting a byte not
+// yet decoded or running past the ring's end, and the file offset to read it
+// from.
+//
+// The ring is whole frames: games write a frame at a time wherever they are
+// told, so there must always be room for one. Frames start where the data
+// starts in the buffer, after the header the first fill put there, and file
+// frame f lives in slot f mod the number of frames that fit. A buffer that
+// holds the whole file is then simply the file. Where a PSP puts its slots
+// has not been established; the game only writes where it is told, and
+// frames decode from the copy made when they are added, so it does not
+// change what is heard.
+struct StreamWrite {
+    std::uint32_t address{};
+    std::uint32_t writable{};
+    std::uint32_t file_offset{};
+};
+
+std::uint32_t ring_frames(const AtracContext &context) {
+    const std::uint32_t data_in_buffer = std::min(context.track.data_offset, context.buffer_size);
+    return (context.buffer_size - data_in_buffer) / context.track.block_align;
+}
+
+// The address file offset `offset` (in the data) is written to.
+std::uint32_t ring_address(const AtracContext &context, std::uint32_t offset) {
+    const TrackInfo &track = context.track;
+    const std::uint32_t frames = std::max(ring_frames(context), 1u);
+    const std::uint32_t into = offset - std::min(offset, track.data_offset);
+    return context.buffer + track.data_offset + (into / track.block_align % frames) * track.block_align +
+           into % track.block_align;
+}
+
+StreamWrite stream_write(const AtracContext &context) {
+    const TrackInfo &track = context.track;
+    const std::uint32_t frames = ring_frames(context);
+    if (frames == 0u) return {context.buffer, 0u, context.written};
+    const std::uint32_t ring = frames * track.block_align;
+    const std::uint32_t written = std::max(context.written, track.data_offset);
+    const std::uint32_t pending = written - std::min(written, current_frame_offset(context));
+    std::uint32_t writable = pending < ring ? ring - pending : 0u;
+    // Contiguous: up to the end of the last slot.
+    const std::uint32_t into_ring = (written - track.data_offset) % ring;
+    writable = std::min(writable, ring - into_ring);
+    writable = std::min(writable, track.file_size - std::min(written, track.file_size));
+    return {ring_address(context, written), writable, written};
+}
+
+// The file offset of the frame sample `sample` is decoded from.
+std::uint32_t reset_offset(const AtracContext &context, std::int32_t sample) {
+    const TrackInfo &track = context.track;
+    const auto frame_samples = static_cast<std::int64_t>(audio::atrac_frame_samples(track.codec));
+    const std::int64_t frame = (static_cast<std::int64_t>(sample) + track.skip) / frame_samples;
+    return track.data_offset + static_cast<std::uint32_t>(frame) * track.block_align;
+}
+
 void write_s32(psprecomp::GuestMemory &memory, std::uint32_t address, std::int32_t value) {
     if (address != 0u) memory.store32(address, static_cast<std::uint32_t>(value));
 }
@@ -233,43 +357,91 @@ void finish_traced(AllegrexContext &ctx, const char *name, std::uint32_t result,
     kernel().finish(ctx, result);
 }
 
+struct LoadResult {
+    std::uint32_t result{};  // the id, or an error
+    std::string details;
+};
+
+// Reads the header, opens the decoder and puts the track in slot `id`, or in
+// the first free one. `streaming`: only `read_size` bytes of the file are in
+// the buffer yet; otherwise all of it that ever will be.
+LoadResult load_track(const psprecomp::GuestMemory &memory, std::optional<std::uint32_t> id, std::uint32_t buffer,
+                      std::uint32_t read_size, std::uint32_t buffer_size, bool streaming) {
+    auto context = std::make_unique<AtracContext>();
+    if (read_size > buffer_size) return {atrac_error::kSizeTooSmall, "read size past the buffer"};
+    if (auto failed = parse_header(memory, buffer, read_size, context->track)) return {*failed, "bad header"};
+    const TrackInfo &track = context->track;
+    if (!streaming && buffer_size < track.file_size)
+        log_once("atrac-partial", "[atrac] a track does not fit its buffer and is not streamed; it is cut short");
+    if (!context->decoder.open(track.codec, track.channels, track.block_align, track.extradata))
+        return {atrac_error::kBadCodecParam, "decoder refused the stream"};
+    auto &table = contexts();
+    std::uint32_t slot = 0u;
+    if (id) {
+        slot = *id;
+    } else {
+        const auto free = std::find_if(table.begin(), table.end(), [](const auto &entry) { return !entry; });
+        if (free == table.end()) return {atrac_error::kNoAtracId, {}};
+        slot = static_cast<std::uint32_t>(free - table.begin());
+    }
+    context->loaded = true;
+    context->buffer = buffer;
+    context->buffer_size = buffer_size;
+    context->streaming = streaming;
+    if (streaming) store_added(memory, *context, buffer, read_size);
+    std::ostringstream details;
+    details << "file=" << track.file_size << " align=" << track.block_align << " channels=" << track.channels
+            << " end=" << track.end_sample << " loop=" << track.loop_start << ".." << track.loop_end
+            << " skip=" << track.skip;
+    if (streaming) details << " streamed, " << read_size << " of it in a buffer of " << buffer_size;
+    table[slot] = std::move(context);
+    return {slot, details.str()};
+}
+
 void register_atrac_functions(HleRegistrar &hle) {
     // sceAtracSetDataAndGetID(buffer, bufferSize) -> atracID
     hle.add("sceAtrac3plus", "sceAtracSetDataAndGetID", [](Runtime &rt, AllegrexContext &ctx) {
-        const std::uint32_t buffer = arg(ctx, 0);
-        const std::uint32_t buffer_size = arg(ctx, 1);
-        auto context = std::make_unique<AtracContext>();
-        if (auto failed = parse_header(rt.memory(), buffer, buffer_size, context->track)) {
-            finish_traced(ctx, "sceAtracSetDataAndGetID", *failed, "bad header");
-            return;
-        }
-        const TrackInfo &track = context->track;
-        if (buffer_size < track.file_size)
-            log_once("atrac-partial", "[atrac] a track does not fit its buffer; streaming is not implemented");
-        if (!context->decoder.open(track.codec, track.channels, track.block_align, track.extradata)) {
-            finish_traced(ctx, "sceAtracSetDataAndGetID", atrac_error::kBadCodecParam, "decoder refused the stream");
-            return;
-        }
+        const auto id = load_track(rt.memory(), std::nullopt, arg(ctx, 0), arg(ctx, 1), arg(ctx, 1), false);
+        finish_traced(ctx, "sceAtracSetDataAndGetID", id.result, id.details);
+    });
+    // sceAtracSetHalfwayBufferAndGetID(buffer, readSize, bufferSize) -> atracID:
+    // the first readSize bytes of the file are in a buffer of bufferSize, and
+    // the game adds the rest through sceAtracAddStreamData as it plays.
+    hle.add("sceAtrac3plus", "sceAtracSetHalfwayBufferAndGetID", [](Runtime &rt, AllegrexContext &ctx) {
+        const auto id = load_track(rt.memory(), std::nullopt, arg(ctx, 0), arg(ctx, 1), arg(ctx, 2), true);
+        finish_traced(ctx, "sceAtracSetHalfwayBufferAndGetID", id.result, id.details);
+    });
+    // sceAtracGetAtracID(codecType) -> an id with no data yet, for SetData.
+    hle.add("sceAtrac3plus", "sceAtracGetAtracID", [](Runtime &, AllegrexContext &ctx) {
         auto &table = contexts();
         const auto slot = std::find_if(table.begin(), table.end(), [](const auto &entry) { return !entry; });
         if (slot == table.end()) {
-            finish_traced(ctx, "sceAtracSetDataAndGetID", atrac_error::kNoAtracId);
+            finish_traced(ctx, "sceAtracGetAtracID", atrac_error::kNoAtracId);
             return;
         }
-        context->buffer = buffer;
-        context->buffer_size = buffer_size;
-        const auto id = static_cast<std::uint32_t>(slot - table.begin());
-        std::ostringstream details;
-        details << "file=" << track.file_size << " align=" << track.block_align << " channels=" << track.channels
-                << " end=" << track.end_sample << " loop=" << track.loop_start << ".." << track.loop_end
-                << " skip=" << track.skip;
-        *slot = std::move(context);
-        finish_traced(ctx, "sceAtracSetDataAndGetID", id, details.str());
+        *slot = std::make_unique<AtracContext>();
+        finish_traced(ctx, "sceAtracGetAtracID", static_cast<std::uint32_t>(slot - table.begin()));
+    });
+    // sceAtracSetData(id, buffer, bufferSize): SetDataAndGetID for an id
+    // already handed out.
+    hle.add("sceAtrac3plus", "sceAtracSetData", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t id = arg(ctx, 0);
+        if (!id_in_use(id)) {
+            finish_traced(ctx, "sceAtracSetData", context_error(id));
+            return;
+        }
+        const auto loaded = load_track(rt.memory(), id, arg(ctx, 1), arg(ctx, 2), arg(ctx, 2), false);
+        finish_traced(ctx, "sceAtracSetData", loaded.result == id ? 0u : loaded.result, loaded.details);
+    });
+    // sceAtracReinit(at3plusIds, at3Ids): how many ids each codec may use.
+    // Every id here decodes either, so there is nothing to divide.
+    hle.add("sceAtrac3plus", "sceAtracReinit", [](Runtime &, AllegrexContext &ctx) {
+        finish_traced(ctx, "sceAtracReinit", 0u);
     });
 
     hle.add("sceAtrac3plus", "sceAtracReleaseAtracID", [](Runtime &, AllegrexContext &ctx) {
         const std::uint32_t id = arg(ctx, 0);
-        if (find_context(id) == nullptr) {
+        if (!id_in_use(id)) {
             finish_traced(ctx, "sceAtracReleaseAtracID", context_error(id));
             return;
         }
@@ -292,7 +464,7 @@ void register_atrac_functions(HleRegistrar &hle) {
         const std::uint32_t end_address = arg(ctx, 3);
         const std::uint32_t remain_address = arg(ctx, 4);
         const TrackInfo &track = context->track;
-        write_s32(memory, remain_address, kRemainAllDataOnMemory);
+        write_s32(memory, remain_address, remain_frames(*context));
         if (context->position > track.end_sample) {
             write_s32(memory, count_address, 0);
             write_s32(memory, end_address, 1);
@@ -310,6 +482,9 @@ void register_atrac_functions(HleRegistrar &hle) {
         const auto count = static_cast<std::int32_t>(
             std::min<std::int64_t>(frame_samples - first, static_cast<std::int64_t>(stop) - context->position + 1));
         const bool decoded = load_frame(memory, *context, frame);
+        if (!decoded && context->streaming)
+            log_once("atrac-underrun", "[atrac] a streamed track was decoded past the data the game had added; "
+                                       "that frame is silent");
         if (output != 0u) {
             if (std::uint8_t *destination = memory.raw_pointer(output, static_cast<std::size_t>(count) * 4u)) {
                 const std::int16_t *source = context->cached.data() + first * 2;
@@ -327,8 +502,10 @@ void register_atrac_functions(HleRegistrar &hle) {
             if (context->loop_num > 0) --context->loop_num;
         }
         const bool ended = context->position > track.end_sample;
+        if (context->streaming) trim_stored(*context);
         write_s32(memory, count_address, count);
         write_s32(memory, end_address, ended ? 1 : 0);
+        write_s32(memory, remain_address, remain_frames(*context));
         if (trace_atrac()) {
             std::ostringstream details;
             details << "at=" << played << " count=" << count << " next=" << context->position
@@ -342,12 +519,14 @@ void register_atrac_functions(HleRegistrar &hle) {
     // sceAtracGetRemainFrame(id, outRemainFrame)
     hle.add("sceAtrac3plus", "sceAtracGetRemainFrame", [](Runtime &rt, AllegrexContext &ctx) {
         const std::uint32_t id = arg(ctx, 0);
-        if (find_context(id) == nullptr) {
+        const AtracContext *context = find_context(id);
+        if (context == nullptr) {
             finish_traced(ctx, "sceAtracGetRemainFrame", context_error(id));
             return;
         }
-        write_s32(rt.memory(), arg(ctx, 1), kRemainAllDataOnMemory);
-        finish_traced(ctx, "sceAtracGetRemainFrame", 0u);
+        const std::int32_t remain = remain_frames(*context);
+        write_s32(rt.memory(), arg(ctx, 1), remain);
+        finish_traced(ctx, "sceAtracGetRemainFrame", 0u, "remain=" + std::to_string(remain));
     });
 
     // sceAtracGetSoundSample(id, outEndSample, outLoopStart, outLoopEnd)
@@ -425,8 +604,9 @@ void register_atrac_functions(HleRegistrar &hle) {
         finish_traced(ctx, "sceAtracGetNextDecodePosition", 0u, "position=" + std::to_string(context->position));
     });
 
-    // sceAtracGetStreamDataInfo(id, outWritePointer, outWritableBytes, outReadOffset).
-    // The whole file is in memory, so there is never room to add data.
+    // sceAtracGetStreamDataInfo(id, outWritePointer, outWritableBytes, outReadOffset):
+    // where the game writes next, how much, and from where in the file. With
+    // the whole file in memory there is never room to add data.
     hle.add("sceAtrac3plus", "sceAtracGetStreamDataInfo", [](Runtime &rt, AllegrexContext &ctx) {
         const std::uint32_t id = arg(ctx, 0);
         const AtracContext *context = find_context(id);
@@ -435,10 +615,60 @@ void register_atrac_functions(HleRegistrar &hle) {
             return;
         }
         auto &memory = rt.memory();
-        if (arg(ctx, 1) != 0u) memory.store32(arg(ctx, 1), context->buffer);
-        if (arg(ctx, 2) != 0u) memory.store32(arg(ctx, 2), 0u);
-        if (arg(ctx, 3) != 0u) memory.store32(arg(ctx, 3), context->track.file_size);
-        finish_traced(ctx, "sceAtracGetStreamDataInfo", 0u);
+        StreamWrite write{context->buffer, 0u, context->track.file_size};
+        if (context->streaming) write = stream_write(*context);
+        if (arg(ctx, 1) != 0u) memory.store32(arg(ctx, 1), write.address);
+        if (arg(ctx, 2) != 0u) memory.store32(arg(ctx, 2), write.writable);
+        if (arg(ctx, 3) != 0u) memory.store32(arg(ctx, 3), write.file_offset);
+        std::ostringstream details;
+        details << "write=" << psprecomp::hex32(write.address) << " bytes=" << write.writable
+                << " from=" << write.file_offset;
+        finish_traced(ctx, "sceAtracGetStreamDataInfo", 0u, details.str());
+    });
+    // sceAtracAddStreamData(id, bytesAdded): the game has written that many
+    // bytes where GetStreamDataInfo said.
+    hle.add("sceAtrac3plus", "sceAtracAddStreamData", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t id = arg(ctx, 0);
+        AtracContext *context = find_context(id);
+        if (context == nullptr) {
+            finish_traced(ctx, "sceAtracAddStreamData", context_error(id));
+            return;
+        }
+        const std::uint32_t added = arg(ctx, 1);
+        if (!context->streaming) {
+            finish_traced(ctx, "sceAtracAddStreamData", added == 0u ? 0u : atrac_error::kParamFail, "not streamed");
+            return;
+        }
+        const StreamWrite write = stream_write(*context);
+        if (added > write.writable) {
+            finish_traced(ctx, "sceAtracAddStreamData", atrac_error::kParamFail,
+                          "more than the " + std::to_string(write.writable) + " bytes there was room for");
+            return;
+        }
+        store_added(rt.memory(), *context, write.address, added);
+        finish_traced(ctx, "sceAtracAddStreamData", 0u, "written=" + std::to_string(context->written));
+    });
+    // sceAtracGetNextSample(id, outSamples): how many samples the next
+    // DecodeData returns.
+    hle.add("sceAtrac3plus", "sceAtracGetNextSample", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t id = arg(ctx, 0);
+        const AtracContext *context = find_context(id);
+        if (context == nullptr) {
+            finish_traced(ctx, "sceAtracGetNextSample", context_error(id));
+            return;
+        }
+        const TrackInfo &track = context->track;
+        std::int32_t count = 0;
+        if (context->position <= track.end_sample) {
+            const bool loops = looping(*context) && context->position <= track.loop_end;
+            const std::int32_t stop = loops ? track.loop_end : track.end_sample;
+            const auto frame_samples = static_cast<std::int64_t>(audio::atrac_frame_samples(track.codec));
+            const std::int64_t first = (static_cast<std::int64_t>(context->position) + track.skip) % frame_samples;
+            count = static_cast<std::int32_t>(
+                std::min<std::int64_t>(frame_samples - first, static_cast<std::int64_t>(stop) - context->position + 1));
+        }
+        write_s32(rt.memory(), arg(ctx, 1), count);
+        finish_traced(ctx, "sceAtracGetNextSample", 0u, "samples=" + std::to_string(count));
     });
 
     // sceAtracGetBufferInfoForResetting(id, sample, outBufferInfo): where data
@@ -463,14 +693,24 @@ void register_atrac_functions(HleRegistrar &hle) {
             return;
         }
         auto &memory = rt.memory();
-        const std::array<std::uint32_t, 8> fields = {context->buffer, 0u, 0u, context->track.file_size,
-                                                     context->buffer, 0u, 0u, 0u};
+        std::array<std::uint32_t, 8> fields = {context->buffer, 0u, 0u, context->track.file_size,
+                                               context->buffer, 0u, 0u, 0u};
+        if (context->streaming) {
+            // Refill the buffer from the start of the frame the sample is in.
+            const std::uint32_t from = reset_offset(*context, sample);
+            const std::uint32_t ring = ring_frames(*context) * context->track.block_align;
+            fields[0] = ring_address(*context, from);
+            fields[1] = std::min(ring - (fields[0] - context->buffer - context->track.data_offset),
+                                 context->track.file_size - from);
+            fields[2] = std::min(fields[1], context->track.block_align);
+            fields[3] = from;
+        }
         for (std::size_t i = 0; i < fields.size(); ++i) memory.store32(info + static_cast<std::uint32_t>(i * 4u), fields[i]);
         finish_traced(ctx, "sceAtracGetBufferInfoForResetting", 0u);
     });
 
     // sceAtracResetPlayPosition(id, sample, bytesWrittenFirst, bytesWrittenSecond)
-    hle.add("sceAtrac3plus", "sceAtracResetPlayPosition", [](Runtime &, AllegrexContext &ctx) {
+    hle.add("sceAtrac3plus", "sceAtracResetPlayPosition", [](Runtime &rt, AllegrexContext &ctx) {
         const std::uint32_t id = arg(ctx, 0);
         AtracContext *context = find_context(id);
         if (context == nullptr) {
@@ -481,6 +721,18 @@ void register_atrac_functions(HleRegistrar &hle) {
         if (sample < 0 || sample > context->track.end_sample) {
             finish_traced(ctx, "sceAtracResetPlayPosition", atrac_error::kBadSample);
             return;
+        }
+        if (context->streaming) {
+            // The game has refilled the buffer from where
+            // GetBufferInfoForResetting said.
+            const std::uint32_t from = reset_offset(*context, sample);
+            const std::uint32_t added = std::min(arg(ctx, 2), context->buffer_size);
+            const std::uint32_t address = ring_address(*context, from);
+            context->stored.clear();
+            context->written = from;
+            store_added(rt.memory(), *context, address, added);
+            context->cached_frame = -1;
+            context->next_frame = -1;
         }
         context->position = sample;
         finish_traced(ctx, "sceAtracResetPlayPosition", 0u);

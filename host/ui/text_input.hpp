@@ -57,8 +57,8 @@ bool open_game_text_input(TextInputRequest request, TextInputDone on_done);
 
 // Character sets.
 [[nodiscard]] bool printable_ascii(char32_t c);
-// What a hunter name may hold: letters, digits, space and the punctuation
-// the game draws faithfully and that has no special meaning in text.
-[[nodiscard]] bool hunter_name_character(char32_t c);
+// What a player name may hold: letters, digits, space and the punctuation
+// a game draws faithfully and that has no special meaning in text.
+[[nodiscard]] bool name_character(char32_t c);
 
 } // namespace portablekit::ui

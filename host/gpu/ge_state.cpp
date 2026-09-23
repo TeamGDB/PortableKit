@@ -456,6 +456,7 @@ void GeState::handle_command(const GuestMemory &memory, std::uint32_t command, s
         texture_.clut_address = resolve_ge_address((texture_.clut_address & 0x00FFFFFFu) | ((data << 8u) & 0xFF000000u));
         break;
     case kClutFormat:
+        texture_.clut_format_word = (command << 24u) | data;
         texture_.clut_format = data & 3u;
         texture_.clut_shift = (data >> 2u) & 0x1Fu;
         texture_.clut_mask = (data >> 8u) & 0xFFu;
@@ -623,9 +624,19 @@ void GeState::handle_command(const GuestMemory &memory, std::uint32_t command, s
         break;
     }
 
+    case kLoadClut: {
+        // Blocks of 32 bytes. The PSP reads at most 0x3F of them; a count of
+        // exactly 0x40 still loads, which some games rely on.
+        const std::uint32_t blocks = (data & 0x7Fu) == 0x40u ? 0x40u : (data & 0x3Fu);
+        if (blocks != 0u) {
+            texture_.clut_load_bytes = blocks * 32u;
+            texture_.clut_max_bytes = std::max(texture_.clut_max_bytes, texture_.clut_load_bytes);
+        }
+        break;
+    }
+
     case kNop:
     case kTextureFlush:
-    case kLoadClut:
         break;
 
     default:
@@ -727,17 +738,7 @@ void GeState::report_ignored_commands() {
                   << entry.first_value << std::dec << "\n";
 }
 
-void GeState::draw_primitive(const GuestMemory &memory, std::uint32_t data) {
-    const std::uint32_t count = data & 0xFFFFu;
-    const auto primitive = static_cast<PrimitiveType>((data >> 16u) & 7u);
-    if (count == 0u || vertex_address_ == 0u) return;
-
-    // One DrawCall is reused for every draw, so its vertex and index vectors
-    // keep their capacity instead of being allocated and freed per draw.
-    DrawCall &call = call_;
-    call.vertices.clear();
-    call.indices.clear();
-    call.primitive = primitive;
+void GeState::fill_draw_state(DrawCall &call) const {
     call.through = (vertex_type_ & (1u << 23u)) != 0u;
     call.texture = texture_;
     call.target = target_;
@@ -750,6 +751,7 @@ void GeState::draw_primitive(const GuestMemory &memory, std::uint32_t data) {
     call.clear_mode = clear_mode_;
     call.clear_flags = clear_flags_;
     call.vertex_type = vertex_type_;
+    call.vertex_address = vertex_address_;
     call.material_color = material_color_;
     call.lighting_enabled = lighting_enabled_;
     call.has_vertex_color = ((vertex_type_ >> 2u) & 7u) != 0u;
@@ -761,8 +763,24 @@ void GeState::draw_primitive(const GuestMemory &memory, std::uint32_t data) {
     call.view = view_;
     call.projection = projection_;
     call.texture_matrix = texture_matrix_;
+}
+
+void GeState::draw_primitive(const GuestMemory &memory, std::uint32_t data) {
+    const std::uint32_t count = data & 0xFFFFu;
+    const auto primitive = static_cast<PrimitiveType>((data >> 16u) & 7u);
+    if (count == 0u || vertex_address_ == 0u) return;
 
     const std::uint32_t index_type = (vertex_type_ >> 11u) & 3u;
+    // One DrawCall is reused for every draw, so its vertex and index vectors
+    // keep their capacity instead of being allocated and freed per draw.
+    DrawCall &call = call_;
+    call.vertices.clear();
+    call.indices.clear();
+    fill_draw_state(call);
+    call.primitive = primitive;
+    call.index_address = index_type != 0u ? index_address_ : 0u;
+    call.primitive_count = count;
+
     std::uint32_t vertex_count = count;
     std::uint32_t first_vertex = 0u;
     if (index_type != 0u && index_address_ != 0u) {
@@ -852,6 +870,229 @@ void GeState::draw_primitive(const GuestMemory &memory, std::uint32_t data) {
     if (draw_sink_) draw_sink_(call);
 }
 
+namespace {
+
+// PATCHDIVISION, PATCHPRIMITIVE and PATCHFACING: how finely a patch is cut,
+// what it is drawn as, and whether its triangles wind the other way.
+constexpr std::uint32_t kPatchDivision = 0x36u;
+constexpr std::uint32_t kPatchPrimitive = 0x37u;
+constexpr std::uint32_t kPatchFacing = 0x38u;
+
+// The four control points that shape a surface at one parameter along one
+// direction: the first of them, and the weight of each.
+struct PatchWeights {
+    std::uint32_t first{};
+    std::array<float, 4> weight{};
+};
+
+// A cubic B-spline over `count` control points has count + 4 knots, one
+// apart. An end that passes through its last control point ("closed" in the
+// GE's terms) repeats its end knot three more times instead. Either way the
+// curve runs over the knots [3, count], count - 3 spans of one each.
+std::vector<float> spline_knots(std::uint32_t count, bool clamp_start, bool clamp_end) {
+    std::vector<float> knots(count + 4u);
+    for (std::uint32_t i = 0; i < knots.size(); ++i) knots[i] = static_cast<float>(static_cast<int>(i) - 3);
+    if (clamp_start)
+        for (std::uint32_t i = 0; i < 3u; ++i) knots[i] = 0.0f;
+    if (clamp_end)
+        for (std::uint32_t i = count + 1u; i < count + 4u; ++i) knots[i] = static_cast<float>(count - 3u);
+    return knots;
+}
+
+// The non-zero basis functions at `t` (Cox-de Boor, in the usual triangular
+// form): they belong to control points span - 3 .. span.
+PatchWeights spline_weights(const std::vector<float> &knots, std::uint32_t count, float t) {
+    const int last_span = static_cast<int>(count) - 1;
+    const int span = std::clamp(static_cast<int>(t) + 3, 3, last_span);
+    std::array<float, 4> basis{1.0f, 0.0f, 0.0f, 0.0f};
+    std::array<float, 4> left{};
+    std::array<float, 4> right{};
+    for (int j = 1; j <= 3; ++j) {
+        left[static_cast<std::size_t>(j)] = t - knots[static_cast<std::size_t>(span + 1 - j)];
+        right[static_cast<std::size_t>(j)] = knots[static_cast<std::size_t>(span + j)] - t;
+        float saved = 0.0f;
+        for (int r = 0; r < j; ++r) {
+            const float denominator =
+                right[static_cast<std::size_t>(r + 1)] + left[static_cast<std::size_t>(j - r)];
+            const float term = denominator != 0.0f ? basis[static_cast<std::size_t>(r)] / denominator : 0.0f;
+            basis[static_cast<std::size_t>(r)] = saved + right[static_cast<std::size_t>(r + 1)] * term;
+            saved = left[static_cast<std::size_t>(j - r)] * term;
+        }
+        basis[static_cast<std::size_t>(j)] = saved;
+    }
+    return {static_cast<std::uint32_t>(span - 3), basis};
+}
+
+// Bezier: every three control points start a cubic, and neighbouring cubics
+// share their end points. Sample `index` of `divisions` per cubic.
+PatchWeights bezier_weights(std::uint32_t index, std::uint32_t divisions, std::uint32_t cubics) {
+    const std::uint32_t cubic = std::min(index / divisions, cubics - 1u);
+    const float t = static_cast<float>(index - cubic * divisions) / static_cast<float>(divisions);
+    const float s = 1.0f - t;
+    return {cubic * 3u, {s * s * s, 3.0f * t * s * s, 3.0f * t * t * s, t * t * t}};
+}
+
+std::uint32_t blend_color(const std::array<const Vertex *, 16> &points, const std::array<float, 16> &weights) {
+    std::uint32_t out = 0u;
+    for (std::uint32_t shift = 0u; shift < 32u; shift += 8u) {
+        float channel = 0.0f;
+        for (std::size_t k = 0; k < 16u; ++k)
+            channel += weights[k] * static_cast<float>((points[k]->color >> shift) & 0xFFu);
+        out |= static_cast<std::uint32_t>(std::clamp(channel + 0.5f, 0.0f, 255.0f)) << shift;
+    }
+    return out;
+}
+
+bool trace_patches() {
+    static const bool enabled = portablekit::env("TRACE_PATCHES") != nullptr;
+    return enabled;
+}
+
+} // namespace
+
+void GeState::draw_patch(const GuestMemory &memory, std::uint32_t command, std::uint32_t data) {
+    const bool spline = command == kSpline;
+    const std::uint32_t u_count = data & 0xFFu;
+    const std::uint32_t v_count = (data >> 8u) & 0xFFu;
+    const bool u_clamp_start = ((data >> 16u) & 1u) == 0u;
+    const bool u_clamp_end = ((data >> 16u) & 2u) == 0u;
+    const bool v_clamp_start = ((data >> 18u) & 1u) == 0u;
+    const bool v_clamp_end = ((data >> 18u) & 2u) == 0u;
+    if (u_count < 4u || v_count < 4u || vertex_address_ == 0u) return;
+    if (!spline && ((u_count - 1u) % 3u != 0u || (v_count - 1u) % 3u != 0u)) return;
+
+    std::uint32_t u_divisions = std::max(registers_[kPatchDivision] & 0xFFu, 1u);
+    std::uint32_t v_divisions = std::max((registers_[kPatchDivision] >> 8u) & 0xFFu, 1u);
+    const std::uint32_t u_spans = spline ? u_count - 3u : (u_count - 1u) / 3u;
+    const std::uint32_t v_spans = spline ? v_count - 3u : (v_count - 1u) / 3u;
+    // Keep the result within 16-bit indices.
+    while ((u_spans * u_divisions + 1u) * (v_spans * v_divisions + 1u) > 0xFFFFu && (u_divisions > 1u || v_divisions > 1u)) {
+        if (u_divisions >= v_divisions) --u_divisions;
+        else --v_divisions;
+    }
+    const std::uint32_t u_samples = u_spans * u_divisions + 1u;
+    const std::uint32_t v_samples = v_spans * v_divisions + 1u;
+    const std::uint32_t mode = registers_[kPatchPrimitive] & 3u;
+    const bool reverse = (registers_[kPatchFacing] & 1u) != 0u;
+
+    if (trace_patches()) {
+        static std::map<std::vector<std::uint32_t>, std::uint64_t> seen;
+        const std::vector<std::uint32_t> key{command, data, registers_[kPatchDivision], registers_[kPatchPrimitive],
+                                             registers_[kPatchFacing], vertex_type_};
+        if (++seen[key] == 1u && seen.size() <= 64u)
+            std::cout << "[patch] " << (spline ? "spline" : "bezier") << " data=0x" << std::hex << data
+                      << " div=0x" << registers_[kPatchDivision] << " prim=0x" << registers_[kPatchPrimitive]
+                      << " facing=0x" << registers_[kPatchFacing] << " vtype=0x" << vertex_type_ << std::dec
+                      << " -> " << u_samples << "x" << v_samples << " samples\n";
+    }
+
+    // The control points, in rows of u_count, through the index buffer when
+    // there is one.
+    const std::uint32_t count = u_count * v_count;
+    const std::uint32_t index_type = (vertex_type_ >> 11u) & 3u;
+    const std::uint32_t index_size = index_type == 1u ? 1u : index_type == 2u ? 2u : 4u;
+    std::vector<std::uint32_t> point_index(count);
+    std::uint32_t lowest = 0u;
+    std::uint32_t highest = count - 1u;
+    if (index_type != 0u && index_address_ != 0u) {
+        if (!memory.contains(index_address_, count * index_size)) return;
+        lowest = 0xFFFFFFFFu;
+        highest = 0u;
+        for (std::uint32_t i = 0; i < count; ++i) {
+            const std::uint32_t at = index_address_ + i * index_size;
+            const std::uint32_t index = index_type == 1u ? memory.load8(at) : index_type == 2u ? memory.load16(at) : memory.load32(at);
+            point_index[i] = index;
+            lowest = std::min(lowest, index);
+            highest = std::max(highest, index);
+        }
+    } else {
+        for (std::uint32_t i = 0; i < count; ++i) point_index[i] = i;
+    }
+    std::vector<Vertex> points;
+    const std::uint32_t probe = decode_vertices(memory, vertex_address_, vertex_type_, 0u, points);
+    if (probe == 0u) return;
+    const std::uint32_t first_address = vertex_address_ + lowest * probe;
+    const std::uint32_t decoded = highest - lowest + 1u;
+    if (!memory.contains(first_address, static_cast<std::size_t>(probe) * decoded)) return;
+    const std::uint32_t stride = decode_vertices(memory, first_address, vertex_type_, decoded, points, bone_matrices_.data());
+    if (stride == 0u || points.size() < decoded) return;
+    if (index_type != 0u && index_address_ != 0u) index_address_ += count * index_size;
+    else vertex_address_ += stride * count;
+
+    const bool has_texcoord = (vertex_type_ & 3u) != 0u;
+    const std::vector<float> u_knots = spline ? spline_knots(u_count, u_clamp_start, u_clamp_end) : std::vector<float>{};
+    const std::vector<float> v_knots = spline ? spline_knots(v_count, v_clamp_start, v_clamp_end) : std::vector<float>{};
+    const auto weights_at = [&](bool along_u, std::uint32_t index) {
+        const std::uint32_t divisions = along_u ? u_divisions : v_divisions;
+        if (!spline) return bezier_weights(index, divisions, along_u ? u_spans : v_spans);
+        const float t = static_cast<float>(index) / static_cast<float>(divisions);
+        return spline_weights(along_u ? u_knots : v_knots, along_u ? u_count : v_count, t);
+    };
+    std::vector<PatchWeights> u_weights(u_samples);
+    std::vector<PatchWeights> v_weights(v_samples);
+    for (std::uint32_t i = 0; i < u_samples; ++i) u_weights[i] = weights_at(true, i);
+    for (std::uint32_t j = 0; j < v_samples; ++j) v_weights[j] = weights_at(false, j);
+
+    DrawCall &call = call_;
+    call.vertices.clear();
+    call.indices.clear();
+    fill_draw_state(call);
+    call.primitive = mode == 2u ? PrimitiveType::Points : mode == 1u ? PrimitiveType::Lines : PrimitiveType::Triangles;
+    call.index_address = index_type != 0u ? index_address_ : 0u;
+    call.primitive_count = count;
+    call.vertices.reserve(static_cast<std::size_t>(u_samples) * v_samples);
+    std::array<const Vertex *, 16> around{};
+    std::array<float, 16> weight{};
+    for (std::uint32_t j = 0; j < v_samples; ++j) {
+        for (std::uint32_t i = 0; i < u_samples; ++i) {
+            const PatchWeights &wu = u_weights[i];
+            const PatchWeights &wv = v_weights[j];
+            for (std::uint32_t b = 0; b < 4u; ++b) {
+                for (std::uint32_t a = 0; a < 4u; ++a) {
+                    const std::uint32_t k = b * 4u + a;
+                    around[k] = &points[point_index[(wv.first + b) * u_count + wu.first + a] - lowest];
+                    weight[k] = wu.weight[a] * wv.weight[b];
+                }
+            }
+            Vertex out{};
+            out.position = {0.0f, 0.0f, 0.0f, 0.0f};
+            for (std::size_t k = 0; k < 16u; ++k) {
+                for (std::size_t c = 0; c < 4u; ++c) out.position[c] += weight[k] * around[k]->position[c];
+                for (std::size_t c = 0; c < 3u; ++c) out.normal[c] += weight[k] * around[k]->normal[c];
+                for (std::size_t c = 0; c < 2u; ++c) out.texcoord[c] += weight[k] * around[k]->texcoord[c];
+            }
+            // Without texture coordinates of its own a surface is textured
+            // by where on it a point lies.
+            if (!has_texcoord)
+                out.texcoord = {static_cast<float>(i) / static_cast<float>(u_samples - 1u),
+                                static_cast<float>(j) / static_cast<float>(v_samples - 1u)};
+            out.color = blend_color(around, weight);
+            call.vertices.push_back(out);
+        }
+    }
+    const auto at = [&](std::uint32_t i, std::uint32_t j) { return static_cast<std::uint16_t>(j * u_samples + i); };
+    if (call.primitive == PrimitiveType::Triangles) {
+        for (std::uint32_t j = 0; j + 1u < v_samples; ++j) {
+            for (std::uint32_t i = 0; i + 1u < u_samples; ++i) {
+                const std::array<std::uint16_t, 6> quad =
+                    reverse ? std::array<std::uint16_t, 6>{at(i, j), at(i, j + 1u), at(i + 1u, j), at(i, j + 1u),
+                                                           at(i + 1u, j + 1u), at(i + 1u, j)}
+                            : std::array<std::uint16_t, 6>{at(i, j), at(i + 1u, j), at(i, j + 1u), at(i + 1u, j),
+                                                           at(i + 1u, j + 1u), at(i, j + 1u)};
+                call.indices.insert(call.indices.end(), quad.begin(), quad.end());
+            }
+        }
+    } else if (call.primitive == PrimitiveType::Lines) {
+        for (std::uint32_t j = 0; j < v_samples; ++j)
+            for (std::uint32_t i = 0; i + 1u < u_samples; ++i) call.indices.insert(call.indices.end(), {at(i, j), at(i + 1u, j)});
+        for (std::uint32_t i = 0; i < u_samples; ++i)
+            for (std::uint32_t j = 0; j + 1u < v_samples; ++j) call.indices.insert(call.indices.end(), {at(i, j), at(i, j + 1u)});
+    }
+    ++draw_count_;
+    vertex_count_ += call.vertices.size();
+    if (draw_sink_) draw_sink_(call);
+}
+
 std::uint32_t GeState::execute(const GuestMemory &memory, std::uint32_t pc, std::uint32_t stall, bool &finished) {
     finished = false;
     if (world_[15] == 0.0f) {
@@ -867,6 +1108,10 @@ std::uint32_t GeState::execute(const GuestMemory &memory, std::uint32_t pc, std:
         const std::uint32_t word = memory.load32(pc);
         const std::uint32_t command = word >> 24u;
         const std::uint32_t data = word & 0x00FFFFFFu;
+        // Where the camera came from: the display list the game built holds the
+        // view matrix as commands, and that address is the one thing about the
+        // camera the host can always point at.
+        if (command == kViewMatrixNumber) view_matrix_source_ = pc;
         pc += 4u;
 
         switch (command) {
@@ -905,9 +1150,7 @@ std::uint32_t GeState::execute(const GuestMemory &memory, std::uint32_t pc, std:
             continue;
         case kBezier:
         case kSpline:
-            // Curved surfaces are not tessellated yet.
-            ++unhandled_commands_;
-            trace_unhandled(command, data);
+            draw_patch(memory, command, data);
             continue;
         default:
             handle_command(memory, command, data);

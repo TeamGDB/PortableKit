@@ -51,6 +51,15 @@ bool parse_uint(const std::string &text, std::uint32_t minimum, std::uint32_t ma
     return true;
 }
 
+// A resolution: a multiple of 480x272, or "auto" (0) for the window's own.
+bool parse_scale(const std::string &text, std::uint32_t &out) {
+    if (text == "auto") {
+        out = 0u;
+        return true;
+    }
+    return parse_uint(text, 0u, kMaxInternalScale, out);
+}
+
 std::string format_float(float value) {
     char text[32];
     std::snprintf(text, sizeof(text), "%.2f", static_cast<double>(value));
@@ -95,13 +104,40 @@ struct Names {
 
 const Names<PresentMode> kPresentModes{
     {{PresentMode::Fifo, "vsync"}, {PresentMode::Mailbox, "mailbox"}, {PresentMode::Immediate, "immediate"}}};
+const Names<Aspect> kAspects{{{Aspect::Original, "original"}, {Aspect::Stretch, "stretch"}, {Aspect::Fill, "fill"}}};
 const Names<PerfDisplay> kPerfDisplays{{{PerfDisplay::Off, "off"},
                                         {PerfDisplay::Overlay, "overlay"},
                                         {PerfDisplay::OverlayAndLog, "overlay+log"},
                                         {PerfDisplay::Log, "log"}}};
 const Names<RightStick> kRightSticks{
     {{RightStick::Camera, "camera"}, {RightStick::DPad, "dpad"}, {RightStick::Off, "off"}}};
+// A trigger profile by the key the game gives it, or "standard" for L and R.
+bool parse_trigger_profile(const std::string &text, std::uint32_t &out) {
+    if (text == "standard") {
+        out = 0u;
+        return true;
+    }
+    const std::span<const TriggerProfile> profiles = game().trigger_profiles;
+    for (std::size_t i = 0; i < profiles.size(); ++i) {
+        if (text == profiles[i].key) {
+            out = static_cast<std::uint32_t>(i + 1u);
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string format_trigger_profile(std::uint32_t profile) {
+    const std::span<const TriggerProfile> profiles = game().trigger_profiles;
+    return profile == 0u || profile > profiles.size() ? std::string("standard") : std::string(profiles[profile - 1u].key);
+}
 const Names<NameEntry> kNameEntries{{{NameEntry::Keyboard, "keyboard"}, {NameEntry::Fixed, "fixed"}}};
+const Names<FrameRate> kFrameRates{{{FrameRate::Fps30, "30"},
+                                    {FrameRate::Fps45, "45"},
+                                    {FrameRate::Fps60, "60"},
+                                    {FrameRate::Fps90, "90"},
+                                    {FrameRate::Fps120, "120"},
+                                    {FrameRate::Display, "display"}}};
 
 // Written by earlier versions: 1 typed the name into the window, which the
 // on-screen keyboard now covers.
@@ -116,11 +152,11 @@ constexpr const char *kRetiredTypeNameKey = "input.type_name";
 const std::vector<Field> &fields() {
     static const std::vector<Field> table = {
         {"video.internal_scale", "INTERNAL_SCALE",
-         [](Settings &s, const std::string &t) { return parse_uint(t, 1u, kMaxInternalScale, s.internal_scale); },
-         [](const Settings &s) { return std::to_string(s.internal_scale); },
+         [](Settings &s, const std::string &t) { return parse_scale(t, s.internal_scale); },
+         [](const Settings &s) { return s.internal_scale == 0u ? std::string("auto") : std::to_string(s.internal_scale); },
          [](Settings &s, const char *t) {
              std::uint32_t value = s.internal_scale;
-             if (parse_uint(t, 1u, kMaxInternalScale, value)) s.internal_scale = value;
+             if (parse_scale(t, value)) s.internal_scale = value;
          }},
         {"video.window_scale", nullptr,
          [](Settings &s, const std::string &t) { return parse_uint(t, 1u, kMaxWindowScale, s.window_scale); },
@@ -129,13 +165,46 @@ const std::vector<Field> &fields() {
         {"video.present_mode", nullptr,
          [](Settings &s, const std::string &t) { return kPresentModes.parse(t, s.present_mode); },
          [](const Settings &s) { return kPresentModes.format(s.present_mode); }, nullptr},
-        BOOL_FIELD("video.keep_aspect", keep_aspect),
+        // Written by earlier versions, which had Original and Stretch only.
+        // Still written, so going back to one of them keeps the choice as
+        // near as it can; video.aspect follows it and decides.
+        {"video.keep_aspect", nullptr,
+         [](Settings &s, const std::string &t) {
+             bool keep = true;
+             if (!parse_bool(t, keep)) return false;
+             s.aspect = keep ? Aspect::Original : Aspect::Stretch;
+             return true;
+         },
+         [](const Settings &s) { return std::string(s.aspect == Aspect::Stretch ? "0" : "1"); }, nullptr},
+        {"video.aspect", nullptr, [](Settings &s, const std::string &t) { return kAspects.parse(t, s.aspect); },
+         [](const Settings &s) { return kAspects.format(s.aspect); }, nullptr},
         BOOL_FIELD("video.sharp_screen", sharp_screen),
         BOOL_FIELD("video.sharp_textures", sharp_textures),
+        {"video.texture_pack", "TEXTURE_PACK",
+         [](Settings &s, const std::string &t) { return parse_bool(t, s.texture_pack); },
+         [](const Settings &s) { return std::string(s.texture_pack ? "1" : "0"); },
+         // 0/off/no/false turn it off; anything else, a folder included, on.
+         [](Settings &s, const char *t) { s.texture_pack = variable_flag(t); }},
+        {"video.texture_pack_folder", nullptr,
+         [](Settings &s, const std::string &t) {
+             s.texture_pack_folder = t;
+             return true;
+         },
+         [](const Settings &s) { return s.texture_pack_folder; }, nullptr},
         {"video.unthrottled", "UNTHROTTLED",
          [](Settings &s, const std::string &t) { return parse_bool(t, s.unthrottled); },
          [](const Settings &s) { return std::string(s.unthrottled ? "1" : "0"); },
          [](Settings &s, const char *t) { s.unthrottled = variable_present(t); }},
+        {"video.frame_rate", "FRAME_RATE",
+         [](Settings &s, const std::string &t) { return kFrameRates.parse(t, s.frame_rate); },
+         [](const Settings &s) { return kFrameRates.format(s.frame_rate); },
+         [](Settings &s, const char *t) {
+             if (!kFrameRates.parse(t, s.frame_rate)) s.frame_rate = FrameRate::Fps30;
+         }},
+        {"video.frame_rate_auto", "FRAME_RATE_AUTO",
+         [](Settings &s, const std::string &t) { return parse_bool(t, s.frame_rate_auto); },
+         [](const Settings &s) { return std::string(s.frame_rate_auto ? "1" : "0"); },
+         [](Settings &s, const char *t) { s.frame_rate_auto = variable_flag(t); }},
         {"video.performance", "PERF",
          [](Settings &s, const std::string &t) { return kPerfDisplays.parse(t, s.perf); },
          [](const Settings &s) { return kPerfDisplays.format(s.perf); },
@@ -174,6 +243,12 @@ const std::vector<Field> &fields() {
          [](Settings &s, const std::string &t) { return parse_float(t, 0.05f, 1.0f, s.trigger); },
          [](const Settings &s) { return format_float(s.trigger); },
          [](Settings &s, const char *t) { s.trigger = variable_float(t, 0.25f, 0.05f, 1.0f); }},
+        {"input.trigger_profile", "PAD_TRIGGERS",
+         [](Settings &s, const std::string &t) { return parse_trigger_profile(t, s.trigger_profile); },
+         [](const Settings &s) { return format_trigger_profile(s.trigger_profile); },
+         [](Settings &s, const char *t) {
+             if (!parse_trigger_profile(t, s.trigger_profile)) s.trigger_profile = 0u;
+         }},
         {"input.right_stick", "PAD_RSTICK_DPAD",
          [](Settings &s, const std::string &t) { return kRightSticks.parse(t, s.right_stick); },
          [](const Settings &s) { return kRightSticks.format(s.right_stick); },
@@ -182,8 +257,34 @@ const std::vector<Field> &fields() {
          [](Settings &s, const std::string &t) { return parse_float(t, 0.1f, 1.0f, s.right_stick_zone); },
          [](const Settings &s) { return format_float(s.right_stick_zone); },
          [](Settings &s, const char *t) { s.right_stick_zone = variable_float(t, 0.5f, 0.1f, 1.0f); }},
+        {"input.analog_camera", "ANALOG_CAMERA",
+         [](Settings &s, const std::string &t) { return parse_bool(t, s.analog_camera); },
+         [](const Settings &s) { return std::string(s.analog_camera ? "1" : "0"); },
+         [](Settings &s, const char *t) { s.analog_camera = variable_flag(t); }},
+        {"input.camera_speed", "CAMERA_SPEED",
+         [](Settings &s, const std::string &t) { return parse_float(t, 20.0f, 720.0f, s.camera_speed); },
+         [](const Settings &s) { return format_float(s.camera_speed); },
+         [](Settings &s, const char *t) { s.camera_speed = variable_float(t, 190.0f, 20.0f, 720.0f); }},
+        {"input.aim_speed", "AIM_SPEED",
+         [](Settings &s, const std::string &t) { return parse_float(t, 10.0f, 360.0f, s.aim_speed); },
+         [](const Settings &s) { return format_float(s.aim_speed); },
+         [](Settings &s, const char *t) { s.aim_speed = variable_float(t, 90.0f, 10.0f, 360.0f); }},
         BOOL_FIELD("input.invert_camera_x", invert_camera_x),
         BOOL_FIELD("input.invert_camera_y", invert_camera_y),
+        {"input.mouse", "MOUSE",
+         [](Settings &s, const std::string &t) { return parse_bool(t, s.mouse); },
+         [](const Settings &s) { return std::string(s.mouse ? "1" : "0"); },
+         [](Settings &s, const char *t) { s.mouse = variable_flag(t); }},
+        {"input.mouse_sensitivity", "MOUSE_SENSITIVITY",
+         [](Settings &s, const std::string &t) {
+             return parse_float(t, kMinMouseSensitivity, kMaxMouseSensitivity, s.mouse_sensitivity);
+         },
+         [](const Settings &s) { return format_float(s.mouse_sensitivity); },
+         [](Settings &s, const char *t) {
+             s.mouse_sensitivity = variable_float(t, 0.10f, kMinMouseSensitivity, kMaxMouseSensitivity);
+         }},
+        BOOL_FIELD("input.invert_mouse_x", invert_mouse_x),
+        BOOL_FIELD("input.invert_mouse_y", invert_mouse_y),
         {"input.name_entry", "OSK_MODE",
          [](Settings &s, const std::string &t) { return kNameEntries.parse(t, s.name_entry); },
          [](const Settings &s) { return kNameEntries.format(s.name_entry); },
@@ -264,6 +365,24 @@ const std::vector<Field> &fields() {
     return table;
 }
 
+// One key per bound action, "input.bind.triangle=Mouse Left", after the
+// fixed table.
+const std::vector<Field> &all_fields() {
+    static const std::vector<Field> table = [] {
+        // Field keys are C strings; these hold them for the program's life.
+        static std::vector<std::string> keys(input::kActions);
+        std::vector<Field> list = fields();
+        for (std::size_t i = 0; i < input::kActions; ++i) {
+            keys[i] = std::string("input.bind.") + input::info(static_cast<input::Action>(i)).key;
+            list.push_back(Field{keys[i].c_str(), nullptr,
+                                 [i](Settings &s, const std::string &t) { return input::parse(t, s.bindings[i]); },
+                                 [i](const Settings &s) { return input::format(s.bindings[i]); }, nullptr});
+        }
+        return list;
+    }();
+    return table;
+}
+
 #undef BOOL_FIELD
 
 struct State {
@@ -289,7 +408,7 @@ void load(State &s) {
     } catch (const std::exception &e) {
         std::cerr << "[settings] cannot read settings.ini: " << e.what() << "\n";
     }
-    for (const Field &field : fields()) {
+    for (const Field &field : all_fields()) {
         if (const auto found = s.file.find(field.key); found != s.file.end() && !field.parse(s.values, found->second))
             std::cerr << "[settings] ignoring " << field.key << "=" << found->second << "\n";
         if (field.variable == nullptr) continue;
@@ -315,6 +434,11 @@ Settings &current() {
     return s.values;
 }
 
+std::string game_default_name() {
+    const char *name = game().default_player_name;
+    return name != nullptr ? name : "";
+}
+
 const Settings &defaults() {
     static const Settings value{};
     return value;
@@ -327,7 +451,7 @@ void save() {
     try {
         // Re-read, so a key the installer wrote since start-up survives.
         entries = install::read_settings_file(s.data_dir);
-        for (const Field &field : fields()) {
+        for (const Field &field : all_fields()) {
             if (s.overrides.count(field.key) != 0u) {
                 const auto kept = s.file.find(field.key);
                 if (kept != s.file.end()) entries[field.key] = kept->second;

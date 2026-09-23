@@ -114,6 +114,19 @@ if(PSPRECOMP_LTO)
     endif()
 endif()
 
+# A port calls portablekit_add_game() from its own directory, which is a
+# sibling of this one, so none of the directory settings above reach its
+# targets: not the compiler cache, not the AOT switches, not whole-program
+# optimization. Record them for portablekit_add_game() to apply.
+get_directory_property(_portablekit_definitions COMPILE_DEFINITIONS)
+get_directory_property(_portablekit_options COMPILE_OPTIONS)
+set_property(GLOBAL PROPERTY PORTABLEKIT_CXX_COMPILER_LAUNCHER "${CMAKE_CXX_COMPILER_LAUNCHER}")
+set_property(GLOBAL PROPERTY PORTABLEKIT_COMPILE_DEFINITIONS "${_portablekit_definitions}")
+set_property(GLOBAL PROPERTY PORTABLEKIT_COMPILE_OPTIONS "${_portablekit_options}")
+if(PSPRECOMP_LTO AND PSPRECOMP_LTO_SUPPORTED)
+    set_property(GLOBAL PROPERTY PORTABLEKIT_IPO ON)
+endif()
+
 # Keep the runtime as an object library so profile executables own its objects.
 # On Windows this also lets WINDOWS_EXPORT_ALL_SYMBOLS include runtime symbols
 # in the executable's import library for separately linked overlay modules.
@@ -207,6 +220,57 @@ if(PSPRECOMP_BUILD_TESTS)
     endif()
     set_target_properties(portablekit_adhoc_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
     add_test(NAME portablekit_adhoc_tests COMMAND portablekit_adhoc_tests)
+endif()
+
+# Texture pack import: finding a pack in the layouts packs come in, the
+# checks made before copying, and the copy, swap and backup. No game data.
+if(PSPRECOMP_BUILD_TESTS)
+    add_executable(portablekit_texture_pack_tests
+        "${PORTABLEKIT_ROOT}/tests/texture_pack_tests.cpp"
+        "${PORTABLEKIT_ROOT}/tests/test_profile.cpp"
+        "${PORTABLEKIT_ROOT}/host/profile.cpp"
+        "${PORTABLEKIT_ROOT}/host/gpu/texture_pack.cpp"
+        "${PORTABLEKIT_ROOT}/host/gpu/texture_pack_import.cpp")
+    target_include_directories(portablekit_texture_pack_tests PRIVATE
+        "${PORTABLEKIT_ROOT}/host" "${PORTABLEKIT_ROOT}/host/gpu" "${PORTABLEKIT_ROOT}/third_party")
+    find_package(Threads REQUIRED)
+    target_link_libraries(portablekit_texture_pack_tests PRIVATE psprecomp_core Threads::Threads)
+    set_target_properties(portablekit_texture_pack_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME portablekit_texture_pack_tests COMMAND portablekit_texture_pack_tests)
+endif()
+
+# Renderer helpers that need no GPU.
+if(PSPRECOMP_BUILD_TESTS)
+    add_executable(portablekit_render_tests "${PORTABLEKIT_ROOT}/tests/render_tests.cpp")
+    target_include_directories(portablekit_render_tests PRIVATE "${PORTABLEKIT_ROOT}/host")
+    target_link_libraries(portablekit_render_tests PRIVATE psprecomp_core)
+    set_target_properties(portablekit_render_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME portablekit_render_tests COMMAND portablekit_render_tests)
+endif()
+
+# Frame interpolation checks: matching draws, cuts, blending, the present
+# clock and the frame rate governor.
+if(PSPRECOMP_BUILD_TESTS)
+    add_executable(portablekit_interpolation_tests
+        "${PORTABLEKIT_ROOT}/tests/interpolation_tests.cpp"
+        "${PORTABLEKIT_ROOT}/host/gpu/frame_interpolation.cpp"
+        "${PORTABLEKIT_ROOT}/host/gpu/frame_pacing.cpp")
+    target_compile_features(portablekit_interpolation_tests PRIVATE cxx_std_20)
+    target_include_directories(portablekit_interpolation_tests PRIVATE
+        "${PORTABLEKIT_ROOT}/host" "${PORTABLEKIT_ROOT}/include")
+    set_target_properties(portablekit_interpolation_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME portablekit_interpolation_tests COMMAND portablekit_interpolation_tests)
+endif()
+
+# Keyboard and mouse bindings: names, settings.ini spelling, the menu's
+# assignment rules and what held keys press. No SDL or game data.
+if(PSPRECOMP_BUILD_TESTS)
+    add_executable(portablekit_input_tests
+        "${PORTABLEKIT_ROOT}/tests/input_tests.cpp"
+        "${PORTABLEKIT_ROOT}/host/input/bindings.cpp")
+    target_include_directories(portablekit_input_tests PRIVATE "${PORTABLEKIT_ROOT}/host")
+    set_target_properties(portablekit_input_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME portablekit_input_tests COMMAND portablekit_input_tests)
 endif()
 
 # The system layer belongs to a game's target, so nothing above compiles

@@ -54,6 +54,7 @@ constexpr std::uint32_t kReadOnly = 0x8001001Eu;
 constexpr std::uint32_t kDiscReadAheadStart = 0x01F300A5u;
 constexpr std::uint32_t kDiscReadAheadWait = 0x01F300A7u;
 
+constexpr std::uint32_t kOpenRead = 0x0001u;
 constexpr std::uint32_t kOpenWrite = 0x0002u;
 constexpr std::uint32_t kOpenAppend = 0x0100u;
 constexpr std::uint32_t kOpenCreate = 0x0200u;
@@ -279,6 +280,14 @@ std::size_t read_open_file(std::uint32_t fd, std::uint64_t offset, std::uint8_t 
         return count;
     }
     return 0u;
+}
+
+std::int64_t read_guest_file(const std::string &path, std::uint64_t offset, std::uint8_t *output, std::size_t size) {
+    const std::int64_t fd = open_file(path, kOpenRead);
+    if (fd < 0) return fd;
+    const std::size_t count = read_open_file(static_cast<std::uint32_t>(fd), offset, output, size);
+    io().files.erase(static_cast<std::uint32_t>(fd));
+    return static_cast<std::int64_t>(count);
 }
 
 void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, const std::filesystem::path &memory_stick) {

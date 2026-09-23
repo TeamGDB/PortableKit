@@ -5,7 +5,8 @@
 //
 // The tag at 0xD0 selects a key; the framework knows the layout and the
 // engine's fixed keys, and the profile supplies the key its release's tag
-// selects (GameProfile::decryption_tag and decryption_key).
+// selects (GameProfile::decryption_tag, and decryption_key or, for the older
+// header layout, decryption_key_table).
 //
 // The file is an 0x150-byte header followed by the executable, encrypted with
 // AES-128 in CBC mode under a per-file key. The header keeps that key wrapped
@@ -118,6 +119,43 @@ Block unwrap_payload_key(std::span<const std::uint8_t> header) {
     return key;
 }
 
+// The older header layout, whose tag selects a 0x90-byte key table rather
+// than a 16-byte key. Its fields are laid out differently, but the result is
+// the same: the payload key, wrapped under the fixed key.
+//
+// Five header fields form one 0xA0-byte record, encrypted under the header key
+// as a single chain: the last eight bytes of the header hash, the 0x28 bytes
+// after it, then the key block, which is split between 0x110 and 0x80. The
+// key block's first 0x70 bytes are masked on either side of a further
+// decryption, with the table from offsets 0x14 and 0x20. CBC makes each block
+// depend only on the one before it, so only the first block, which is the
+// wrapped payload key, and the mode word need decrypting.
+Block unwrap_payload_key_from_table(std::span<const std::uint8_t> header) {
+    const std::span<const std::uint8_t> table = game().decryption_key_table;
+    if (table.size() != 0x90u) throw psprecomp::Error("The profile's decryption key table is not 0x90 bytes long");
+
+    std::vector<std::uint8_t> record;
+    append(record, header, 0xE0u, 0x08u);
+    append(record, header, 0xE8u, 0x28u);
+    append(record, header, 0x110u, 0x40u);
+    append(record, header, 0x80u, 0x30u);
+    cbc_decrypt(kHeaderKey, record);
+
+    // The key block starts at 0x30 in the record. Its first 0x70 bytes are
+    // the part that is masked; decrypt it whole, since the mode word at 0x60
+    // is the check that the table was the right one.
+    std::vector<std::uint8_t> block(record.begin() + 0x30, record.begin() + 0xA0);
+    for (std::size_t i = 0; i < block.size(); ++i) block[i] ^= table[0x14u + i];
+    cbc_decrypt(kHeaderKey, block);
+    for (std::size_t i = 0; i < block.size(); ++i) block[i] ^= table[0x20u + i];
+
+    const std::uint32_t mode = read_le32(block, 0x60u);
+    if (mode != 1u) throw psprecomp::Error("EBOOT.BIN did not decrypt with the profile's key table");
+    Block key = block_at(block, 0x00u);
+    cbc_decrypt(kPayloadWrappingKey, key);
+    return key;
+}
+
 } // namespace
 
 std::vector<std::uint8_t> prepare_executable(std::span<const std::uint8_t> eboot_bin,
@@ -137,7 +175,8 @@ std::vector<std::uint8_t> prepare_executable(std::span<const std::uint8_t> eboot
     if (size == 0u || size != read_le32(eboot_bin, kImageSizeOffset) || padded_size > eboot_bin.size() - kHeaderSize)
         throw psprecomp::Error("EBOOT.BIN has an unexpected payload size");
 
-    const Block key = unwrap_payload_key(eboot_bin.first(kHeaderSize));
+    const Block key = game().decryption_key_table.empty() ? unwrap_payload_key(eboot_bin.first(kHeaderSize))
+                                                          : unwrap_payload_key_from_table(eboot_bin.first(kHeaderSize));
     std::vector<std::uint8_t> executable(eboot_bin.begin() + kHeaderSize,
                                          eboot_bin.begin() + static_cast<std::ptrdiff_t>(kHeaderSize + padded_size));
     // CBC carries its chaining value in the context, so the payload decrypts

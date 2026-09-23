@@ -2,10 +2,19 @@
 #include "ui/input_script.hpp"
 #include "vulkan_renderer.hpp"
 
+#include "frame_interpolation.hpp"
+#include "frame_pacing.hpp"
+#include "replacement_textures.hpp"
 #include "texture_decode.hpp"
+#include "triangle_indices.hpp"
+#include "texture_pack.hpp"
+#include "texture_pack_import.hpp"
+
+#include "install/user_data.hpp"
 
 #include "perf/frame_stats.hpp"
 #include "perf/perf_overlay.hpp"
+#include "input/bindings.hpp"
 #include "settings/settings.hpp"
 
 #include <SDL3/SDL.h>
@@ -17,14 +26,21 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
+#include <set>
+#include <thread>
 #include <vector>
 
 namespace portablekit::gpu {
@@ -32,11 +48,41 @@ namespace {
 
 constexpr std::uint32_t kPspWidth = 480u;
 constexpr std::uint32_t kPspHeight = 272u;
+// Auto resolution draws the game at the window's size in pixels, up to this
+// many lines: 6 x 272, the largest multiple the menu offers.
+constexpr std::uint32_t kMaxAutoLines = 6u * kPspHeight;
+// Widest target, in pixels; every Vulkan device takes images this wide.
+constexpr std::uint32_t kMaxTargetWidth = 8192u;
+// Frames a new window size has to hold before the targets follow it, so
+// dragging a window's edge does not rebuild them on every frame.
+constexpr std::uint32_t kSettleFrames = 12u;
+// A through-mode draw at least this wide (in PSP pixels) covers the screen:
+// a fade, a backdrop or a copy of the picture, which spreads with the 3D view
+// instead of keeping the interface's proportions.
+constexpr float kScreenWideDraw = 470.0f;
 constexpr VkDeviceSize kVertexBufferBytes = 16u * 1024u * 1024u;
+// Index lists of merged draws (see submit()), kept apart from the vertices so
+// that the draws of one group have consecutive indices.
+constexpr VkDeviceSize kIndexBufferBytes = 4u * 1024u * 1024u;
+// Frame interpolation draws a frame again after the game has moved on, from
+// the vertices, indices and lighting blocks that frame wrote. So the vertex
+// and index buffers hold three frames' worth: the frame being drawn, the
+// newer and the older of the two being blended. Without interpolation only
+// the first region is used, as before. After them, the vertex buffer has a
+// scratch area for each of the two presents that can be in flight, for the
+// blended vertices of skinned draws and the lighting blocks of blended draws.
+constexpr std::uint32_t kFrameRegions = 3u;
+constexpr VkDeviceSize kPresentScratchBytes = 6u * 1024u * 1024u;
+constexpr VkDeviceSize kVertexBufferTotal = kFrameRegions * kVertexBufferBytes + 2u * kPresentScratchBytes;
+constexpr VkDeviceSize kIndexBufferTotal = kFrameRegions * kIndexBufferBytes;
 constexpr std::size_t kMaxCachedTextures = 1024u;
 // Descriptor sets for sampling render targets as textures: two per target
 // (with its alpha, and with alpha forced to one for 5650 textures).
 constexpr std::size_t kMaxFramebufferTextureSets = 64u;
+// GPU timestamps: a pair around each command buffer a frame submits. A frame
+// normally submits one; each GE block transfer that reads a framebuffer back
+// splits it once more.
+constexpr std::uint32_t kGpuTimerSegments = 16u;
 
 // Compiled SPIR-V, generated from host/gpu/shaders by the build.
 #include "ge_shaders.inc"
@@ -310,6 +356,7 @@ bool write_bmp(const std::string &path, const std::uint8_t *pixels, std::uint32_
 struct PadTuning {
     float dead_zone{0.15f};
     float trigger{0.25f};
+    std::uint32_t triggers{};
     float right_stick{0.5f};
     settings::RightStick right_stick_mode{settings::RightStick::Camera};
     bool invert_x{};
@@ -325,6 +372,7 @@ PadTuning pad_tuning() {
     PadTuning value{};
     value.dead_zone = player.dead_zone;
     value.trigger = player.trigger;
+    value.triggers = player.trigger_profile;
     value.right_stick = player.right_stick_zone;
     // The right stick is a real nub on this release, so driving the D-pad
     // from it as well would turn the camera twice.
@@ -361,13 +409,22 @@ void read_gamepad(SDL_Gamepad *device, PadState &pad, int &analog_x, int &analog
     held(SDL_GAMEPAD_BUTTON_SOUTH, tuning.confirm_south ? 0x2000u : 0x4000u);
     held(SDL_GAMEPAD_BUTTON_EAST, tuning.confirm_south ? 0x4000u : 0x2000u);
 
-    // The PSP triggers are digital, but hunters hold L for the camera all the
-    // time, so the analog triggers press the same bits as the shoulders.
+    // The PSP triggers are digital, and games hold L or R for long stretches,
+    // so the analog triggers press the same bits as the shoulders.
     const auto axis = [&](SDL_GamepadAxis id) {
         return std::clamp(static_cast<float>(SDL_GetGamepadAxis(device, id)) / 32767.0f, -1.0f, 1.0f);
     };
-    if (axis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > tuning.trigger) buttons |= 0x0100u;
-    if (axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > tuning.trigger) buttons |= 0x0200u;
+    // A game's trigger profiles put other buttons on them, such as a weapon's
+    // attack for shooting. The buttons copied keep working.
+    std::uint32_t left_trigger = 0x0100u;   // L
+    std::uint32_t right_trigger = 0x0200u;  // R
+    const std::span<const TriggerProfile> profiles = portablekit::game().trigger_profiles;
+    if (tuning.triggers != 0u && tuning.triggers <= profiles.size()) {
+        left_trigger = profiles[tuning.triggers - 1u].left;
+        right_trigger = profiles[tuning.triggers - 1u].right;
+    }
+    if (axis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > tuning.trigger) buttons |= left_trigger;
+    if (axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > tuning.trigger) buttons |= right_trigger;
 
     const float right_x = axis(SDL_GAMEPAD_AXIS_RIGHTX);
     const float right_y = axis(SDL_GAMEPAD_AXIS_RIGHTY);
@@ -412,6 +469,12 @@ struct VulkanRenderer::Impl {
         VkImageView view{};
         VkDescriptorSet descriptor{};
         std::uint64_t last_used{};
+        // The texture pack's image for this texture, looked up once when the
+        // texture was uploaded; drawn instead once it is on the GPU.
+        std::shared_ptr<Replacement> replacement;
+        // How far down a 512-tall texture has been drawn, which decides how
+        // much of it the pack's hash covers; see texture_pack.hpp.
+        std::uint16_t max_seen_v{};
     };
 
     RendererConfig config;
@@ -429,6 +492,49 @@ struct VulkanRenderer::Impl {
     VkCommandPool command_pool{};
     VkCommandBuffer command_buffer{};
     VkFence frame_fence{};
+    // GPU time per frame (perf line): timestamps written at the start of each
+    // command buffer of the frame and after its last draw, before the copy to
+    // the window. Read after the frame fence; null when the queue cannot time
+    // (timestampValidBits 0) or <prefix>_NO_GPU_TIMESTAMPS is set.
+    VkQueryPool gpu_timer{};
+    double gpu_timer_ns_per_tick{};
+    std::uint64_t gpu_timer_mask{};
+    std::uint32_t gpu_timer_used{};     // queries written into this frame so far
+    std::uint32_t gpu_timer_pending{};  // queries of the submitted frame, read at the next begin_frame
+    bool gpu_timer_open{};
+    void begin_gpu_segment(VkCommandBuffer commands) {
+        if (gpu_timer == VK_NULL_HANDLE || gpu_timer_open || gpu_timer_used + 2u > 2u * kGpuTimerSegments) return;
+        vkCmdWriteTimestamp(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, gpu_timer, gpu_timer_used);
+        gpu_timer_open = true;
+    }
+    void end_gpu_segment(VkCommandBuffer commands) {
+        if (!gpu_timer_open) return;
+        vkCmdWriteTimestamp(commands, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, gpu_timer, gpu_timer_used + 1u);
+        gpu_timer_used += 2u;
+        gpu_timer_open = false;
+    }
+    // After the fence of the frame that wrote them: adds that frame's GPU time.
+    void collect_gpu_time() {
+        if (gpu_timer == VK_NULL_HANDLE || gpu_timer_pending == 0u) return;
+        std::array<std::uint64_t, 4u * kGpuTimerSegments> results{};
+        const std::uint32_t count = gpu_timer_pending;
+        gpu_timer_pending = 0u;
+        const VkResult read = vkGetQueryPoolResults(
+            device, gpu_timer, 0u, count, static_cast<std::size_t>(count) * 2u * sizeof(std::uint64_t),
+            results.data(), 2u * sizeof(std::uint64_t),
+            VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+        if (read != VK_SUCCESS && read != VK_NOT_READY) return;
+        std::uint64_t ticks = 0u;
+        bool any = false;
+        for (std::uint32_t pair = 0; pair + 1u < count; pair += 2u) {
+            const std::uint64_t *begin = &results[pair * 2u];
+            const std::uint64_t *end = &results[(pair + 1u) * 2u];
+            if (begin[1] == 0u || end[1] == 0u) continue;  // not available
+            ticks += (end[0] - begin[0]) & gpu_timer_mask;
+            any = true;
+        }
+        if (any) perf::add_gpu_time(static_cast<double>(ticks) * gpu_timer_ns_per_tick / 1.0e6);
+    }
     VkSemaphore image_available{};
     VkSemaphore render_finished{};
     VkPresentModeKHR present_mode{VK_PRESENT_MODE_FIFO_KHR};
@@ -443,7 +549,15 @@ struct VulkanRenderer::Impl {
 
     // Display settings.
     settings::PresentMode requested_present{settings::PresentMode::Fifo};
-    bool keep_aspect{true};
+    settings::Aspect aspect{settings::Aspect::Original};
+    std::uint32_t requested_scale{2u};  // multiples of 480x272; 0: the window's size
+    // A target size the window asks for, applied once it has held for
+    // kSettleFrames frames; a changed setting applies at the next chance.
+    VkExtent2D pending_extent{};
+    std::uint32_t pending_frames{};
+    bool resize_now{};
+    // The framebuffers the game showed last: its interface is drawn into them.
+    std::array<std::uint32_t, 2> display_addresses{};
     bool sharp_screen{};
     bool sharp_textures{};
     std::string device_name;
@@ -458,6 +572,34 @@ struct VulkanRenderer::Impl {
     bool game_input{true};
     bool suppress_held{};
     std::uint32_t suppressed_buttons{};
+    // Keyboard and mouse (input/bindings.hpp). Mouse buttons are followed
+    // through their events, so a scripted click counts like a real one.
+    bool pointer_free{};
+    bool scripted_input{};
+    bool mouse_captured{};
+    std::uint32_t mouse_buttons{};  // bit n: SDL mouse button n held
+    MouseMotion mouse_motion{};
+    std::array<bool, input::kKeyPositions> scripted_keys{};
+
+    // Captures the pointer for the game when everything allows it and frees
+    // it otherwise. Whatever the mouse did or held across a change is dropped,
+    // so nothing stays pressed and the camera does not jump.
+    // The PSP pad from the keyboard, the mouse's buttons and the gamepad as
+    // they are now.
+    void sample_pad(bool focused);
+    void update_pointer(bool focused) {
+        const bool minimized = (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED) != 0u;
+        const bool wanted = settings::current().mouse && game_input && !pointer_free && !minimized &&
+                            (focused || scripted_input);
+        if (wanted == mouse_captured) return;
+        mouse_captured = wanted;
+        // A scripted run never takes the real pointer from the person at the machine.
+        if (!scripted_input) SDL_SetWindowRelativeMouseMode(window, wanted);
+        if (pad_tuning().trace) std::cout << "[pad] pointer " << (wanted ? "captured" : "free") << std::endl;
+        mouse_buttons = 0u;
+        mouse_motion = {};
+        if (wanted) suppress_held = true;
+    }
 
     // Window capture: the presented image is copied here and written after
     // its frame completes.
@@ -538,6 +680,21 @@ struct VulkanRenderer::Impl {
     VkBuffer writeback_buffer{};
     VkDeviceMemory writeback_buffer_memory{};
     void *writeback_mapped{};
+    // The write-back buffer is read by the CPU every frame. Uncached memory
+    // (radv's default host-visible type) makes that copy take ~3 ms on a
+    // Steam Deck, so a HOST_CACHED type is preferred, and a non-coherent one
+    // is invalidated before each read. <prefix>_NO_CACHED_READBACK keeps the
+    // first host-visible coherent type, as before.
+    bool writeback_cached{};
+    bool writeback_coherent{true};
+    void invalidate_writeback() {
+        if (writeback_coherent || writeback_buffer_memory == VK_NULL_HANDLE) return;
+        VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+        range.memory = writeback_buffer_memory;
+        range.offset = 0u;
+        range.size = VK_WHOLE_SIZE;
+        vkInvalidateMappedMemoryRanges(device, 1u, &range);
+    }
     struct WritebackFrame {
         std::uint32_t address{};
         std::uint32_t stride{};
@@ -571,6 +728,15 @@ struct VulkanRenderer::Impl {
     std::array<float, 3> frame_ndc_min{1e30f, 1e30f, 1e30f};
     std::array<float, 3> frame_ndc_max{-1e30f, -1e30f, -1e30f};
     std::map<std::uint32_t, std::uint32_t> frame_transformed_targets;
+    // <prefix>_TRACE_CAMERA: the view matrices this frame's transformed draws
+    // used and how many vertices each of them covered. A frame holds a handful
+    // (the scene, a reflection, a shadow pass), and the busiest one is the
+    // camera the player sees, so the frame's line can report that one. Only
+    // filled while the trace is on.
+    std::vector<std::pair<std::array<float, 16>, std::uint32_t>> frame_views;
+    // The yaw of the previous traced frame, so each line can carry the turn.
+    float traced_yaw{};
+    CameraReading reading{};
     bool pass_active{};
     VkRenderPass render_pass{};
     VkExtent2D target_extent{};
@@ -590,11 +756,29 @@ struct VulkanRenderer::Impl {
     VkSampler clamp_sampler{};
     VkSampler clamp_sharp_sampler{};
     std::map<PipelineKey, VkPipeline> pipelines;
+    // The pipeline of the previous lookup: consecutive draws mostly share it.
+    // <prefix>_NO_LOOKUP_CACHE looks every draw up in the map, as before.
+    PipelineKey last_pipeline_key{};
+    VkPipeline last_pipeline{};
 
     VkBuffer vertex_buffer{};
     VkDeviceMemory vertex_memory{};
     void *vertex_mapped{};
     VkDeviceSize vertex_offset{};
+    // The region of the vertex and index buffers this frame writes: always
+    // the first without frame interpolation, the next of kFrameRegions in
+    // turn with it (see kFrameRegions).
+    std::uint32_t frame_region{};
+    std::uint32_t next_region{};
+    VkDeviceSize vertex_limit{kVertexBufferBytes};
+    VkDeviceSize index_limit{kIndexBufferBytes};
+    void enter_region(std::uint32_t index) {
+        frame_region = index;
+        vertex_offset = static_cast<VkDeviceSize>(index) * kVertexBufferBytes;
+        vertex_limit = vertex_offset + kVertexBufferBytes;
+        index_offset = static_cast<VkDeviceSize>(index) * kIndexBufferBytes;
+        index_limit = index_offset + kIndexBufferBytes;
+    }
     // The lighting blocks most recently written this frame, reused while the
     // state stays the same; begin_frame() drops them with the vertex buffer.
     std::uint64_t environment_version{};    // 0: none written this frame
@@ -615,7 +799,7 @@ struct VulkanRenderer::Impl {
     // Returns false, writing nothing, when the buffer is full.
     bool write_uniform(const void *data, std::size_t size, std::uint32_t &offset) {
         const VkDeviceSize at = (vertex_offset + uniform_alignment - 1u) / uniform_alignment * uniform_alignment;
-        if (at + size > kVertexBufferBytes) return false;
+        if (at + size > vertex_limit) return false;
         std::memcpy(static_cast<std::uint8_t *>(vertex_mapped) + at, data, size);
         offset = static_cast<std::uint32_t>(at);
         vertex_offset = at + size;
@@ -624,10 +808,249 @@ struct VulkanRenderer::Impl {
     void forget_bindings() {
         bound_pipeline = VK_NULL_HANDLE;
         lighting_bound = false;
+        state_known = false;
     }
+
+    // Draw merging (<prefix>_NO_DRAW_MERGE turns it off). A transformed draw
+    // whose recorded state equals the previous one's, and whose vertices
+    // follow the previous draw's in the vertex buffer, joins its group: its
+    // indices, rebased onto the group's first vertex, follow the group's in
+    // the index buffer, and the whole group is one vkCmdDrawIndexed. The
+    // triangles, their order and their vertex data are unchanged. The state a
+    // draw is recorded with is also compared with what the command buffer
+    // already has, and only what differs is set.
+    struct DrawState {
+        VkPipeline pipeline{};
+        VkDescriptorSet texture{};
+        std::array<std::uint32_t, 2> lighting{};
+        VkViewport viewport{};
+        VkRect2D scissor{};
+        std::array<float, 4> blend{};
+        PushConstants push{};
+    };
+    DrawState recorded{};
+    bool state_known{};
+    struct DrawGroup {
+        bool open{};
+        VkDeviceSize vertex_base{};  // bytes into the vertex buffer
+        VkDeviceSize vertex_end{};
+        VkDeviceSize index_base{};   // bytes into the index buffer
+        std::uint32_t index_count{};
+        std::uint32_t draws{};
+    };
+    DrawGroup group{};
+    bool group_skinned{};  // the open group is of skinned draws recorded for drawing again
+    std::uint32_t draws_since_poll{};
+    VkBuffer index_buffer{};
+    VkDeviceMemory index_memory{};
+    void *index_mapped{};
+    VkDeviceSize index_offset{};
+    void flush_group() {
+        if (!group.open) return;
+        group.open = false;
+        vkCmdBindVertexBuffers(command_buffer, 0u, 1u, &vertex_buffer, &group.vertex_base);
+        vkCmdBindIndexBuffer(command_buffer, index_buffer, group.index_base, VK_INDEX_TYPE_UINT16);
+        vkCmdDrawIndexed(command_buffer, group.index_count, 1u, 0u, 0, 0u);
+        perf::count_recorded_draws(1u);
+    }
+    // Sets what differs between `state` and what is recorded already.
+    void record_state(const DrawState &state) {
+        if (!state_known || std::memcmp(&state.viewport, &recorded.viewport, sizeof(VkViewport)) != 0)
+            vkCmdSetViewport(command_buffer, 0u, 1u, &state.viewport);
+        if (!state_known || state.blend != recorded.blend)
+            vkCmdSetBlendConstants(command_buffer, state.blend.data());
+        if (!state_known || std::memcmp(&state.scissor, &recorded.scissor, sizeof(VkRect2D)) != 0)
+            vkCmdSetScissor(command_buffer, 0u, 1u, &state.scissor);
+        if (state.pipeline != bound_pipeline) {
+            vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, state.pipeline);
+            bound_pipeline = state.pipeline;
+        }
+        if (!state_known || state.texture != recorded.texture)
+            vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout, 0u, 1u,
+                                    &state.texture, 0u, nullptr);
+        if (!lighting_bound || state.lighting != bound_lighting_offsets) {
+            vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout, 1u, 1u,
+                                    &lighting_descriptor, static_cast<std::uint32_t>(state.lighting.size()),
+                                    state.lighting.data());
+            bound_lighting_offsets = state.lighting;
+            lighting_bound = true;
+        }
+        if (!state_known || std::memcmp(&state.push, &recorded.push, sizeof(PushConstants)) != 0)
+            vkCmdPushConstants(command_buffer, pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                               0u, sizeof(PushConstants), &state.push);
+        recorded = state;
+        state_known = true;
+    }
+    [[nodiscard]] static bool same_state(const DrawState &a, const DrawState &b) {
+        return a.pipeline == b.pipeline && a.texture == b.texture && a.lighting == b.lighting &&
+               std::memcmp(&a.viewport, &b.viewport, sizeof(VkViewport)) == 0 &&
+               std::memcmp(&a.scissor, &b.scissor, sizeof(VkRect2D)) == 0 && a.blend == b.blend &&
+               std::memcmp(&a.push, &b.push, sizeof(PushConstants)) == 0;
+    }
+
+    // Frame interpolation (#39; frame_interpolation.hpp, frame_pacing.hpp).
+    //
+    // While it is on, each frame is recorded as it is drawn: a summary of
+    // every draw, for matching it in the next frame, and the draw calls the
+    // frame recorded, with their state and where their vertices, indices and
+    // lighting blocks lie in the buffers. The buffers keep three frames (see
+    // kFrameRegions), so drawing a frame again copies no vertices: an
+    // in-between present records the older frame's draw calls again, the
+    // merged groups as they were, with blended transforms in their push
+    // constants. Only a skinned draw writes new vertices (its own blended
+    // with the newer frame's, from copies kept on the CPU) and only a lit
+    // draw whose world matrix moved writes a new object block.
+    static constexpr std::uint32_t kNone = 0xFFFFFFFFu;
+    struct ReplayGroup {
+        DrawState state{};
+        std::uint32_t target{};
+        VkDeviceSize vertex_base{};   // bytes into the vertex buffer
+        VkBuffer index_buffer{};      // null for a draw without indices
+        VkDeviceSize index_base{};
+        std::uint32_t count{};        // indices, or vertices without them
+        std::uint32_t vertex_count{}; // vertices from vertex_base
+        std::uint32_t first_draw{};   // into FrameRecord::summaries
+        std::uint32_t draws{};
+        std::uint32_t object{kNone};  // FrameRecord::objects, for a lit group
+        std::uint32_t skinned{kNone}; // FrameRecord::skinned: the vertices of a group of skinned draws
+    };
+    struct FrameRecord {
+        std::vector<interpolation::DrawSummary> summaries;
+        std::vector<std::uint32_t> group_of;  // for each summary, its group
+        std::vector<ReplayGroup> groups;
+        std::vector<GpuVertex> skinned;       // skinned draws' vertices
+        std::vector<ObjectBlock> objects;
+        std::uint32_t object_offset{kNone};   // where objects.back() lies
+        std::uint32_t displayed{};
+        std::int64_t moment_us{};
+        std::uint64_t texture_clock{};        // texture_clock when the frame began
+        bool recorded{};                      // recorded for drawing again, in full
+        bool valid{};
+        void clear() {
+            summaries.clear();
+            group_of.clear();
+            groups.clear();
+            skinned.clear();
+            objects.clear();
+            object_offset = kNone;
+            recorded = false;
+            valid = false;
+        }
+    };
+    struct InterpolationStats {
+        std::chrono::steady_clock::time_point window_start{std::chrono::steady_clock::now()};
+        std::uint32_t frames{};
+        std::uint64_t eligible{};
+        std::uint64_t matched{};
+        std::uint32_t continued{};
+        float max_camera_angle{};
+        float max_camera_distance{};
+        std::map<std::string, std::uint32_t> cuts;
+        std::uint32_t presents{};
+        std::uint32_t blended{};
+        std::uint32_t skipped{};
+        std::uint32_t blocked{};     // not made: the display had no image free
+        std::uint32_t over_budget{}; // not made: presents while the code ran took half a frame
+        // Why presents showed a frame as it is rather than a blend.
+        std::uint32_t plain_newest{};   // at or past the newest frame's moment (1 per frame at 60/90/120)
+        std::uint32_t plain_oldest{};   // at the older frame's moment
+        std::uint32_t plain_cut{};      // the pair is not blended (cut, not recorded)
+        std::uint32_t plain_textures{}; // a texture the older frame drew with was dropped
+        std::uint64_t groups{};  // draw calls recorded again
+        std::uint64_t flipbook_steps{};  // texture offsets not blended: a flipbook's step
+        std::uint64_t followed{};        // draw calls without a partner moved with the camera only
+        std::uint32_t rejected{};        // pairs given up: moved too far on their own
+        std::uint32_t rejected_shared{}; // of those, with other draws of the same mesh
+        float max_own_motion{};
+        std::chrono::steady_clock::duration blend_time{};  // CPU time of blended presents
+        std::chrono::steady_clock::duration plain_time{};  // CPU time of the other presents
+        std::chrono::steady_clock::duration max_late{};    // latest present after its time
+        std::chrono::steady_clock::duration replay_time{}; // of blend_time: recording the draw calls again
+        double gpu_ms{};  // GPU time of the blended presents' replays
+        std::uint32_t gpu_samples{};
+    };
+    settings::FrameRate frame_rate{settings::FrameRate::Fps30};
+    bool trace_interpolation{};
+    bool interpolating{};          // the frame being drawn is recorded for drawing again
+    bool cycle_active{};           // presents between flips are scheduled
+    FrameRecord recording_frame;   // the frame the game is drawing
+    FrameRecord newer_frame;       // the frame it flipped last
+    FrameRecord older_frame;       // the frame before that
+    interpolation::Matcher matcher;
+    interpolation::CutThresholds cut_thresholds;
+    interpolation::Matching matching;  // older_frame against newer_frame
+    interpolation::RigidMotion camera_motion;  // matching.camera taken apart
+    pacing::PresentClock present_clock;
+    pacing::RateGovernor governor;
+    InterpolationStats interpolation_stats;
+    // Measured costs, kept across seconds for the governor.
+    double blend_cost_ms{};
+    double plain_cost_ms{};
+    std::uint64_t governor_second{};  // perf::Summary::second last given to the governor
+    // The pictures of the older and newer frames, copied at their flips, and
+    // a target per present slot for the blended frames.
+    std::array<Target, 2> pictures{};
+    std::uint32_t newer_picture{};
+    bool older_picture_valid{};
+    bool newer_picture_valid{};
+    std::array<Target, 2> blend_targets{};
+    // The presents between flips alternate between two command buffers, each
+    // with its fence, its scratch area of the vertex buffer and its pair of
+    // GPU timestamps.
+    std::array<VkCommandBuffer, 2> present_commands{};
+    std::array<VkFence, 2> present_fences{};
+    std::array<bool, 2> present_timed{};
+    VkQueryPool present_timer{};
+    std::uint32_t present_slot{};
+    ImDrawData *frame_ui{};  // the interface drawn over this game frame
+    // CPU time of the presents made while the game's code ran, since the
+    // flip; they stop at half a game frame.
+    std::chrono::steady_clock::duration busy_presents{};
+    // A swapchain image acquired before recording a present between flips,
+    // for submit_and_present to present.
+    std::optional<std::uint32_t> acquired_image;
+    float display_hz{};
+    // The newest texture_clock value a destroyed texture had been drawn with:
+    // a recorded frame that began before it may name its descriptor.
+    std::uint64_t destroyed_texture_clock{};
+    [[nodiscard]] bool interpolation_wanted() const;
+    [[nodiscard]] double wanted_rate() const;
+    void finish_interpolated_frame(VkImage source, std::uint32_t displayed, std::int64_t moment_us);
+    void record_draw_for_replay(const DrawCall &call, bool lit, std::uint32_t skinned, const DrawState &state,
+                                VkDeviceSize vertex_start, VkBuffer indices, VkDeviceSize index_start,
+                                std::uint32_t count, std::uint32_t vertex_count, bool joined);
+    // `idle`: the kernel is waiting for real time, so the present costs the
+    // game nothing; otherwise it is made while the game's code runs, within
+    // a budget per game frame. Returns whether a present was made.
+    bool poll_presents(std::chrono::steady_clock::time_point now, bool account, bool idle);
+    bool present_between(const pacing::PresentClock::Present &present, bool account);
+    void replay(VkCommandBuffer commands, std::uint32_t slot, float t);
+    void report_interpolation();
+    void reset_interpolation();
+    void destroy_interpolation_targets();
+    void check_replay();
+    std::vector<std::uint32_t> read_image(VkImage image);
+    bool create_target(Target &target, std::string &error);
+    void initialize_layouts(VkCommandBuffer commands, Target &target);
+    void submit_frame();
 
     Texture white_texture{};
     std::map<std::uint64_t, Texture> textures;
+    // HD texture pack (texture_pack.hpp). `pack` is null while the setting
+    // is off or no pack is installed; turning the setting on or off takes
+    // effect at the next begin_frame().
+    std::unique_ptr<TexturePack> pack;
+    std::unique_ptr<TextureDumper> dumper;
+    ReplacementTextures replacements;
+    bool pack_wanted{};
+    bool pack_applied{};
+    bool pack_held{};    // an import is swapping the pack's folder: none is open
+    bool pack_reload{};  // open the pack again, e.g. after an import
+    TexturePackLocation pack_location;
+    std::string pack_status;
+    std::uint64_t replaced_draws{};  // this second, for <prefix>_TRACE_TEXTURE_PACK
+    void apply_texture_pack();
+    [[nodiscard]] VkDescriptorSet texture_descriptor(const GuestMemory &memory, const DrawCall &call);
     std::uint64_t texture_clock{};
     // texture_key results for the display list being walked, by the state that
     // feeds the key; cleared by begin_display_list().
@@ -641,9 +1064,52 @@ struct VulkanRenderer::Impl {
         bool swizzled{};
         auto operator<=>(const TextureKeyInput &) const = default;
     };
-    std::map<TextureKeyInput, std::uint64_t> list_texture_keys;
+    // The texture each input resolved to, while `textures_erased` has not
+    // moved since: erasing is the only change that moves or frees a cached
+    // texture. The previous draw's entry is kept at hand, as consecutive draws
+    // mostly sample the same texture.
+    struct ListTexture {
+        std::uint64_t key{};
+        Texture *texture{};
+        std::uint64_t erased{};
+    };
+    std::map<TextureKeyInput, ListTexture> list_texture_keys;
+    std::uint64_t textures_erased{};
+    TextureKeyInput last_texture_input{};
+    ListTexture *last_texture{};
 
     std::vector<GpuVertex> scratch;
+    // Kept from one use to the next instead of allocated each time, unless
+    // <prefix>_NO_BUFFER_REUSE: decoded texture pixels, a framebuffer read back
+    // for a block transfer, and the staging buffer and command buffer of
+    // texture uploads (free again once an upload has waited for the queue).
+    std::vector<std::uint32_t> decoded_pixels;
+    std::vector<std::uint32_t> readback_pixels;
+    VkBuffer upload_buffer{};
+    VkDeviceMemory upload_buffer_memory{};
+    void *upload_buffer_mapped{};
+    VkDeviceSize upload_buffer_size{};
+    VkCommandBuffer upload_commands{};
+    [[nodiscard]] static bool reuse_buffers() {
+        static const bool no_reuse = portablekit::env("NO_BUFFER_REUSE") != nullptr;
+        return !no_reuse && !perf::alternate_off(perf::NewPath::Reuse);
+    }
+    void destroy_upload_buffer() {
+        if (upload_buffer_mapped != nullptr) vkUnmapMemory(device, upload_buffer_memory);
+        vkDestroyBuffer(device, upload_buffer, nullptr);
+        vkFreeMemory(device, upload_buffer_memory, nullptr);
+        upload_buffer = VK_NULL_HANDLE;
+        upload_buffer_memory = VK_NULL_HANDLE;
+        upload_buffer_mapped = nullptr;
+        upload_buffer_size = 0u;
+    }
+    // Index list of a draw whose decoded vertices go straight into the vertex
+    // buffer (see submit()).
+    std::vector<std::uint16_t> direct_indices;
+    // <prefix>_CHECK_DIRECT_VERTICES: draws compared with the expansion, and
+    // those that differed.
+    std::uint64_t direct_checked{};
+    std::uint64_t direct_mismatched{};
     PadState pad{};
     SDL_Gamepad *gamepad{};
     SDL_JoystickID gamepad_id{};
@@ -784,19 +1250,41 @@ struct VulkanRenderer::Impl {
     void destroy_swapchain_views();
     void recreate_swapchain();
     bool create_ui_framebuffers(std::string &error);
-    void record_game_blit(VkImage source, VkImage destination);
-    void submit_and_present(VkImage source, bool game_frame);
-    void write_capture();
+    void record_game_blit(VkCommandBuffer commands, VkImage source, VkImage destination);
+    // Target size for the current settings and window.
+    [[nodiscard]] VkExtent2D wanted_target_extent() const;
+    // Rebuilds every target at `extent`, its picture scaled into it. Not while
+    // a frame is being recorded.
+    void resize_targets(VkExtent2D extent);
+    // After a present: follows the window's size or a changed setting.
+    void follow_window();
+    // Fill makes every one of the game's 480x272 pixels wider (or taller)
+    // than square. The interface is drawn at `fit_x` x `fit_y` of its size
+    // about the screen's centre, which gives it square pixels again. False
+    // when nothing needs fitting.
+    [[nodiscard]] bool interface_fit(float &fit_x, float &fit_y) const;
+    [[nodiscard]] bool shows(std::uint32_t address) const {
+        return address != 0u && (address == display_addresses[0] || address == display_addresses[1]);
+    }
+    void submit_and_present(VkImage source, bool game_frame) {
+        submit_and_present(command_buffer, frame_fence, source, game_frame, true);
+    }
+    // `main_frame`: `commands` is the frame's own command buffer, which ends
+    // the frame's recording and GPU timing; otherwise it is a present between
+    // the game's flips.
+    void submit_and_present(VkCommandBuffer commands, VkFence fence, VkImage source, bool game_frame,
+                            bool main_frame);
+    void write_capture(VkFence fence);
     void destroy_target(Target &target);
     void run_commands(const std::function<void(VkCommandBuffer)> &record);
     Target *target_for(std::uint32_t address, std::string &error);
     bool create_overlay(std::string &error);
-    void record_overlay(VkImage destination);
+    void record_overlay(VkCommandBuffer commands, VkImage destination);
     void update_display_info();
     void begin_pass(std::uint32_t address);
     void end_pass();
     VkPipeline pipeline_for(const PipelineKey &key);
-    Texture &texture_for(const GuestMemory &memory, const TextureState &state);
+    Texture &texture_for(const GuestMemory &memory, const DrawCall &call);
     void trace_framebuffer_texture(const DrawCall &call);
     // A render target the texture reads, with the texture's first texel as a
     // pixel position inside it; see framebuffer_texture().
@@ -819,18 +1307,27 @@ VulkanRenderer::~VulkanRenderer() { shutdown(); }
 bool VulkanRenderer::available() const noexcept { return impl_ && impl_->ready; }
 bool VulkanRenderer::quit_requested() const noexcept { return impl_ && impl_->quit; }
 std::uint64_t VulkanRenderer::frames_presented() const noexcept { return impl_ ? impl_->frames : 0u; }
+CameraReading VulkanRenderer::camera() const noexcept { return impl_ ? impl_->reading : CameraReading{}; }
 std::uint64_t VulkanRenderer::draws_submitted() const noexcept { return impl_ ? impl_->draws : 0u; }
 
 bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error) {
     Impl &impl = *impl_;
     impl.config = config;
     const settings::Settings &player = settings::current();
-    const std::uint32_t scale = std::clamp<std::uint32_t>(player.internal_scale, 1u, settings::kMaxInternalScale);
+    impl.requested_scale = std::min(player.internal_scale, settings::kMaxInternalScale);
+    // Until the window's size is known, which Auto and Fill need.
+    const std::uint32_t scale = impl.requested_scale != 0u ? impl.requested_scale : 2u;
     impl.target_extent = {kPspWidth * scale, kPspHeight * scale};
     impl.requested_present = player.present_mode;
-    impl.keep_aspect = player.keep_aspect;
+    impl.aspect = usable_aspect(player.aspect);
     impl.sharp_screen = player.sharp_screen;
     impl.sharp_textures = player.sharp_textures;
+    impl.trace_interpolation = portablekit::env("TRACE_INTERPOLATION") != nullptr;
+    if (const interpolation::CutThresholds *thresholds = portablekit::game().interpolation_thresholds)
+        impl.cut_thresholds = *thresholds;
+    if (portablekit::env("INTERPOLATION_NO_MOTION_GUARD") != nullptr) impl.cut_thresholds.max_own_motion = 0.0f;
+    impl.frame_rate = player.frame_rate;
+    impl.governor.set_automatic(player.frame_rate_auto);
     const std::uint32_t window_scale = std::clamp<std::uint32_t>(player.window_scale, 1u, settings::kMaxWindowScale);
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
@@ -959,6 +1456,8 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     vkGetPhysicalDeviceSurfacePresentModesKHR(impl.physical_device, impl.surface, &mode_count,
                                               impl.present_modes.data());
     if (!impl.create_swapchain(error)) return false;
+    // No target exists yet: they are made at this size when first drawn.
+    impl.target_extent = impl.wanted_target_extent();
 
     std::array<VkAttachmentDescription, 2> attachments{};
     attachments[0].format = VK_FORMAT_R8G8B8A8_UNORM;
@@ -1096,13 +1595,58 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     VkFenceCreateInfo fence_info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
     vkCreateFence(impl.device, &fence_info, nullptr, &impl.frame_fence);
+    // Frame interpolation's presents between flips.
+    command_info.commandBufferCount = static_cast<std::uint32_t>(impl.present_commands.size());
+    if (!check(vkAllocateCommandBuffers(impl.device, &command_info, impl.present_commands.data()),
+               "vkAllocateCommandBuffers", error))
+        return false;
+    for (VkFence &fence : impl.present_fences) vkCreateFence(impl.device, &fence_info, nullptr, &fence);
     VkSemaphoreCreateInfo semaphore_info{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
     vkCreateSemaphore(impl.device, &semaphore_info, nullptr, &impl.image_available);
     vkCreateSemaphore(impl.device, &semaphore_info, nullptr, &impl.render_finished);
 
+    // GPU timestamps, where the queue has them. Without them the perf line
+    // reads "gpu n/a" and nothing else changes.
+    {
+        VkPhysicalDeviceProperties timer_properties{};
+        vkGetPhysicalDeviceProperties(impl.physical_device, &timer_properties);
+        const std::uint32_t valid_bits = families[impl.queue_family].timestampValidBits;
+        const float period = timer_properties.limits.timestampPeriod;
+        const char *why = nullptr;
+        // The variable's real name, kept alive for as long as why may point at it.
+        static const std::string turned_off = "turned off (" + portablekit::env_name("NO_GPU_TIMESTAMPS") + ")";
+        if (portablekit::env("NO_GPU_TIMESTAMPS") != nullptr) why = turned_off.c_str();
+        else if (valid_bits == 0u) why = "the graphics queue has no timestamps";
+        else if (!(period > 0.0f)) why = "the device reports no timestamp period";
+        if (why == nullptr) {
+            VkQueryPoolCreateInfo query_info{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+            query_info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+            query_info.queryCount = 2u * kGpuTimerSegments;
+            if (vkCreateQueryPool(impl.device, &query_info, nullptr, &impl.gpu_timer) != VK_SUCCESS) {
+                impl.gpu_timer = VK_NULL_HANDLE;
+                why = "vkCreateQueryPool failed";
+            }
+        }
+        if (why == nullptr) {
+            // A pair more for each of the two presents between flips.
+            VkQueryPoolCreateInfo present_info{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+            present_info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+            present_info.queryCount = 4u;
+            if (vkCreateQueryPool(impl.device, &present_info, nullptr, &impl.present_timer) != VK_SUCCESS)
+                impl.present_timer = VK_NULL_HANDLE;
+            impl.gpu_timer_ns_per_tick = static_cast<double>(period);
+            impl.gpu_timer_mask = valid_bits >= 64u ? ~0ull : (1ull << valid_bits) - 1ull;
+            std::cout << "[perf] GPU timestamps: " << valid_bits << " bits, " << period << " ns per tick\n";
+        } else {
+            perf::set_gpu_time_unavailable();
+            std::cout << "[perf] no GPU time: " << why << "\n";
+        }
+    }
+
     VkBufferCreateInfo buffer_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    buffer_info.size = kVertexBufferBytes;
-    buffer_info.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    buffer_info.size = kVertexBufferTotal;
+    buffer_info.usage =
+        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
     buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     if (!check(vkCreateBuffer(impl.device, &buffer_info, nullptr, &impl.vertex_buffer), "vkCreateBuffer", error))
         return false;
@@ -1115,7 +1659,20 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     if (!check(vkAllocateMemory(impl.device, &allocate, nullptr, &impl.vertex_memory), "vkAllocateMemory", error))
         return false;
     vkBindBufferMemory(impl.device, impl.vertex_buffer, impl.vertex_memory, 0u);
-    vkMapMemory(impl.device, impl.vertex_memory, 0u, kVertexBufferBytes, 0u, &impl.vertex_mapped);
+    vkMapMemory(impl.device, impl.vertex_memory, 0u, kVertexBufferTotal, 0u, &impl.vertex_mapped);
+
+    buffer_info.size = kIndexBufferTotal;
+    buffer_info.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    if (!check(vkCreateBuffer(impl.device, &buffer_info, nullptr, &impl.index_buffer), "vkCreateBuffer", error))
+        return false;
+    vkGetBufferMemoryRequirements(impl.device, impl.index_buffer, &requirements);
+    allocate.allocationSize = requirements.size;
+    allocate.memoryTypeIndex = impl.find_memory_type(
+        requirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (!check(vkAllocateMemory(impl.device, &allocate, nullptr, &impl.index_memory), "vkAllocateMemory", error))
+        return false;
+    vkBindBufferMemory(impl.device, impl.index_buffer, impl.index_memory, 0u);
+    vkMapMemory(impl.device, impl.index_memory, 0u, kIndexBufferTotal, 0u, &impl.index_mapped);
 
     {
         VkPhysicalDeviceProperties device_properties{};
@@ -1146,6 +1703,23 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
 
     const std::uint32_t white = 0xFFFFFFFFu;
     impl.white_texture = impl.create_texture(1u, 1u, &white);
+
+    // Texture packs are optional too: without the GPU side, none is loaded.
+    std::string replacement_error;
+    if (impl.replacements.initialize({impl.physical_device, impl.device, impl.queue, impl.queue_family,
+                                      impl.descriptor_layout},
+                                     replacement_error)) {
+        impl.replacements.set_sharp(impl.sharp_textures);
+        impl.pack_wanted = player.texture_pack;
+        impl.pack_applied = !impl.pack_wanted;
+        impl.apply_texture_pack();
+    } else {
+        std::cout << "[texpack] unavailable: " << replacement_error << "\n";
+    }
+    if (const char *dump = portablekit::env("TEXTURE_DUMP"); dump != nullptr && *dump != '\0') {
+        impl.dumper = std::make_unique<TextureDumper>(dump);
+        std::cout << "[texpack] writing new textures to " << dump << "\n";
+    }
 
     // The overlay is optional: without it the game still runs, only unmeasured
     // on screen.
@@ -1191,7 +1765,7 @@ bool VulkanRenderer::Impl::create_overlay(std::string &error) {
 // in TRANSFER_DST layout with the game frame already blitted into it. The
 // staging buffer is free to rewrite: the frame fence has been waited on before
 // any recording of this frame started.
-void VulkanRenderer::Impl::record_overlay(VkImage destination) {
+void VulkanRenderer::Impl::record_overlay(VkCommandBuffer commands, VkImage destination) {
     const std::uint32_t scale = perf::overlay_scale(swapchain_extent.height);
     const std::uint32_t inset = 4u * scale;
     const std::uint32_t width = perf::kOverlayWidth * scale;
@@ -1200,17 +1774,17 @@ void VulkanRenderer::Impl::record_overlay(VkImage destination) {
 
     perf::draw_overlay(overlay_pixels.data());
     std::memcpy(overlay_mapped, overlay_pixels.data(), overlay_pixels.size() * sizeof(std::uint32_t));
-    transition(command_buffer, overlay_image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    transition(commands, overlay_image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     VkBufferImageCopy copy{};
     copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u};
     copy.imageExtent = {perf::kOverlayWidth, perf::kOverlayHeight, 1u};
-    vkCmdCopyBufferToImage(command_buffer, overlay_staging, overlay_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u,
+    vkCmdCopyBufferToImage(commands, overlay_staging, overlay_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u,
                            &copy);
-    transition(command_buffer, overlay_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+    transition(commands, overlay_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     // The game frame was blitted into the same image just before; order the
     // two writes.
-    transition(command_buffer, destination, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+    transition(commands, destination, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     VkImageBlit blit{};
     blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u};
@@ -1219,7 +1793,7 @@ void VulkanRenderer::Impl::record_overlay(VkImage destination) {
     blit.dstSubresource = blit.srcSubresource;
     blit.dstOffsets[0] = {static_cast<std::int32_t>(inset), static_cast<std::int32_t>(inset), 0};
     blit.dstOffsets[1] = {static_cast<std::int32_t>(inset + width), static_cast<std::int32_t>(inset + height), 1};
-    vkCmdBlitImage(command_buffer, overlay_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, destination,
+    vkCmdBlitImage(commands, overlay_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, destination,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &blit, VK_FILTER_NEAREST);
 }
 
@@ -1229,6 +1803,7 @@ void VulkanRenderer::Impl::update_display_info() {
         if (const SDL_DisplayMode *mode = SDL_GetCurrentDisplayMode(display); mode != nullptr)
             refresh = mode->refresh_rate;
     }
+    display_hz = refresh;
     perf::set_display_info(present_mode_name(present_mode), swapchain_extent.width, swapchain_extent.height, refresh);
 }
 
@@ -1353,13 +1928,13 @@ bool VulkanRenderer::Impl::create_ui_framebuffers(std::string &error) {
 
 // Scales the game frame onto the swapchain image, which is in TRANSFER_DST
 // layout: stretched over the whole window, or at the PSP's aspect ratio with
-// black bars.
-void VulkanRenderer::Impl::record_game_blit(VkImage source, VkImage destination) {
+// black bars. Fill's target already has the window's shape.
+void VulkanRenderer::Impl::record_game_blit(VkCommandBuffer commands, VkImage source, VkImage destination) {
     const auto width = static_cast<std::int32_t>(swapchain_extent.width);
     const auto height = static_cast<std::int32_t>(swapchain_extent.height);
     VkOffset3D low{0, 0, 0};
     VkOffset3D high{width, height, 1};
-    if (keep_aspect) {
+    if (aspect == settings::Aspect::Original) {
         const double scale = std::min(static_cast<double>(width) / kPspWidth, static_cast<double>(height) / kPspHeight);
         const auto shown_width = std::clamp(static_cast<std::int32_t>(std::lround(kPspWidth * scale)), 1, width);
         const auto shown_height = std::clamp(static_cast<std::int32_t>(std::lround(kPspHeight * scale)), 1, height);
@@ -1368,9 +1943,9 @@ void VulkanRenderer::Impl::record_game_blit(VkImage source, VkImage destination)
         if (shown_width < width || shown_height < height) {
             const VkClearColorValue black{{0.0f, 0.0f, 0.0f, 1.0f}};
             const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, 1u};
-            vkCmdClearColorImage(command_buffer, destination, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1u, &range);
+            vkCmdClearColorImage(commands, destination, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1u, &range);
             // Order the clear before the blit into the same image.
-            transition(command_buffer, destination, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            transition(commands, destination, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         }
     }
@@ -1381,63 +1956,75 @@ void VulkanRenderer::Impl::record_game_blit(VkImage source, VkImage destination)
     blit.dstSubresource = blit.srcSubresource;
     blit.dstOffsets[0] = low;
     blit.dstOffsets[1] = high;
-    vkCmdBlitImage(command_buffer, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, destination,
+    vkCmdBlitImage(commands, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, destination,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &blit, sharp_screen ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
 }
 
 // Finishes the frame being recorded: the game frame (or a plain background
 // when `source` is null), the performance overlay on game frames, the
 // interface, then submit and present.
-void VulkanRenderer::Impl::submit_and_present(VkImage source, bool game_frame) {
-    if (swapchain_dirty || swapchain == VK_NULL_HANDLE) recreate_swapchain();
+void VulkanRenderer::Impl::submit_and_present(VkCommandBuffer commands, VkFence fence, VkImage source,
+                                              bool game_frame, bool main_frame) {
+    if (!acquired_image && (swapchain_dirty || swapchain == VK_NULL_HANDLE)) recreate_swapchain();
     ImDrawData *ui = ui_ready ? ui_draw_data : nullptr;
     ui_draw_data = nullptr;
     const bool draw_ui = ui != nullptr && ui->CmdListsCount > 0;
     // A game flip before anything was drawn has nothing to show.
     const bool has_content = source != VK_NULL_HANDLE || !game_frame || draw_ui;
 
+    // The GPU time covers the frame's own rendering, not the copy to the
+    // window, which may wait for the presentation engine to release an image.
+    if (main_frame) {
+        end_gpu_segment(commands);
+        gpu_timer_pending = gpu_timer_used;
+    }
+
     std::uint32_t image_index = 0u;
     VkResult acquired = VK_ERROR_OUT_OF_DATE_KHR;
-    if (has_content && swapchain != VK_NULL_HANDLE) {
+    if (acquired_image) {
+        image_index = *acquired_image;
+        acquired = VK_SUCCESS;
+        acquired_image.reset();
+    } else if (has_content && swapchain != VK_NULL_HANDLE) {
         const perf::Clock::time_point acquire_start = perf::Clock::now();
         acquired = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, image_available, VK_NULL_HANDLE, &image_index);
-        perf::add_wait_time(perf::Clock::now() - acquire_start);
+        perf::add_wait_time(perf::Clock::now() - acquire_start, perf::Stall::Acquire);
         if (acquired == VK_ERROR_OUT_OF_DATE_KHR) swapchain_dirty = true;
     }
     const bool can_present = acquired == VK_SUCCESS || acquired == VK_SUBOPTIMAL_KHR;
     bool capture = false;
     if (can_present) {
         VkImage target = swapchain_images[image_index];
-        transition(command_buffer, target, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        transition(commands, target, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         if (source != VK_NULL_HANDLE) {
-            transition(command_buffer, source, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            transition(commands, source, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-            record_game_blit(source, target);
-            transition(command_buffer, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            record_game_blit(commands, source, target);
+            transition(commands, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         } else {
             // Behind the setup screens: the dark brown of the project's logo.
             const VkClearColorValue background{{0.075f, 0.055f, 0.045f, 1.0f}};
             const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, 1u};
-            vkCmdClearColorImage(command_buffer, target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &background, 1u,
+            vkCmdClearColorImage(commands, target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &background, 1u,
                                  &range);
         }
         if (game_frame && overlay_visible) {
             const perf::Clock::time_point overlay_start = perf::Clock::now();
-            record_overlay(target);
+            record_overlay(commands, target);
             perf::add_overlay_time(perf::Clock::now() - overlay_start);
         }
         VkImageLayout layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         if (draw_ui && image_index < ui_framebuffers.size()) {
-            transition(command_buffer, target, layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+            transition(commands, target, layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
             layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             VkRenderPassBeginInfo pass{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
             pass.renderPass = ui_render_pass;
             pass.framebuffer = ui_framebuffers[image_index];
             pass.renderArea = {{0, 0}, swapchain_extent};
-            vkCmdBeginRenderPass(command_buffer, &pass, VK_SUBPASS_CONTENTS_INLINE);
-            ImGui_ImplVulkan_RenderDrawData(ui, command_buffer);
-            vkCmdEndRenderPass(command_buffer);
+            vkCmdBeginRenderPass(commands, &pass, VK_SUBPASS_CONTENTS_INLINE);
+            ImGui_ImplVulkan_RenderDrawData(ui, commands);
+            vkCmdEndRenderPass(commands);
         }
         if (!capture_path.empty() && (swapchain_usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0u) {
             const VkDeviceSize bytes = static_cast<VkDeviceSize>(swapchain_extent.width) * swapchain_extent.height * 4u;
@@ -1454,24 +2041,24 @@ void VulkanRenderer::Impl::submit_and_present(VkImage source, bool game_frame) {
                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
                 vkAllocateMemory(device, &allocate, nullptr, &capture_memory);
                 vkBindBufferMemory(device, capture_buffer, capture_memory, 0u);
-                transition(command_buffer, target, layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+                transition(commands, target, layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
                 layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
                 VkBufferImageCopy copy{};
                 copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u};
                 copy.imageExtent = {swapchain_extent.width, swapchain_extent.height, 1u};
-                vkCmdCopyImageToBuffer(command_buffer, target, layout, capture_buffer, 1u, &copy);
+                vkCmdCopyImageToBuffer(commands, target, layout, capture_buffer, 1u, &copy);
                 capture_extent = swapchain_extent;
                 capture = true;
             }
         }
-        transition(command_buffer, target, layout, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+        transition(commands, target, layout, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     }
-    vkEndCommandBuffer(command_buffer);
+    vkEndCommandBuffer(commands);
 
     const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1u;
-    submit.pCommandBuffers = &command_buffer;
+    submit.pCommandBuffers = &commands;
     if (can_present) {
         submit.waitSemaphoreCount = 1u;
         submit.pWaitSemaphores = &image_available;
@@ -1481,8 +2068,8 @@ void VulkanRenderer::Impl::submit_and_present(VkImage source, bool game_frame) {
     }
     // MoltenVK waits for the next drawable here rather than in the acquire.
     const perf::Clock::time_point submit_start = perf::Clock::now();
-    vkQueueSubmit(queue, 1u, &submit, frame_fence);
-    perf::add_wait_time(perf::Clock::now() - submit_start);
+    vkQueueSubmit(queue, 1u, &submit, fence);
+    perf::add_wait_time(perf::Clock::now() - submit_start, perf::Stall::Submit);
 
     if (can_present) {
         VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
@@ -1493,16 +2080,16 @@ void VulkanRenderer::Impl::submit_and_present(VkImage source, bool game_frame) {
         present.pImageIndices = &image_index;
         const perf::Clock::time_point present_start = perf::Clock::now();
         const VkResult presented = vkQueuePresentKHR(queue, &present);
-        perf::add_wait_time(perf::Clock::now() - present_start);
+        perf::add_wait_time(perf::Clock::now() - present_start, perf::Stall::Present);
         if (presented == VK_ERROR_OUT_OF_DATE_KHR || presented == VK_SUBOPTIMAL_KHR) swapchain_dirty = true;
     }
-    recording = false;
-    if (capture) write_capture();
+    if (main_frame) recording = false;
+    if (capture) write_capture(fence);
 }
 
 // Writes the image copied by submit_and_present once its frame has finished.
-void VulkanRenderer::Impl::write_capture() {
-    vkWaitForFences(device, 1u, &frame_fence, VK_TRUE, UINT64_MAX);
+void VulkanRenderer::Impl::write_capture(VkFence fence) {
+    vkWaitForFences(device, 1u, &fence, VK_TRUE, UINT64_MAX);
     void *mapped = nullptr;
     vkMapMemory(device, capture_memory, 0u, VK_WHOLE_SIZE, 0u, &mapped);
     const bool bgra = swapchain_format == VK_FORMAT_B8G8R8A8_UNORM || swapchain_format == VK_FORMAT_B8G8R8A8_SRGB;
@@ -1563,16 +2150,26 @@ VulkanRenderer::Impl::Target *VulkanRenderer::Impl::target_for(std::uint32_t add
     if (found != targets.end()) return &found->second;
 
     Target target{};
+    if (!create_target(target, error)) {
+        destroy_target(target);
+        return nullptr;
+    }
+    static const bool trace = portablekit::env("TRACE_FB_TEXTURES") != nullptr;
+    if (trace) std::cout << "[fbtex] frame " << frames << " new render target 0x" << std::hex << address << std::dec << "\n";
+    return &targets.emplace(address, target).first->second;
+}
+
+bool VulkanRenderer::Impl::create_target(Target &target, std::string &error) {
     if (!create_image(target_extent.width, target_extent.height, VK_FORMAT_R8G8B8A8_UNORM,
                       VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
                           VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                       target.color,
                       target.color_memory, target.color_view, VK_IMAGE_ASPECT_COLOR_BIT, error))
-        return nullptr;
+        return false;
     if (!create_image(target_extent.width, target_extent.height, VK_FORMAT_D32_SFLOAT,
                       VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, target.depth, target.depth_memory,
                       target.depth_view, VK_IMAGE_ASPECT_DEPTH_BIT, error))
-        return nullptr;
+        return false;
     const std::array<VkImageView, 2> views{target.color_view, target.depth_view};
     VkFramebufferCreateInfo info{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
     info.renderPass = render_pass;
@@ -1581,11 +2178,17 @@ VulkanRenderer::Impl::Target *VulkanRenderer::Impl::target_for(std::uint32_t add
     info.width = target_extent.width;
     info.height = target_extent.height;
     info.layers = 1u;
-    if (!check(vkCreateFramebuffer(device, &info, nullptr, &target.framebuffer), "vkCreateFramebuffer", error))
-        return nullptr;
-    static const bool trace = portablekit::env("TRACE_FB_TEXTURES") != nullptr;
-    if (trace) std::cout << "[fbtex] frame " << frames << " new render target 0x" << std::hex << address << std::dec << "\n";
-    return &targets.emplace(address, target).first->second;
+    return check(vkCreateFramebuffer(device, &info, nullptr, &target.framebuffer), "vkCreateFramebuffer", error);
+}
+
+// Attachments are loaded, not cleared, so a new target starts undefined:
+// move it into the layouts the render pass expects once.
+void VulkanRenderer::Impl::initialize_layouts(VkCommandBuffer commands, Target &target) {
+    if (target.initialized) return;
+    transition(commands, target.color, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    transition(commands, target.depth, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+               VK_IMAGE_ASPECT_DEPTH_BIT);
+    target.initialized = true;
 }
 
 void VulkanRenderer::Impl::destroy_upload() {
@@ -1656,6 +2259,7 @@ void VulkanRenderer::Impl::begin_pass(std::uint32_t address) {
 }
 
 void VulkanRenderer::Impl::end_pass() {
+    flush_group();
     if (!pass_active) return;
     vkCmdEndRenderPass(command_buffer);
     pass_active = false;
@@ -1671,31 +2275,58 @@ VulkanRenderer::Impl::Texture VulkanRenderer::Impl::create_texture(std::uint32_t
         return texture;
 
     const VkDeviceSize bytes = static_cast<VkDeviceSize>(width) * height * 4u;
+    const bool reuse = reuse_buffers();
     VkBuffer staging{};
     VkDeviceMemory staging_memory{};
-    VkBufferCreateInfo buffer_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    buffer_info.size = bytes;
-    buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-    vkCreateBuffer(device, &buffer_info, nullptr, &staging);
-    VkMemoryRequirements requirements{};
-    vkGetBufferMemoryRequirements(device, staging, &requirements);
-    VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-    allocate.allocationSize = requirements.size;
-    allocate.memoryTypeIndex = find_memory_type(
-        requirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    vkAllocateMemory(device, &allocate, nullptr, &staging_memory);
-    vkBindBufferMemory(device, staging, staging_memory, 0u);
     void *mapped = nullptr;
-    vkMapMemory(device, staging_memory, 0u, bytes, 0u, &mapped);
+    if (reuse && upload_buffer_size >= bytes) {
+        staging = upload_buffer;
+        mapped = upload_buffer_mapped;
+    } else {
+        // A kept buffer grows to a power of two of at least 1 MiB, so a few
+        // sizes cover every texture.
+        VkDeviceSize size = bytes;
+        if (reuse) {
+            size = VkDeviceSize{1u} << 20u;
+            while (size < bytes) size <<= 1u;
+        }
+        VkBufferCreateInfo buffer_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        buffer_info.size = size;
+        buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        vkCreateBuffer(device, &buffer_info, nullptr, &staging);
+        VkMemoryRequirements requirements{};
+        vkGetBufferMemoryRequirements(device, staging, &requirements);
+        VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        allocate.allocationSize = requirements.size;
+        allocate.memoryTypeIndex = find_memory_type(
+            requirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        vkAllocateMemory(device, &allocate, nullptr, &staging_memory);
+        vkBindBufferMemory(device, staging, staging_memory, 0u);
+        vkMapMemory(device, staging_memory, 0u, size, 0u, &mapped);
+        if (reuse) {
+            // The old buffer's last upload has finished: every upload waits.
+            destroy_upload_buffer();
+            upload_buffer = staging;
+            upload_buffer_memory = staging_memory;
+            upload_buffer_mapped = mapped;
+            upload_buffer_size = size;
+        }
+    }
     std::memcpy(mapped, pixels, static_cast<std::size_t>(bytes));
-    vkUnmapMemory(device, staging_memory);
+    if (!reuse) vkUnmapMemory(device, staging_memory);
 
-    VkCommandBufferAllocateInfo command_info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-    command_info.commandPool = command_pool;
-    command_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    command_info.commandBufferCount = 1u;
     VkCommandBuffer commands{};
-    vkAllocateCommandBuffers(device, &command_info, &commands);
+    if (reuse && upload_commands != VK_NULL_HANDLE) {
+        commands = upload_commands;
+        vkResetCommandBuffer(commands, 0u);
+    } else {
+        VkCommandBufferAllocateInfo command_info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        command_info.commandPool = command_pool;
+        command_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        command_info.commandBufferCount = 1u;
+        vkAllocateCommandBuffers(device, &command_info, &commands);
+        if (reuse) upload_commands = commands;
+    }
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(commands, &begin);
@@ -1715,11 +2346,12 @@ VulkanRenderer::Impl::Texture VulkanRenderer::Impl::create_texture(std::uint32_t
     const perf::Clock::time_point wait_start = perf::Clock::now();
     vkQueueSubmit(queue, 1u, &submit, VK_NULL_HANDLE);
     vkQueueWaitIdle(queue);
-    perf::add_wait_time(perf::Clock::now() - wait_start);
-    vkFreeCommandBuffers(device, command_pool, 1u, &commands);
-    vkDestroyBuffer(device, staging, nullptr);
-    vkFreeMemory(device, staging_memory, nullptr);
-
+    perf::add_wait_time(perf::Clock::now() - wait_start, perf::Stall::Upload);
+    if (!reuse) {
+        vkFreeCommandBuffers(device, command_pool, 1u, &commands);
+        vkDestroyBuffer(device, staging, nullptr);
+        vkFreeMemory(device, staging_memory, nullptr);
+    }
     VkDescriptorSetAllocateInfo descriptor_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     descriptor_info.descriptorPool = descriptor_pool;
     descriptor_info.descriptorSetCount = 1u;
@@ -1744,8 +2376,29 @@ void VulkanRenderer::Impl::destroy_texture(Texture &texture) {
     texture = Texture{};
 }
 
-VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemory &memory,
-                                                                 const TextureState &state) {
+namespace {
+
+// The largest V a draw reads from a 512-tall texture, the way texture packs
+// track it: through-mode draws give theirs, and anything else counts as the
+// whole texture.
+std::uint16_t drawn_max_v(const DrawCall &call) {
+    if (!call.through) return 512u;
+    float max_v = 0.0f;
+    for (const Vertex &vertex : call.vertices) max_v = std::max(max_v, vertex.texcoord[1]);
+    return static_cast<std::uint16_t>(std::clamp(max_v, 0.0f, 512.0f));
+}
+
+// A texture's seen height after a draw that read down to `drawn`.
+std::uint16_t update_max_seen_v(std::uint16_t seen, std::uint16_t drawn, bool through) {
+    if (!through) return 512u;
+    if (seen == 0u) return drawn > 0u ? std::max<std::uint16_t>(272u, drawn) : 0u;
+    return drawn > seen ? 512u : seen;
+}
+
+} // namespace
+
+VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemory &memory, const DrawCall &call) {
+    const TextureState &state = call.texture;
     const TextureKeyInput input{state.address,
                                 state.buffer_width,
                                 static_cast<std::uint32_t>(state.width) << 16u | state.height,
@@ -1753,16 +2406,66 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
                                 state.clut_address,
                                 state.clut_format,
                                 state.swizzled};
-    auto [memo, inserted] = list_texture_keys.try_emplace(input, 0u);
-    if (inserted) memo->second = texture_key(memory, state);
-    const std::uint64_t key = memo->second;
+    static const bool no_lookup_env = portablekit::env("NO_LOOKUP_CACHE") != nullptr;
+    const bool no_lookup_cache = no_lookup_env || perf::alternate_off(perf::NewPath::Lookup);
+    ListTexture *memo = nullptr;
+    if (!no_lookup_cache && last_texture != nullptr && input == last_texture_input) {
+        memo = last_texture;
+    } else {
+        auto [entry, inserted] = list_texture_keys.try_emplace(input);
+        if (inserted) entry->second.key = texture_key(memory, state);
+        memo = &entry->second;
+        last_texture_input = input;
+        last_texture = memo;
+    }
+    // A cached texture drawn again. A 512-tall one drawn further down than
+    // before is hashed again over the rows now in use, and may find another
+    // image in the texture pack.
+    const auto use = [&](Texture &texture) -> Texture & {
+        texture.last_used = ++texture_clock;
+        if (pack && state.height == 512u && texture.max_seen_v < 512u) {
+            const std::uint16_t seen = update_max_seen_v(texture.max_seen_v, drawn_max_v(call), call.through);
+            if (seen != texture.max_seen_v) {
+                texture.max_seen_v = seen;
+                texture.replacement = pack->find(memory, state, seen);
+            }
+        }
+        return texture;
+    };
+    if (!no_lookup_cache && memo->texture != nullptr && memo->erased == textures_erased) return use(*memo->texture);
+    const std::uint64_t key = memo->key;
     const auto found = textures.find(key);
     if (found != textures.end()) {
-        found->second.last_used = ++texture_clock;
-        return found->second;
+        memo->texture = &found->second;
+        memo->erased = textures_erased;
+        return use(found->second);
     }
-    std::vector<std::uint32_t> pixels;
-    if (!decode_texture(memory, state, pixels) || pixels.empty()) return white_texture;
+    std::vector<std::uint32_t> fresh_pixels;
+    std::vector<std::uint32_t> &pixels = reuse_buffers() ? decoded_pixels : fresh_pixels;
+    if (!decode_texture(memory, state, pixels) || pixels.empty()) {
+        // <prefix>_TRACE_WHITE_TEXTURES: each texture that could not be decoded
+        // and is drawn white instead, once.
+        static const bool trace_white = portablekit::env("TRACE_WHITE_TEXTURES") != nullptr;
+        static std::set<std::uint64_t> reported;
+        if (trace_white && reported.insert(key).second) {
+            std::cerr << "[white-texture] addr=0x" << std::hex << state.address << " buffer_width=" << std::dec
+                      << state.buffer_width << " size=" << state.width << "x" << state.height
+                      << " format=" << static_cast<int>(state.format) << " swizzled=" << state.swizzled << " clut=0x"
+                      << std::hex << state.clut_address << " clut_format=" << state.clut_format << std::dec
+                      << " in_memory=" << memory.contains(state.address, 1u) << "\n";
+        }
+        return white_texture;
+    }
+    const std::uint16_t max_seen_v =
+        state.height == 512u ? update_max_seen_v(0u, drawn_max_v(call), call.through) : 0u;
+    if (dumper) {
+        static const TexturePackOptions kDumpOptions = [] {
+            TexturePackOptions options;
+            options.ignore_address = true;
+            return options;
+        }();
+        dumper->dump(memory, state, max_seen_v, pack ? pack->options() : kDumpOptions, pixels.data());
+    }
 
     if (textures.size() >= kMaxCachedTextures) {
         auto oldest = textures.begin();
@@ -1771,13 +2474,76 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
         }
         const perf::Clock::time_point wait_start = perf::Clock::now();
         vkQueueWaitIdle(queue);
-        perf::add_wait_time(perf::Clock::now() - wait_start);
+        perf::add_wait_time(perf::Clock::now() - wait_start, perf::Stall::Evict);
+        destroyed_texture_clock = std::max(destroyed_texture_clock, oldest->second.last_used);
         destroy_texture(oldest->second);
         textures.erase(oldest);
+        ++textures_erased;
     }
     Texture texture = create_texture(state.width, state.height, pixels.data());
     if (texture.descriptor == VK_NULL_HANDLE) return white_texture;
-    return textures.emplace(key, texture).first->second;
+    texture.max_seen_v = max_seen_v;
+    // The pack's hash reads the whole texture, so it is taken here, once per
+    // upload, and never on the per-draw path above.
+    if (pack) texture.replacement = pack->find(memory, state, max_seen_v);
+    Texture &cached = textures.emplace(key, std::move(texture)).first->second;
+    memo->texture = &cached;
+    memo->erased = textures_erased;
+    return cached;
+}
+
+VkDescriptorSet VulkanRenderer::Impl::texture_descriptor(const GuestMemory &memory, const DrawCall &call) {
+    Texture &texture = texture_for(memory, call);
+    if (texture.replacement && pack) {
+        // Until the image is decoded and on the GPU, the original is drawn.
+        if (const VkDescriptorSet replaced = replacements.descriptor(*texture.replacement, *pack, frames)) {
+            ++replaced_draws;
+            return replaced;
+        }
+    }
+    return texture.descriptor;
+}
+
+void VulkanRenderer::Impl::apply_texture_pack() {
+    const bool wanted = pack_wanted && !pack_held;
+    if (pack_applied == wanted && !pack_reload) return;
+    pack_applied = wanted;
+    pack_reload = false;
+    // Every cached texture is dropped, so the next draws decode the originals
+    // again and, with the pack on, look them up in it. Off draws exactly what
+    // no pack draws.
+    vkDeviceWaitIdle(device);
+    replacements.clear();
+    for (auto &[key, texture] : textures) destroy_texture(texture);
+    textures.clear();
+    destroyed_texture_clock = texture_clock;
+    ++textures_erased;
+    list_texture_keys.clear();
+    last_texture = nullptr;
+    pack.reset();
+    pack_status.clear();
+    if (!wanted) {
+        pack_status = pack_held ? "Updating" : "Off";
+        return;
+    }
+    // <prefix>_TEXTURE_PACK may name the folder, or the player may use a pack
+    // where it is; otherwise the pack lives in textures/<disc id>/ in the
+    // per-user data directory (texture_pack_import.hpp).
+    pack_location = texture_pack_location(VulkanRenderer::textures_root(), portablekit::game().disc_id,
+                                          settings::current().texture_pack_folder);
+    const std::filesystem::path &folder = pack_location.folder;
+    std::string error;
+    pack = TexturePack::open(folder, portablekit::game().disc_id, error);
+    if (!pack) {
+        std::error_code ec;
+        if (std::filesystem::is_directory(folder, ec)) pack_status = "Not loaded: " + error;
+        else if (pack_location.source == TexturePackLocation::Source::Installed) pack_status = "Not installed";
+        else pack_status = "Folder missing: " + install::path_to_utf8(folder);
+        std::cout << "[texpack] " << error << "\n";
+        return;
+    }
+    pack_status = std::to_string(pack->entry_count()) + " textures";
+    std::cout << "[texpack] " << pack->entry_count() << " textures from " << folder.string() << "\n";
 }
 
 namespace {
@@ -1877,6 +2643,33 @@ bool VulkanRenderer::Impl::create_writeback(std::string &error) {
     allocate.allocationSize = requirements.size;
     allocate.memoryTypeIndex = find_memory_type(
         requirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    writeback_cached = false;
+    writeback_coherent = true;
+    static const bool no_cached = portablekit::env("NO_CACHED_READBACK") != nullptr;
+    if (!no_cached) {
+        // Cached and coherent first, then cached alone.
+        VkPhysicalDeviceMemoryProperties memory_properties{};
+        vkGetPhysicalDeviceMemoryProperties(physical_device, &memory_properties);
+        const VkMemoryPropertyFlags cached = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+        std::int32_t chosen = -1;
+        for (const VkMemoryPropertyFlags wanted : {cached | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, cached}) {
+            for (std::uint32_t i = 0; i < memory_properties.memoryTypeCount && chosen < 0; ++i) {
+                if ((requirements.memoryTypeBits & (1u << i)) != 0u &&
+                    (memory_properties.memoryTypes[i].propertyFlags & wanted) == wanted)
+                    chosen = static_cast<std::int32_t>(i);
+            }
+            if (chosen >= 0) break;
+        }
+        if (chosen >= 0) {
+            allocate.memoryTypeIndex = static_cast<std::uint32_t>(chosen);
+            writeback_cached = true;
+            writeback_coherent =
+                (memory_properties.memoryTypes[chosen].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0u;
+        }
+    }
+    std::cout << "[render] frame write-back in memory type " << allocate.memoryTypeIndex
+              << (writeback_cached ? " (host cached" : " (host uncached")
+              << (writeback_coherent ? ", coherent)" : ", not coherent)") << "\n";
     if (!check(vkAllocateMemory(device, &allocate, nullptr, &writeback_buffer_memory), "vkAllocateMemory", error))
         return false;
     vkBindBufferMemory(device, writeback_buffer, writeback_buffer_memory, 0u);
@@ -1935,6 +2728,19 @@ void VulkanRenderer::Impl::record_writeback(std::uint32_t address) {
     copy.imageExtent = {kPspWidth, kPspHeight, 1u};
     vkCmdCopyImageToBuffer(command_buffer, writeback_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, writeback_buffer,
                            1u, &copy);
+    if (writeback_cached) {
+        // Make the copy visible to the host reads after the fence.
+        VkBufferMemoryBarrier to_host{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+        to_host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        to_host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        to_host.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_host.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_host.buffer = writeback_buffer;
+        to_host.offset = 0u;
+        to_host.size = VK_WHOLE_SIZE;
+        vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0u, 0u,
+                             nullptr, 1u, &to_host, 0u, nullptr);
+    }
     transition(command_buffer, target.color, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     writeback_recorded = {address, target.stride, target.format};
@@ -2059,8 +2865,15 @@ VkDescriptorSet VulkanRenderer::Impl::framebuffer_descriptor(Target &target, boo
 }
 
 VkPipeline VulkanRenderer::Impl::pipeline_for(const PipelineKey &key) {
+    static const bool no_lookup_env = portablekit::env("NO_LOOKUP_CACHE") != nullptr;
+    const bool no_lookup_cache = no_lookup_env || perf::alternate_off(perf::NewPath::Lookup);
+    if (!no_lookup_cache && last_pipeline != VK_NULL_HANDLE && key == last_pipeline_key) return last_pipeline;
     const auto found = pipelines.find(key);
-    if (found != pipelines.end()) return found->second;
+    if (found != pipelines.end()) {
+        last_pipeline_key = key;
+        last_pipeline = found->second;
+        return found->second;
+    }
 
     std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
     stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
@@ -2141,6 +2954,8 @@ VkPipeline VulkanRenderer::Impl::pipeline_for(const PipelineKey &key) {
     if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1u, &info, nullptr, &pipeline) != VK_SUCCESS)
         return VK_NULL_HANDLE;
     pipelines.emplace(key, pipeline);
+    last_pipeline_key = key;
+    last_pipeline = pipeline;
     return pipeline;
 }
 
@@ -2161,46 +2976,73 @@ bool VulkanRenderer::pump_events() {
         // reserved for the in-game menu.
         if (event.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED) impl_->update_display_info();
         if (event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) impl_->swapchain_dirty = true;
+        // The mouse, while captured for the game. Releases always count.
+        if (event.type == SDL_EVENT_MOUSE_MOTION && impl_->mouse_captured &&
+            (!impl_->scripted_input || event.motion.which == kScriptedMouse)) {
+            impl_->mouse_motion.x += event.motion.xrel;
+            impl_->mouse_motion.y += event.motion.yrel;
+        }
+        if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && impl_->mouse_captured && event.button.button < 32u &&
+            (!impl_->scripted_input || event.button.which == kScriptedMouse))
+            impl_->mouse_buttons |= 1u << event.button.button;
+        if (event.type == SDL_EVENT_MOUSE_BUTTON_UP && event.button.button < 32u)
+            impl_->mouse_buttons &= ~(1u << event.button.button);
         if (impl_->event_hook && impl_->event_hook(event)) continue;
         if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_F3 && !event.key.repeat && impl_->overlay_ready)
             impl_->overlay_visible = !impl_->overlay_visible;
     }
-    // While a menu or the on-screen keyboard is open, nothing reaches the game.
-    if (!impl_->game_input) {
-        impl_->pad = PadState{};
-        return !impl_->quit;
-    }
-
-    // Keyboard to PSP pad. Bits follow SceCtrlButtons.
     // Only sample while the window has focus: a key still down when focus is
     // lost stays down in SDL's snapshot, which the guest sees as a held
     // direction it can never release.
     const bool focused = (SDL_GetWindowFlags(impl_->window) & SDL_WINDOW_INPUT_FOCUS) != 0u;
+    impl_->update_pointer(focused);
+    impl_->sample_pad(focused);
+    return !impl_->quit;
+}
+
+void VulkanRenderer::sample_pad() {
+    if (!impl_ || impl_->window == nullptr) return;
+    // New input from the devices, without handling window events: those,
+    // and the interface's, wait for the next pump_events(). The keyboard's
+    // and the gamepads' state follow what was pumped.
+    SDL_PumpEvents();
+    impl_->sample_pad((SDL_GetWindowFlags(impl_->window) & SDL_WINDOW_INPUT_FOCUS) != 0u);
+}
+
+void VulkanRenderer::Impl::sample_pad(bool focused) {
+    Impl *const impl_ = this;
+    // While a menu or the on-screen keyboard is open, nothing reaches the game.
+    if (!impl_->game_input) {
+        impl_->pad = PadState{};
+        return;
+    }
+
+    // Keyboard and mouse buttons to the PSP pad, through the player's
+    // bindings. Bits follow SceCtrlButtons; the stick is centred at 0x80.
+    const settings::Settings &player = settings::current();
     const bool *keys = SDL_GetKeyboardState(nullptr);
+    const input::PadInput typed = input::read(player.bindings, [&](input::Binding binding) {
+        if (const int button = input::mouse_button_of(binding))
+            return impl_->mouse_captured && (impl_->mouse_buttons & (1u << button)) != 0u;
+        const int position = input::key_position(binding);
+        return position >= 0 && ((focused && position < SDL_SCANCODE_COUNT && keys[position]) ||
+                                 impl_->scripted_keys[static_cast<std::size_t>(position)]);
+    });
     PadState pad{};
-    const auto held = [&](SDL_Scancode code, std::uint32_t bit) {
-        if (focused && keys[code]) pad.buttons |= bit;
-    };
-    held(SDL_SCANCODE_UP, 0x0010u);
-    held(SDL_SCANCODE_RIGHT, 0x0020u);
-    held(SDL_SCANCODE_DOWN, 0x0040u);
-    held(SDL_SCANCODE_LEFT, 0x0080u);
-    held(SDL_SCANCODE_Q, 0x0100u);      // L
-    held(SDL_SCANCODE_W, 0x0200u);      // R
-    held(SDL_SCANCODE_S, 0x1000u);      // triangle
-    held(SDL_SCANCODE_X, 0x2000u);      // circle (confirm in Japanese titles)
-    held(SDL_SCANCODE_Z, 0x4000u);      // cross
-    held(SDL_SCANCODE_A, 0x8000u);      // square
-    held(SDL_SCANCODE_RETURN, 0x0008u); // start
-    held(SDL_SCANCODE_RSHIFT, 0x0001u); // select
-    held(SDL_SCANCODE_BACKSPACE, 0x0001u);
-    // Analog stick on IJKL, centred at 0x80.
-    int analog_x = 0;
-    int analog_y = 0;
-    if (focused && keys[SDL_SCANCODE_J]) analog_x -= 127;
-    if (focused && keys[SDL_SCANCODE_L]) analog_x += 127;
-    if (focused && keys[SDL_SCANCODE_I]) analog_y -= 127;
-    if (focused && keys[SDL_SCANCODE_K]) analog_y += 127;
+    pad.buttons = typed.buttons;
+    int analog_x = typed.stick_x;
+    int analog_y = typed.stick_y;
+    // Camera keys push the second stick fully, as a right stick would: in
+    // the D-pad mode they press the D-pad instead, and with it off, nothing.
+    if (player.right_stick == settings::RightStick::Camera) {
+        pad.right_x = static_cast<std::uint8_t>(0x80 + typed.camera_x);
+        pad.right_y = static_cast<std::uint8_t>(0x80 + typed.camera_y);
+    } else if (player.right_stick == settings::RightStick::DPad) {
+        if (typed.camera_x < 0) pad.buttons |= 0x0080u;
+        if (typed.camera_x > 0) pad.buttons |= 0x0020u;
+        if (typed.camera_y < 0) pad.buttons |= 0x0010u;
+        if (typed.camera_y > 0) pad.buttons |= 0x0040u;
+    }
 
     // The gamepad adds to the same bits and offsets, so both sources are live.
     if (impl_->gamepad != nullptr) read_gamepad(impl_->gamepad, pad, analog_x, analog_y);
@@ -2234,10 +3076,28 @@ bool VulkanRenderer::pump_events() {
                   << static_cast<int>(pad.right_x) << "," << static_cast<int>(pad.right_y) << std::endl;
     }
     impl_->pad = pad;
-    return !impl_->quit;
 }
 
 PadState VulkanRenderer::pad() const noexcept { return impl_ ? impl_->pad : PadState{}; }
+
+MouseMotion VulkanRenderer::take_mouse_motion() noexcept {
+    return impl_ ? std::exchange(impl_->mouse_motion, MouseMotion{}) : MouseMotion{};
+}
+
+bool VulkanRenderer::mouse_captured() const noexcept { return impl_ && impl_->mouse_captured; }
+
+void VulkanRenderer::set_pointer_free(bool free) {
+    if (impl_) impl_->pointer_free = free;
+}
+
+void VulkanRenderer::set_scripted_key(int position, bool down) {
+    if (impl_ && position > 0 && position < static_cast<int>(input::kKeyPositions))
+        impl_->scripted_keys[static_cast<std::size_t>(position)] = down;
+}
+
+void VulkanRenderer::set_scripted_input(bool scripted) {
+    if (impl_) impl_->scripted_input = scripted;
+}
 
 void VulkanRenderer::set_event_hook(std::function<bool(const SDL_Event &)> hook) {
     if (impl_) impl_->event_hook = std::move(hook);
@@ -2304,27 +3164,89 @@ SDL_Window *VulkanRenderer::window() const noexcept { return impl_ ? impl_->wind
 std::string VulkanRenderer::device_name() const { return impl_ ? impl_->device_name : std::string{}; }
 SDL_Gamepad *VulkanRenderer::gamepad() const noexcept { return impl_ ? impl_->gamepad : nullptr; }
 
-void VulkanRenderer::set_internal_scale(std::uint32_t scale) {
-    Impl &impl = *impl_;
-    scale = std::clamp<std::uint32_t>(scale, 1u, settings::kMaxInternalScale);
-    const VkExtent2D extent{kPspWidth * scale, kPspHeight * scale};
-    if (!impl.ready || impl.recording ||
-        (extent.width == impl.target_extent.width && extent.height == impl.target_extent.height))
+VkExtent2D VulkanRenderer::Impl::wanted_target_extent() const {
+    const bool known = swapchain_extent.width != 0u && swapchain_extent.height != 0u;
+    const double window_width = known ? swapchain_extent.width : static_cast<double>(target_extent.width);
+    const double window_height = known ? swapchain_extent.height : static_cast<double>(target_extent.height);
+    if (aspect != settings::Aspect::Fill) {
+        std::uint32_t scale = requested_scale;
+        if (scale == 0u) {
+            // The smallest multiple that covers the picture on the window.
+            const double x = window_width / kPspWidth;
+            const double y = window_height / kPspHeight;
+            const double cover = aspect == settings::Aspect::Original ? std::min(x, y) : std::max(x, y);
+            scale = static_cast<std::uint32_t>(std::clamp(std::ceil(cover - 0.01), 1.0,
+                                                          static_cast<double>(kMaxAutoLines / kPspHeight)));
+        }
+        return {kPspWidth * scale, kPspHeight * scale};
+    }
+    // Fill: the window's shape, 272 lines per step or the window's own lines.
+    const double shape = std::clamp(window_width / std::max(window_height, 1.0), 0.25, 8.0);
+    double lines = requested_scale != 0u ? static_cast<double>(kPspHeight * requested_scale)
+                                         : std::clamp(window_height, static_cast<double>(kPspHeight),
+                                                      static_cast<double>(kMaxAutoLines));
+    lines = std::min(lines, kMaxTargetWidth / shape);
+    const auto height = static_cast<std::uint32_t>(std::max(1.0, std::round(lines)));
+    const auto width = static_cast<std::uint32_t>(
+        std::clamp(std::round(lines * shape), 1.0, static_cast<double>(kMaxTargetWidth)));
+    return {width, height};
+}
+
+bool VulkanRenderer::Impl::interface_fit(float &fit_x, float &fit_y) const {
+    if (aspect != settings::Aspect::Fill) return false;
+    const float x = static_cast<float>(target_extent.width) / static_cast<float>(kPspWidth);
+    const float y = static_cast<float>(target_extent.height) / static_cast<float>(kPspHeight);
+    const float square = std::min(x, y);
+    fit_x = square / x;
+    fit_y = square / y;
+    return fit_x < 0.999f || fit_y < 0.999f;
+}
+
+void VulkanRenderer::Impl::follow_window() {
+    if (!ready || recording) return;
+    const VkExtent2D wanted = wanted_target_extent();
+    if (wanted.width == target_extent.width && wanted.height == target_extent.height) {
+        pending_frames = 0u;
+        resize_now = false;
+        return;
+    }
+    // The keyboard's held frame has the old size; a new window size waits
+    // for it, a changed setting does not.
+    if (holding && !resize_now) return;
+    if (!resize_now) {
+        if (wanted.width != pending_extent.width || wanted.height != pending_extent.height) {
+            pending_extent = wanted;
+            pending_frames = 0u;
+        }
+        if (++pending_frames < kSettleFrames) return;
+    }
+    pending_frames = 0u;
+    resize_now = false;
+    resize_targets(wanted);
+}
+
+void VulkanRenderer::Impl::resize_targets(VkExtent2D extent) {
+    if (!ready || recording ||
+        (extent.width == target_extent.width && extent.height == target_extent.height))
         return;
     // Every target is rebuilt at the new size with its current picture scaled
     // into it, so the paused frame behind the menu, and render-to-texture
     // targets the game reads back, stay intact.
-    vkDeviceWaitIdle(impl.device);
+    vkDeviceWaitIdle(device);
     // A held frame has the old size; let the game's own frames show again.
-    hold_frame(false);
-    std::map<std::uint32_t, Impl::Target> old_targets = std::move(impl.targets);
-    impl.targets.clear();
-    const VkExtent2D old_extent = impl.target_extent;
-    impl.target_extent = extent;
-    std::vector<std::pair<Impl::Target *, const Impl::Target *>> copies;
+    if (holding) {
+        holding = false;
+        destroy_target(held);
+        held = {};
+    }
+    std::map<std::uint32_t, Target> old_targets = std::move(targets);
+    targets.clear();
+    const VkExtent2D old_extent = target_extent;
+    target_extent = extent;
+    std::vector<std::pair<Target *, const Target *>> copies;
     for (const auto &[address, old_target] : old_targets) {
         std::string error;
-        Impl::Target *target = impl.target_for(address, error);
+        Target *target = target_for(address, error);
         if (target == nullptr) {
             std::cout << "[render] cannot resize a render target: " << error << "\n";
             continue;
@@ -2336,11 +3258,11 @@ void VulkanRenderer::set_internal_scale(std::uint32_t scale) {
         target->guest_words = old_target.guest_words;
         if (old_target.initialized) copies.emplace_back(target, &old_target);
     }
-    impl.run_commands([&](VkCommandBuffer commands) {
+    run_commands([&](VkCommandBuffer commands) {
         for (const auto &[target, old_target] : copies) {
-            impl.transition(commands, old_target->color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-            impl.transition(commands, target->color, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            transition(commands, old_target->color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            transition(commands, target->color, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
             VkImageBlit blit{};
             blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u};
             blit.srcOffsets[1] = {static_cast<std::int32_t>(old_extent.width),
@@ -2349,15 +3271,25 @@ void VulkanRenderer::set_internal_scale(std::uint32_t scale) {
             blit.dstOffsets[1] = {static_cast<std::int32_t>(extent.width), static_cast<std::int32_t>(extent.height), 1};
             vkCmdBlitImage(commands, old_target->color, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target->color,
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &blit, VK_FILTER_LINEAR);
-            impl.transition(commands, target->color, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-            impl.transition(commands, target->depth, VK_IMAGE_LAYOUT_UNDEFINED,
-                            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+            transition(commands, target->color, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+            transition(commands, target->depth, VK_IMAGE_LAYOUT_UNDEFINED,
+                       VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
             target->initialized = true;
         }
     });
-    for (auto &[address, old_target] : old_targets) impl.destroy_target(old_target);
+    for (auto &[address, old_target] : old_targets) destroy_target(old_target);
+    // Recorded frames name the old targets and hold viewports of the old size.
+    reset_interpolation();
+    destroy_interpolation_targets();
     std::cout << "[render] internal resolution " << extent.width << "x" << extent.height << "\n";
+}
+
+void VulkanRenderer::set_internal_scale(std::uint32_t scale) {
+    if (!impl_) return;
+    impl_->requested_scale = std::min(scale, settings::kMaxInternalScale);
+    impl_->resize_now = true;
+    impl_->follow_window();
 }
 
 void VulkanRenderer::set_window_scale(std::uint32_t scale) {
@@ -2389,12 +3321,69 @@ bool VulkanRenderer::supports_present_mode(settings::PresentMode mode) const {
     return wanted == VK_PRESENT_MODE_FIFO_KHR || std::find(modes.begin(), modes.end(), wanted) != modes.end();
 }
 
-void VulkanRenderer::set_keep_aspect(bool keep_aspect) {
-    if (impl_) impl_->keep_aspect = keep_aspect;
+void VulkanRenderer::set_aspect(settings::Aspect aspect) {
+    if (!impl_) return;
+    impl_->aspect = usable_aspect(aspect);
+    impl_->resize_now = true;
+    impl_->follow_window();
+}
+
+bool VulkanRenderer::supports_fill() noexcept { return portablekit::game().view_aspect_frame != nullptr; }
+
+settings::Aspect VulkanRenderer::usable_aspect(settings::Aspect aspect) noexcept {
+    // Fill spreads the game's 480x272 over the window and counts on the game
+    // to draw a view of that shape. A game that cannot would be stretched,
+    // with its interface squared up over it, so it keeps the PSP's shape.
+    return aspect == settings::Aspect::Fill && !supports_fill() ? settings::Aspect::Original : aspect;
+}
+
+float VulkanRenderer::game_aspect() const noexcept {
+    if (!impl_ || impl_->aspect != settings::Aspect::Fill || impl_->target_extent.height == 0u)
+        return static_cast<float>(kPspWidth) / static_cast<float>(kPspHeight);
+    return static_cast<float>(impl_->target_extent.width) / static_cast<float>(impl_->target_extent.height);
+}
+
+std::array<std::uint32_t, 2> VulkanRenderer::target_size() const noexcept {
+    if (!impl_) return {kPspWidth, kPspHeight};
+    return {impl_->target_extent.width, impl_->target_extent.height};
 }
 
 void VulkanRenderer::set_sharp_screen(bool sharp) {
     if (impl_) impl_->sharp_screen = sharp;
+}
+
+void VulkanRenderer::set_texture_pack(bool enabled) {
+    // Applied at the next begin_frame(), where no frame is being recorded.
+    if (impl_) impl_->pack_wanted = enabled;
+}
+
+std::string VulkanRenderer::texture_pack_status() const {
+    if (!impl_) return {};
+    const Impl &impl = *impl_;
+    if (impl.pack_held) return "Updating";
+    if (impl.pack_wanted != impl.pack_applied || impl.pack_reload) return impl.pack_wanted ? "Loading" : "Off";
+    if (!impl.pack) return impl.pack_status;
+    return impl.pack_status + ", " + std::to_string(impl.replacements.resident_count()) + " on the GPU (" +
+           std::to_string(impl.replacements.resident_bytes() >> 20u) + " MB)";
+}
+
+void VulkanRenderer::reload_texture_pack() {
+    if (impl_) impl_->pack_reload = true;
+}
+
+void VulkanRenderer::hold_texture_pack(bool hold) {
+    if (impl_) impl_->pack_held = hold;
+}
+
+bool VulkanRenderer::texture_pack_held() const {
+    return impl_ && impl_->pack_held && !impl_->pack_applied && !impl_->pack;
+}
+
+std::filesystem::path VulkanRenderer::textures_root() { return install::user_data_directory() / "textures"; }
+
+std::string VulkanRenderer::texture_pack_folder() const {
+    const std::string in_place = settings::current().texture_pack_folder;
+    return install::path_to_utf8(texture_pack_location(textures_root(), portablekit::game().disc_id, in_place).folder);
 }
 
 void VulkanRenderer::set_sharp_textures(bool sharp) {
@@ -2415,6 +3404,7 @@ void VulkanRenderer::set_sharp_textures(bool sharp) {
     };
     rewrite(impl.white_texture);
     for (auto &[key, texture] : impl.textures) rewrite(texture);
+    impl.replacements.set_sharp(sharp);
     for (auto &[address, target] : impl.targets) {
         for (std::size_t i = 0; i < target.copy_descriptors.size(); ++i) {
             if (target.copy_descriptors[i] == VK_NULL_HANDLE) continue;
@@ -2529,6 +3519,7 @@ void VulkanRenderer::present_ui(bool show_game) {
             source = shown->second.color;
     }
     impl.submit_and_present(source, false);
+    impl.follow_window();
 }
 
 void VulkanRenderer::begin_frame() {
@@ -2536,20 +3527,46 @@ void VulkanRenderer::begin_frame() {
     if (!impl.ready || impl.recording) return;
     const perf::Clock::time_point wait_start = perf::Clock::now();
     vkWaitForFences(impl.device, 1u, &impl.frame_fence, VK_TRUE, UINT64_MAX);
-    perf::add_wait_time(perf::Clock::now() - wait_start);
+    perf::add_wait_time(perf::Clock::now() - wait_start, perf::Stall::Fence);
     vkResetFences(impl.device, 1u, &impl.frame_fence);
+    impl.collect_gpu_time();
+    impl.apply_texture_pack();
+    impl.replacements.begin_frame(impl.frames);
+    if (texture_pack_trace() && impl.pack && impl.frames % 60u == 0u) {
+        std::cout << "[texpack] frame " << impl.frames << ": " << impl.replaced_draws << " draws replaced in 60 frames, "
+                  << impl.replacements.resident_count() << " images on the GPU ("
+                  << (impl.replacements.resident_bytes() >> 20u) << " MB)\n";
+        impl.replaced_draws = 0u;
+    }
     if (impl.writeback_in_flight) {
+        const perf::Clock::time_point copy_start = perf::Clock::now();
         impl.writeback_pixels.resize(static_cast<std::size_t>(kPspWidth) * kPspHeight);
+        impl.invalidate_writeback();
         std::memcpy(impl.writeback_pixels.data(), impl.writeback_mapped, impl.writeback_pixels.size() * 4u);
         impl.writeback_ready = impl.writeback_recorded;
         impl.writeback_has_pixels = true;
         impl.writeback_in_flight = false;
+        perf::note_stall(perf::Stall::Copy, perf::Clock::now() - copy_start);
     }
     vkResetCommandBuffer(impl.command_buffer, 0u);
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(impl.command_buffer, &begin);
-    impl.vertex_offset = 0u;
+    if (impl.gpu_timer != VK_NULL_HANDLE) {
+        vkCmdResetQueryPool(impl.command_buffer, impl.gpu_timer, 0u, 2u * kGpuTimerSegments);
+        impl.gpu_timer_used = 0u;
+        impl.gpu_timer_open = false;
+        impl.begin_gpu_segment(impl.command_buffer);
+    }
+    // With frame interpolation each frame writes the next region and is
+    // recorded for drawing again; without it, the first region as before.
+    impl.interpolating = impl.interpolation_wanted();
+    impl.enter_region(impl.interpolating ? impl.next_region : 0u);
+    if (impl.interpolating && !impl.recording_frame.recorded) {
+        impl.recording_frame.clear();
+        impl.recording_frame.recorded = true;
+        impl.recording_frame.texture_clock = impl.texture_clock;
+    }
     impl.environment_version = 0u;
     impl.object_valid = false;
     impl.forget_bindings();
@@ -2566,7 +3583,9 @@ void VulkanRenderer::upload_frame(std::uint32_t display_address, const std::uint
     std::string error;
     if (impl.upload_extent.width != width || impl.upload_extent.height != height) {
         // Nothing recorded so far this frame uses the old image yet.
+        const perf::Clock::time_point idle_start = perf::Clock::now();
         vkDeviceWaitIdle(impl.device);
+        perf::note_stall(perf::Stall::Idle, perf::Clock::now() - idle_start);
         if (!impl.create_upload(width, height, error)) {
             std::cerr << "Renderer: cannot upload frames (" << error << ")\n";
             impl.destroy_upload();
@@ -2606,6 +3625,22 @@ void VulkanRenderer::upload_frame(std::uint32_t display_address, const std::uint
     blit.dstSubresource = blit.srcSubresource;
     blit.dstOffsets[1] = {static_cast<std::int32_t>(impl.target_extent.width),
                           static_cast<std::int32_t>(impl.target_extent.height), 1};
+    // A movie has the PSP's shape: under Fill it keeps it, with black beside
+    // (or above and below) it.
+    float fit_x = 1.0f, fit_y = 1.0f;
+    if (impl.interface_fit(fit_x, fit_y)) {
+        const auto inset_x = static_cast<std::int32_t>(std::lround(0.5f * (1.0f - fit_x) * impl.target_extent.width));
+        const auto inset_y = static_cast<std::int32_t>(std::lround(0.5f * (1.0f - fit_y) * impl.target_extent.height));
+        blit.dstOffsets[0] = {inset_x, inset_y, 0};
+        blit.dstOffsets[1] = {static_cast<std::int32_t>(impl.target_extent.width) - inset_x,
+                              static_cast<std::int32_t>(impl.target_extent.height) - inset_y, 1};
+        const VkClearColorValue black{{0.0f, 0.0f, 0.0f, 1.0f}};
+        const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, 1u};
+        vkCmdClearColorImage(impl.command_buffer, target->color, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1u,
+                             &range);
+        impl.transition(impl.command_buffer, target->color, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    }
     vkCmdBlitImage(impl.command_buffer, impl.upload_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target->color,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &blit, VK_FILTER_LINEAR);
     impl.transition(impl.command_buffer, target->color, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -2617,13 +3652,19 @@ void VulkanRenderer::upload_frame(std::uint32_t display_address, const std::uint
 }
 
 void VulkanRenderer::begin_display_list() {
-    if (impl_) impl_->list_texture_keys.clear();
+    if (!impl_) return;
+    impl_->list_texture_keys.clear();
+    impl_->last_texture = nullptr;
 }
 
 void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     Impl &impl = *impl_;
     if (!impl.ready) return;
     if (!impl.recording) begin_frame();
+    // Presents between flips fall due while the game draws, too: a busy
+    // frame spends most of its time in here.
+    if (impl.cycle_active && (++impl.draws_since_poll & 15u) == 0u)
+        impl.poll_presents(std::chrono::steady_clock::now(), false, false);
     if (call.vertices.empty()) return;
 
     // Everything becomes a triangle list; sprites expand to two triangles.
@@ -2644,7 +3685,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     static const bool no_fog = no_lighting || portablekit::env("NO_FOG") != nullptr;
     const bool lit = call.lighting_enabled && !no_lighting && !call.through && !call.clear_mode;
     const bool use_material_color = !no_material_color && !call.has_vertex_color && !call.lighting_enabled;
-    const auto push_vertex = [&](const Vertex &vertex) {
+    const auto to_gpu = [&](const Vertex &vertex) {
         GpuVertex out{};
         out.x = vertex.position[0];
         out.y = vertex.position[1];
@@ -2655,8 +3696,9 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         out.nx = vertex.normal[0];
         out.ny = vertex.normal[1];
         out.nz = vertex.normal[2];
-        impl.scratch.push_back(out);
+        return out;
     };
+    const auto push_vertex = [&](const Vertex &vertex) { impl.scratch.push_back(to_gpu(vertex)); };
     const auto vertex_at = [&](std::size_t index) -> const Vertex & {
         if (!call.indices.empty()) {
             const std::size_t mapped = call.indices[index];
@@ -2666,58 +3708,106 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     };
     const std::size_t count = call.indices.empty() ? call.vertices.size() : call.indices.size();
 
-    switch (call.primitive) {
-    case PrimitiveType::Triangles:
-        for (std::size_t i = 0; i + 2u < count; i += 3u) {
-            push_vertex(vertex_at(i));
-            push_vertex(vertex_at(i + 1u));
-            push_vertex(vertex_at(i + 2u));
+    static const bool trace = portablekit::env("TRACE_GE") != nullptr;
+    static const bool trace3d = portablekit::env("TRACE_3D") != nullptr;
+    // <prefix>_TRACE_SPRITES=N: every through-mode sprite of frame N, with the
+    // texture state it samples, to find the tiles a 2D screen is built from.
+    static const std::uint64_t trace_sprites_frame = [] {
+        const char *text = portablekit::env("TRACE_SPRITES");
+        return text != nullptr ? std::strtoull(text, nullptr, 10) : ~0ull;
+    }();
+
+    // Transformed triangles, strips and fans go straight into the vertex
+    // buffer: each decoded vertex once, converted as it is written, and a
+    // 16-bit index list in the order the expansion below writes vertices in,
+    // so the GPU draws the same triangles from the same vertex data without
+    // the copies and the repeated strip vertices. <prefix>_NO_DIRECT_VERTICES
+    // expands every draw as before; the traces that read expanded vertices
+    // keep the expansion too.
+    static const bool legacy_vertices = portablekit::env("NO_DIRECT_VERTICES") != nullptr;
+    static const bool check_direct = portablekit::env("CHECK_DIRECT_VERTICES") != nullptr;
+    const bool direct = !legacy_vertices && !perf::alternate_off(perf::NewPath::Direct) && !call.through &&
+                        (call.primitive == PrimitiveType::Triangles ||
+                         call.primitive == PrimitiveType::TriangleStrip ||
+                         call.primitive == PrimitiveType::TriangleFan) &&
+                        !trace && !trace3d && impl.frames != trace_sprites_frame;
+
+    const auto expand = [&]() -> bool {
+        switch (call.primitive) {
+        case PrimitiveType::Triangles:
+            for (std::size_t i = 0; i + 2u < count; i += 3u) {
+                push_vertex(vertex_at(i));
+                push_vertex(vertex_at(i + 1u));
+                push_vertex(vertex_at(i + 2u));
+            }
+            break;
+        case PrimitiveType::TriangleStrip:
+            for (std::size_t i = 0; i + 2u < count; ++i) {
+                const bool odd = (i & 1u) != 0u;
+                push_vertex(vertex_at(i));
+                push_vertex(vertex_at(odd ? i + 2u : i + 1u));
+                push_vertex(vertex_at(odd ? i + 1u : i + 2u));
+            }
+            break;
+        case PrimitiveType::TriangleFan:
+            for (std::size_t i = 1u; i + 1u < count; ++i) {
+                push_vertex(vertex_at(0));
+                push_vertex(vertex_at(i));
+                push_vertex(vertex_at(i + 1u));
+            }
+            break;
+        case PrimitiveType::Sprites:
+            // Vertex pairs describe the opposite corners of a rectangle.
+            for (std::size_t i = 0; i + 1u < count; i += 2u) {
+                Vertex a = vertex_at(i);
+                const Vertex &b = vertex_at(i + 1u);
+                // The GE flat-shades sprites from the second vertex: its depth (and
+                // colour) cover the whole rectangle. sceGuClear relies on this, as
+                // its first vertex carries z = 0 and only the second the clear depth.
+                a.position[2] = b.position[2];
+                a.color = b.color;
+                a.normal = b.normal;
+                Vertex top_right = b;
+                top_right.position[1] = a.position[1];
+                top_right.texcoord[1] = a.texcoord[1];
+                Vertex bottom_left = a;
+                bottom_left.position[1] = b.position[1];
+                bottom_left.texcoord[1] = b.texcoord[1];
+                push_vertex(a);
+                push_vertex(top_right);
+                push_vertex(b);
+                push_vertex(a);
+                push_vertex(b);
+                push_vertex(bottom_left);
+            }
+            break;
+        default:
+            return false;  // points and lines are not drawn yet
         }
-        break;
-    case PrimitiveType::TriangleStrip:
-        for (std::size_t i = 0; i + 2u < count; ++i) {
-            const bool odd = (i & 1u) != 0u;
-            push_vertex(vertex_at(i));
-            push_vertex(vertex_at(odd ? i + 2u : i + 1u));
-            push_vertex(vertex_at(odd ? i + 1u : i + 2u));
+        return true;
+    };
+    if (direct) {
+        triangle_indices(call.primitive, count, call.indices, call.vertices.size(), impl.direct_indices);
+        if (impl.direct_indices.empty()) return;
+        if (check_direct) {
+            // Every index must name a vertex equal, byte for byte, to the one
+            // the expansion puts in its place.
+            if (!expand()) return;
+            ++impl.direct_checked;
+            bool same = impl.scratch.size() == impl.direct_indices.size();
+            for (std::size_t i = 0; same && i < impl.scratch.size(); ++i) {
+                const GpuVertex converted = to_gpu(call.vertices[impl.direct_indices[i]]);
+                same = std::memcmp(&converted, &impl.scratch[i], sizeof(GpuVertex)) == 0;
+            }
+            if (!same && ++impl.direct_mismatched <= 20u)
+                std::cout << "[direct-check] draw " << impl.draws << " prim=" << static_cast<int>(call.primitive)
+                          << " count=" << count << " vertices=" << call.vertices.size() << " expanded "
+                          << impl.scratch.size() << " indices " << impl.direct_indices.size() << " differ\n";
         }
-        break;
-    case PrimitiveType::TriangleFan:
-        for (std::size_t i = 1u; i + 1u < count; ++i) {
-            push_vertex(vertex_at(0));
-            push_vertex(vertex_at(i));
-            push_vertex(vertex_at(i + 1u));
-        }
-        break;
-    case PrimitiveType::Sprites:
-        // Vertex pairs describe the opposite corners of a rectangle.
-        for (std::size_t i = 0; i + 1u < count; i += 2u) {
-            Vertex a = vertex_at(i);
-            const Vertex &b = vertex_at(i + 1u);
-            // The GE flat-shades sprites from the second vertex: its depth (and
-            // colour) cover the whole rectangle. sceGuClear relies on this, as
-            // its first vertex carries z = 0 and only the second the clear depth.
-            a.position[2] = b.position[2];
-            a.color = b.color;
-            a.normal = b.normal;
-            Vertex top_right = b;
-            top_right.position[1] = a.position[1];
-            top_right.texcoord[1] = a.texcoord[1];
-            Vertex bottom_left = a;
-            bottom_left.position[1] = b.position[1];
-            bottom_left.texcoord[1] = b.texcoord[1];
-            push_vertex(a);
-            push_vertex(top_right);
-            push_vertex(b);
-            push_vertex(a);
-            push_vertex(b);
-            push_vertex(bottom_left);
-        }
-        break;
-    default:
-        return;  // points and lines are not drawn yet
+    } else {
+        if (!expand()) return;
+        if (impl.scratch.empty()) return;
     }
-    if (impl.scratch.empty()) return;
 
     // Through-mode vertices carry the texel range they may sample in the
     // otherwise unused normal and w; see clamp_through_quad().
@@ -2736,7 +3826,6 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         }
     }
 
-    static const bool trace = portablekit::env("TRACE_GE") != nullptr;
     if (trace && impl.draws < 400u) {
         const GpuVertex &first = impl.scratch.front();
         const GpuVertex &second = impl.scratch[std::min<std::size_t>(1u, impl.scratch.size() - 1u)];
@@ -2752,12 +3841,6 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     }
 
 
-    // <prefix>_TRACE_SPRITES=N: every through-mode sprite of frame N, with the
-    // texture state it samples, to find the tiles a 2D screen is built from.
-    static const std::uint64_t trace_sprites_frame = [] {
-        const char *text = portablekit::env("TRACE_SPRITES");
-        return text != nullptr ? std::strtoull(text, nullptr, 10) : ~0ull;
-    }();
     if (impl.frames == trace_sprites_frame && call.primitive != PrimitiveType::Sprites) {
         float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f, u0 = 1e9f, v0 = 1e9f, u1 = -1e9f, v1 = -1e9f;
         for (std::size_t i = 0; i < count; ++i) {
@@ -2793,7 +3876,9 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     // Deep dump of the first transformed draws: matrices, raw positions and the
     // same positions after a CPU-side transform, so a geometry that never shows
     // up can be traced to the stage that loses it.
-    static const bool trace3d = portablekit::env("TRACE_3D") != nullptr;
+    static const bool trace_camera = portablekit::env("TRACE_CAMERA") != nullptr;
+    // The camera hunt reads the same measurement without printing it.
+    static const bool watch_camera = trace_camera || portablekit::env("FIND_CAMERA") != nullptr;
     static std::uint32_t traced_3d = 0u;
     static std::uint32_t traced_clears = 0u;
     if (trace3d && call.clear_mode && traced_clears < 4u) {
@@ -2856,6 +3941,16 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     } else {
         ++impl.frame_transformed_draws;
         ++impl.frame_transformed_targets[call.target.color_address];
+        if (watch_camera) {
+            const auto same = std::find_if(impl.frame_views.begin(), impl.frame_views.end(),
+                                           [&](const auto &entry) { return entry.first == call.view; });
+            const auto vertices =
+                static_cast<std::uint32_t>(direct ? impl.direct_indices.size() : impl.scratch.size());
+            if (same == impl.frame_views.end())
+                impl.frame_views.emplace_back(call.view, vertices);
+            else
+                same->second += vertices;
+        }
         if (trace3d) {
             // Where does this frame's transformed geometry actually land? A
             // bounding box in normalised device coordinates separates "clipped
@@ -2933,10 +4028,90 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
             impl.object_valid = true;
         }
     }
-    const VkDeviceSize bytes = impl.scratch.size() * sizeof(GpuVertex);
-    if (impl.vertex_offset + bytes > kVertexBufferBytes) return;
-    std::memcpy(static_cast<std::uint8_t *>(impl.vertex_mapped) + impl.vertex_offset, impl.scratch.data(),
-                static_cast<std::size_t>(bytes));
+    // A texture in a framebuffer the renderer drew is read from that render
+    // target: the pixels never reach guest memory, which holds whatever was
+    // there before. <prefix>_NO_FB_TEXTURES decodes guest memory as before.
+    static const bool no_fb_textures = portablekit::env("NO_FB_TEXTURES") != nullptr;
+    const Impl::FramebufferTexture framebuffer_source =
+        call.texture.enabled && !call.clear_mode && !no_fb_textures
+            ? impl.find_framebuffer_texture(memory, call.texture)
+            : Impl::FramebufferTexture{};
+
+    // Under Fill the game's 480x272 screen is spread over a target of the
+    // window's shape, which suits the 3D view the game now draws at that
+    // shape, but would stretch the 2D interface. Its draws into the shown
+    // framebuffer are pulled in about the screen's centre to square pixels
+    // again. Draws that cover the screen's width (fades, backdrops) and
+    // draws that sample a rendered picture (blur, the quest-reward
+    // background) belong with the 3D view and stay spread.
+    float fit_x = 1.0f, fit_y = 1.0f;
+    bool fitted = false;
+    if (call.through && !call.clear_mode && framebuffer_source.target == nullptr &&
+        impl.shows(call.target.color_address) && impl.interface_fit(fit_x, fit_y)) {
+        float left = impl.scratch.front().x, right = left;
+        for (const GpuVertex &vertex : impl.scratch) {
+            left = std::min(left, vertex.x);
+            right = std::max(right, vertex.x);
+        }
+        if (right - left < kScreenWideDraw) {
+            fitted = true;
+            const float centre_x = 0.5f * static_cast<float>(kPspWidth);
+            const float centre_y = 0.5f * static_cast<float>(kPspHeight);
+            for (GpuVertex &vertex : impl.scratch) {
+                vertex.x = centre_x + (vertex.x - centre_x) * fit_x;
+                vertex.y = centre_y + (vertex.y - centre_y) * fit_y;
+            }
+        }
+    }
+
+    static const bool no_merge_env = portablekit::env("NO_DRAW_MERGE") != nullptr;
+    const bool merge = !no_merge_env && !perf::alternate_off(perf::NewPath::Merge);
+    // A skinned draw recorded for drawing again keeps a copy of its vertices,
+    // to blend them with the next frame's; ge_state.cpp skins exactly the
+    // transformed vertices whose type has weights.
+    const bool skinned = impl.interpolating && !call.through && ((call.vertex_type >> 9u) & 3u) != 0u;
+    const std::uint32_t skinned_first =
+        skinned ? static_cast<std::uint32_t>(impl.recording_frame.skinned.size()) : Impl::kNone;
+    VkDeviceSize vertex_start = impl.vertex_offset;
+    VkDeviceSize index_start = 0u;
+    VkDeviceSize draw_end = 0u;
+    std::uint32_t draw_count = 0u;
+    if (direct) {
+        // Floats want 4-byte alignment and index buffer offsets a multiple of
+        // the index size; a vertex run starts on 16 bytes. Merged draws keep
+        // their indices in the index buffer, written once the draw's group is
+        // known.
+        vertex_start = (impl.vertex_offset + 15u) & ~VkDeviceSize{15u};
+        const VkDeviceSize vertex_end = vertex_start + call.vertices.size() * sizeof(GpuVertex);
+        index_start = (vertex_end + 3u) & ~VkDeviceSize{3u};
+        draw_end = merge ? vertex_end : index_start + impl.direct_indices.size() * sizeof(std::uint16_t);
+        if (draw_end > impl.vertex_limit) return;
+        if (merge && impl.index_offset + 4u + impl.direct_indices.size() * sizeof(std::uint16_t) > impl.index_limit)
+            return;
+        auto *out = static_cast<std::uint8_t *>(impl.vertex_mapped) + vertex_start;
+        for (const Vertex &vertex : call.vertices) {
+            const GpuVertex converted = to_gpu(vertex);
+            std::memcpy(out, &converted, sizeof(GpuVertex));
+            out += sizeof(GpuVertex);
+            if (skinned) impl.recording_frame.skinned.push_back(converted);
+        }
+        if (!merge)
+            std::memcpy(static_cast<std::uint8_t *>(impl.vertex_mapped) + index_start, impl.direct_indices.data(),
+                        impl.direct_indices.size() * sizeof(std::uint16_t));
+        draw_count = static_cast<std::uint32_t>(impl.direct_indices.size());
+    } else {
+        const VkDeviceSize bytes = impl.scratch.size() * sizeof(GpuVertex);
+        if (impl.vertex_offset + bytes > impl.vertex_limit) return;
+        std::memcpy(static_cast<std::uint8_t *>(impl.vertex_mapped) + impl.vertex_offset, impl.scratch.data(),
+                    static_cast<std::size_t>(bytes));
+        draw_end = impl.vertex_offset + bytes;
+        draw_count = static_cast<std::uint32_t>(impl.scratch.size());
+        if (skinned)
+            impl.recording_frame.skinned.insert(impl.recording_frame.skinned.end(), impl.scratch.begin(),
+                                                impl.scratch.end());
+    }
+    const auto drawn_vertices =
+        static_cast<std::uint32_t>(direct ? call.vertices.size() : impl.scratch.size());
 
     PipelineKey key{};
     if (call.clear_mode) {
@@ -3001,14 +4176,9 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     static const bool trace_fb = portablekit::env("TRACE_FB_TEXTURES") != nullptr;
     if (trace_fb && call.texture.enabled && !call.clear_mode) impl.trace_framebuffer_texture(call);
 
-    // A texture in a framebuffer the renderer drew is read from that render
-    // target: the pixels never reach guest memory, which holds whatever was
-    // there before. <prefix>_NO_FB_TEXTURES decodes guest memory as before.
-    static const bool no_fb_textures = portablekit::env("NO_FB_TEXTURES") != nullptr;
     VkDescriptorSet texture_descriptor = impl.white_texture.descriptor;
     if (call.texture.enabled && !call.clear_mode) {
-        const Impl::FramebufferTexture source =
-            no_fb_textures ? Impl::FramebufferTexture{} : impl.find_framebuffer_texture(memory, call.texture);
+        const Impl::FramebufferTexture &source = framebuffer_source;
         const VkDescriptorSet copy =
             source.target != nullptr
                 ? impl.framebuffer_descriptor(*source.target, call.texture.format == TextureFormat::Rgba5650)
@@ -3026,7 +4196,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
                                  (uv[2] * width + static_cast<float>(source.x)) / static_cast<float>(kPspWidth),
                                  (uv[3] * height + static_cast<float>(source.y)) / static_cast<float>(kPspHeight)};
         } else {
-            texture_descriptor = impl.texture_for(memory, call.texture).descriptor;
+            texture_descriptor = impl.texture_descriptor(memory, call);
         }
     }
 
@@ -3053,18 +4223,22 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     // the Vulkan viewport reproduces the PSP's screen space exactly, including a
     // reversed depth range, and keeps triangle winding as the GE sees it. Through
     // draws bypass the transform, so they keep the plain full-target viewport.
-    const float render_scale = static_cast<float>(impl.target_extent.width) / static_cast<float>(kPspWidth);
+    // A target holds the game's 480x272 screen whatever its size, so a PSP
+    // pixel is scale_x by scale_y of its pixels: equal at a multiple of
+    // 480x272, different under Fill.
+    const float scale_x = static_cast<float>(impl.target_extent.width) / static_cast<float>(kPspWidth);
+    const float scale_y = static_cast<float>(impl.target_extent.height) / static_cast<float>(kPspHeight);
     VkViewport vk_viewport{0.0f, 0.0f, static_cast<float>(impl.target_extent.width),
                            static_cast<float>(impl.target_extent.height), 0.0f, 1.0f};
     if (!call.through && call.viewport.x_scale != 0.0f && call.viewport.y_scale != 0.0f) {
         const ViewportState &vp = call.viewport;
-        vk_viewport.x = (vp.x_offset - vp.offset_x - vp.x_scale) * render_scale;
-        vk_viewport.y = (vp.y_offset - vp.offset_y - vp.y_scale) * render_scale;
-        vk_viewport.width = 2.0f * vp.x_scale * render_scale;
+        vk_viewport.x = (vp.x_offset - vp.offset_x - vp.x_scale) * scale_x;
+        vk_viewport.y = (vp.y_offset - vp.offset_y - vp.y_scale) * scale_y;
+        vk_viewport.width = 2.0f * vp.x_scale * scale_x;
         // The GE's y scale is negative (device y points up, the screen down), so
         // this is a flipping viewport. That keeps framebuffer space identical to
         // the PSP's screen space, which is what the cull winding is defined in.
-        vk_viewport.height = 2.0f * vp.y_scale * render_scale;
+        vk_viewport.height = 2.0f * vp.y_scale * scale_y;
         if (vp.z_scale != 0.0f) {
             // The shader hands over device z in [0, 1]; this undoes that halving
             // and applies the GE's z scale/offset, reproducing a reversed range
@@ -3073,7 +4247,6 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
             vk_viewport.maxDepth = std::clamp((vp.z_offset + vp.z_scale) / 65535.0f, 0.0f, 1.0f);
         }
     }
-    vkCmdSetViewport(impl.command_buffer, 0u, 1u, &vk_viewport);
 
     // Whichever side asked for the constant decides its colour; the source wins
     // when both do, because the destination is then its complement.
@@ -3082,18 +4255,92 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     const std::array<float, 4> blend_constants{static_cast<float>(constant_color & 0xFFu) / 255.0f,
                                                static_cast<float>((constant_color >> 8u) & 0xFFu) / 255.0f,
                                                static_cast<float>((constant_color >> 16u) & 0xFFu) / 255.0f, 1.0f};
-    vkCmdSetBlendConstants(impl.command_buffer, blend_constants.data());
 
     const auto clamp_axis = [](std::uint32_t value, std::uint32_t limit) { return std::min(value, limit); };
     const std::uint32_t sx1 = clamp_axis(call.viewport.scissor_x1, kPspWidth - 1u);
     const std::uint32_t sy1 = clamp_axis(call.viewport.scissor_y1, kPspHeight - 1u);
     const std::uint32_t sx2 = clamp_axis(std::max(call.viewport.scissor_x2, sx1), kPspWidth - 1u);
     const std::uint32_t sy2 = clamp_axis(std::max(call.viewport.scissor_y2, sy1), kPspHeight - 1u);
+    // The scissor's edges, in PSP pixels; a fitted draw's scissor is fitted
+    // with it, so a list the interface clips still clips at its own edges.
+    float edges[4]{static_cast<float>(sx1), static_cast<float>(sy1), static_cast<float>(sx2 + 1u),
+                   static_cast<float>(sy2 + 1u)};
+    if (fitted) {
+        const float centre_x = 0.5f * static_cast<float>(kPspWidth);
+        const float centre_y = 0.5f * static_cast<float>(kPspHeight);
+        edges[0] = centre_x + (edges[0] - centre_x) * fit_x;
+        edges[2] = centre_x + (edges[2] - centre_x) * fit_x;
+        edges[1] = centre_y + (edges[1] - centre_y) * fit_y;
+        edges[3] = centre_y + (edges[3] - centre_y) * fit_y;
+    }
+    const auto to_pixels = [](float edge, float scale, std::uint32_t size) {
+        return static_cast<std::int32_t>(
+            std::clamp(std::lround(edge * scale), 0l, static_cast<long>(size)));
+    };
+    const std::int32_t left = to_pixels(edges[0], scale_x, impl.target_extent.width);
+    const std::int32_t top = to_pixels(edges[1], scale_y, impl.target_extent.height);
+    const std::int32_t right = std::max(left, to_pixels(edges[2], scale_x, impl.target_extent.width));
+    const std::int32_t bottom = std::max(top, to_pixels(edges[3], scale_y, impl.target_extent.height));
     VkRect2D vk_scissor{};
-    vk_scissor.offset = {static_cast<std::int32_t>(sx1 * static_cast<std::uint32_t>(render_scale)),
-                         static_cast<std::int32_t>(sy1 * static_cast<std::uint32_t>(render_scale))};
-    vk_scissor.extent = {(sx2 - sx1 + 1u) * static_cast<std::uint32_t>(render_scale),
-                         (sy2 - sy1 + 1u) * static_cast<std::uint32_t>(render_scale)};
+    vk_scissor.offset = {left, top};
+    vk_scissor.extent = {static_cast<std::uint32_t>(right - left), static_cast<std::uint32_t>(bottom - top)};
+    const std::array<std::uint32_t, 2> lighting_offsets{impl.environment_offset, impl.object_offset};
+    if (merge) {
+        const Impl::DrawState state{pipeline, texture_descriptor, lighting_offsets, vk_viewport, vk_scissor,
+                                    blend_constants, push};
+        if (!direct) {
+            impl.flush_group();
+            impl.record_state(state);
+            vkCmdBindVertexBuffers(impl.command_buffer, 0u, 1u, &impl.vertex_buffer, &vertex_start);
+            vkCmdDraw(impl.command_buffer, draw_count, 1u, 0u, 0u);
+            perf::count_recorded_draws(1u);
+            impl.record_draw_for_replay(call, lit, skinned_first, state, vertex_start, VK_NULL_HANDLE, 0u,
+                                        draw_count, drawn_vertices, false);
+        } else {
+            Impl::DrawGroup &group = impl.group;
+            const auto vertex_count = static_cast<std::uint32_t>(call.vertices.size());
+            std::uint32_t rebase = 0u;
+            bool join = group.open && vertex_start == group.vertex_end && impl.state_known &&
+                        Impl::same_state(state, impl.recorded);
+            // Recorded for drawing again, skinned draws join only skinned
+            // ones: their vertices are kept on the CPU too, one after another
+            // like the group's, so blended ones can replace the group's.
+            if (join && impl.interpolating && skinned != impl.group_skinned) join = false;
+            if (join) {
+                rebase = static_cast<std::uint32_t>((vertex_start - group.vertex_base) / sizeof(GpuVertex));
+                join = rebase + vertex_count <= 65536u;
+            }
+            if (!join) {
+                impl.flush_group();
+                impl.record_state(state);
+                // Metal wants index buffer offsets on 4 bytes.
+                impl.index_offset = (impl.index_offset + 3u) & ~VkDeviceSize{3u};
+                group = Impl::DrawGroup{true, vertex_start, vertex_start, impl.index_offset, 0u, 0u};
+                rebase = 0u;
+                impl.group_skinned = skinned;
+            }
+            impl.record_draw_for_replay(call, lit, skinned_first, state, vertex_start, impl.index_buffer,
+                                        group.index_base, draw_count, vertex_count, join);
+            auto *indices = reinterpret_cast<std::uint8_t *>(impl.index_mapped) + impl.index_offset;
+            if (rebase == 0u) {
+                std::memcpy(indices, impl.direct_indices.data(), impl.direct_indices.size() * sizeof(std::uint16_t));
+            } else {
+                for (std::uint16_t &index : impl.direct_indices) index = static_cast<std::uint16_t>(index + rebase);
+                std::memcpy(indices, impl.direct_indices.data(), impl.direct_indices.size() * sizeof(std::uint16_t));
+            }
+            impl.index_offset += impl.direct_indices.size() * sizeof(std::uint16_t);
+            group.vertex_end = draw_end;
+            group.index_count += draw_count;
+            ++group.draws;
+        }
+        impl.vertex_offset = draw_end;
+        ++impl.draws;
+        perf::count_draw();
+        return;
+    }
+
+    vkCmdSetViewport(impl.command_buffer, 0u, 1u, &vk_viewport);
+    vkCmdSetBlendConstants(impl.command_buffer, blend_constants.data());
     vkCmdSetScissor(impl.command_buffer, 0u, 1u, &vk_scissor);
 
     if (pipeline != impl.bound_pipeline) {
@@ -3104,7 +4351,6 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
                             &texture_descriptor, 0u, nullptr);
     // Every pipeline shares one layout, so set 1 stays bound across pipeline
     // and texture changes; it is bound again only when a block moved.
-    const std::array<std::uint32_t, 2> lighting_offsets{impl.environment_offset, impl.object_offset};
     if (!impl.lighting_bound || lighting_offsets != impl.bound_lighting_offsets) {
         vkCmdBindDescriptorSets(impl.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, impl.pipeline_layout, 1u, 1u,
                                 &impl.lighting_descriptor, static_cast<std::uint32_t>(lighting_offsets.size()),
@@ -3114,18 +4360,33 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     }
     vkCmdPushConstants(impl.command_buffer, impl.pipeline_layout,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0u, sizeof(push), &push);
-    const VkDeviceSize offset = impl.vertex_offset;
-    vkCmdBindVertexBuffers(impl.command_buffer, 0u, 1u, &impl.vertex_buffer, &offset);
-    vkCmdDraw(impl.command_buffer, static_cast<std::uint32_t>(impl.scratch.size()), 1u, 0u, 0u);
-    impl.vertex_offset += bytes;
+    vkCmdBindVertexBuffers(impl.command_buffer, 0u, 1u, &impl.vertex_buffer, &vertex_start);
+    if (direct) {
+        vkCmdBindIndexBuffer(impl.command_buffer, impl.vertex_buffer, index_start, VK_INDEX_TYPE_UINT16);
+        vkCmdDrawIndexed(impl.command_buffer, draw_count, 1u, 0u, 0, 0u);
+    } else {
+        vkCmdDraw(impl.command_buffer, draw_count, 1u, 0u, 0u);
+    }
+    if (impl.interpolating) {
+        const Impl::DrawState state{pipeline, texture_descriptor, lighting_offsets, vk_viewport, vk_scissor,
+                                    blend_constants, push};
+        impl.record_draw_for_replay(call, lit, skinned_first, state, vertex_start,
+                                    direct ? impl.vertex_buffer : VK_NULL_HANDLE, index_start, draw_count,
+                                    drawn_vertices, false);
+    }
+    impl.vertex_offset = draw_end;
     ++impl.draws;
+    perf::count_draw();
+    perf::count_recorded_draws(1u);
 }
 
 void VulkanRenderer::write_back_frame(GuestMemory &memory) {
     Impl &impl = *impl_;
     if (!impl.ready || !impl.writeback_has_pixels) return;
     impl.writeback_has_pixels = false;
+    const perf::Clock::time_point store_start = perf::Clock::now();
     impl.store_frame(memory, impl.writeback_ready, impl.writeback_pixels.data());
+    perf::note_stall(perf::Stall::Store, perf::Clock::now() - store_start);
 }
 
 void VulkanRenderer::read_back_framebuffer(std::uint32_t source, GuestMemory &memory) {
@@ -3151,6 +4412,7 @@ void VulkanRenderer::read_back_framebuffer(std::uint32_t source, GuestMemory &me
     impl.record_writeback(found);
     if (!impl.writeback_in_flight) return;
     // Run everything recorded so far and carry on recording afterwards.
+    impl.end_gpu_segment(impl.command_buffer);
     vkEndCommandBuffer(impl.command_buffer);
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1u;
@@ -3158,20 +4420,34 @@ void VulkanRenderer::read_back_framebuffer(std::uint32_t source, GuestMemory &me
     const perf::Clock::time_point wait_start = perf::Clock::now();
     vkQueueSubmit(impl.queue, 1u, &submit, impl.frame_fence);
     vkWaitForFences(impl.device, 1u, &impl.frame_fence, VK_TRUE, UINT64_MAX);
-    perf::add_wait_time(perf::Clock::now() - wait_start);
+    perf::add_wait_time(perf::Clock::now() - wait_start, perf::Stall::Readback);
     vkResetFences(impl.device, 1u, &impl.frame_fence);
     vkResetCommandBuffer(impl.command_buffer, 0u);
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(impl.command_buffer, &begin);
-    impl.vertex_offset = 0u;
+    // The queries written so far stay valid: they were reset at the start of
+    // the frame, and the next pair follows them.
+    impl.begin_gpu_segment(impl.command_buffer);
+    // A frame recorded for drawing again keeps what it wrote so far.
+    if (!impl.interpolating) {
+        impl.vertex_offset = 0u;
+        impl.index_offset = 0u;
+    }
     impl.environment_version = 0u;
     impl.object_valid = false;
     impl.forget_bindings();
     impl.writeback_in_flight = false;
-    std::vector<std::uint32_t> pixels(static_cast<std::size_t>(kPspWidth) * kPspHeight);
+    const perf::Clock::time_point copy_start = perf::Clock::now();
+    std::vector<std::uint32_t> fresh_pixels;
+    std::vector<std::uint32_t> &pixels = Impl::reuse_buffers() ? impl.readback_pixels : fresh_pixels;
+    pixels.resize(static_cast<std::size_t>(kPspWidth) * kPspHeight);
+    impl.invalidate_writeback();
     std::memcpy(pixels.data(), impl.writeback_mapped, pixels.size() * 4u);
+    const perf::Clock::time_point store_start = perf::Clock::now();
+    perf::note_stall(perf::Stall::Copy, store_start - copy_start);
     impl.store_frame(memory, impl.writeback_recorded, pixels.data());
+    perf::note_stall(perf::Stall::Store, perf::Clock::now() - store_start);
     // A write-back still waiting from an earlier frame is older than this one.
     if (impl.writeback_ready.address == found) impl.writeback_has_pixels = false;
     static const bool trace = portablekit::env("TRACE_FB_TEXTURES") != nullptr;
@@ -3218,13 +4494,727 @@ void VulkanRenderer::Impl::store_frame(GuestMemory &memory, const WritebackFrame
     if (target != impl.targets.end()) impl.snapshot_guest_words(memory, frame.address, target->second);
 }
 
-void VulkanRenderer::present(std::uint32_t display_address) {
+// Frame interpolation ------------------------------------------------------
+
+namespace {
+
+std::int64_t to_us(std::chrono::steady_clock::time_point time) {
+    return std::chrono::duration_cast<std::chrono::microseconds>(time.time_since_epoch()).count();
+}
+
+} // namespace
+
+double VulkanRenderer::Impl::wanted_rate() const {
+    double rate = 30.0;
+    switch (frame_rate) {
+    case settings::FrameRate::Fps30: rate = 30.0; break;
+    case settings::FrameRate::Fps45: rate = 45.0; break;
+    case settings::FrameRate::Fps60: rate = 60.0; break;
+    case settings::FrameRate::Fps90: rate = 90.0; break;
+    case settings::FrameRate::Fps120: rate = 120.0; break;
+    case settings::FrameRate::Display: rate = display_hz >= 1.0f ? static_cast<double>(display_hz) : 60.0; break;
+    }
+    // With vsync the display takes no more than its own rate: more presents
+    // would wait for it with the game's time.
+    if (present_mode == VK_PRESENT_MODE_FIFO_KHR && display_hz >= 1.0f)
+        rate = std::min(rate, static_cast<double>(display_hz));
+    return std::max(rate, 30.0);
+}
+
+bool VulkanRenderer::Impl::interpolation_wanted() const {
+    // Emulated time running ahead of real time already presents faster than
+    // the game's own rate; the keyboard's held frame is shown as it is.
+    return frame_rate != settings::FrameRate::Fps30 && !settings::current().unthrottled && !holding &&
+           governor.rate() > 30.5;
+}
+
+// Keeps what drawing a draw again needs: a new group for a draw call the
+// frame recorded, or one more draw in the group it joined.
+void VulkanRenderer::Impl::record_draw_for_replay(const DrawCall &call, bool lit, std::uint32_t skinned,
+                                                  const DrawState &state, VkDeviceSize vertex_start,
+                                                  VkBuffer indices, VkDeviceSize index_start, std::uint32_t count,
+                                                  std::uint32_t vertex_count, bool joined) {
+    if (!interpolating) return;
+    FrameRecord &frame = recording_frame;
+    if (!frame.recorded) return;
+    if (joined && !frame.groups.empty()) {
+        ReplayGroup &last = frame.groups.back();
+        // The copies must follow each other as the vertices do; a draw given
+        // up after its vertices were copied breaks that, and the group is
+        // then drawn with its own vertices.
+        if (last.skinned != kNone && skinned != last.skinned + last.vertex_count) last.skinned = kNone;
+        last.count += count;
+        last.vertex_count += vertex_count;
+    } else {
+        ReplayGroup added{};
+        added.state = state;
+        added.target = call.target.color_address;
+        added.vertex_base = vertex_start;
+        added.index_buffer = indices;
+        added.index_base = index_start;
+        added.count = count;
+        added.vertex_count = vertex_count;
+        added.first_draw = static_cast<std::uint32_t>(frame.summaries.size());
+        if (lit) {
+            if (frame.objects.empty() || frame.object_offset != object_offset) {
+                frame.objects.push_back(last_object);
+                frame.object_offset = object_offset;
+            }
+            added.object = static_cast<std::uint32_t>(frame.objects.size() - 1u);
+        }
+        added.skinned = skinned;
+        frame.groups.push_back(added);
+    }
+    ++frame.groups.back().draws;
+    frame.summaries.push_back(interpolation::summarize(call));
+    frame.group_of.push_back(static_cast<std::uint32_t>(frame.groups.size() - 1u));
+}
+
+// Ends the frame's recording and submits it without presenting it: with
+// frame interpolation the presents between flips show it.
+void VulkanRenderer::Impl::submit_frame() {
+    end_pass();
+    end_gpu_segment(command_buffer);
+    gpu_timer_pending = gpu_timer_used;
+    vkEndCommandBuffer(command_buffer);
+    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submit.commandBufferCount = 1u;
+    submit.pCommandBuffers = &command_buffer;
+    const perf::Clock::time_point submit_start = perf::Clock::now();
+    vkQueueSubmit(queue, 1u, &submit, frame_fence);
+    perf::add_wait_time(perf::Clock::now() - submit_start, perf::Stall::Submit);
+    recording = false;
+}
+
+// The frame the game just flipped becomes the newer one: its picture is
+// copied, and it is matched against the frame before.
+void VulkanRenderer::Impl::finish_interpolated_frame(VkImage source, std::uint32_t displayed,
+                                                     std::int64_t moment_us) {
+    FrameRecord &frame = recording_frame;
+    frame.recorded = frame.recorded && interpolating;
+    interpolation::mark_eligible(frame.summaries, displayed);
+    frame.displayed = displayed;
+    frame.moment_us = moment_us;
+    frame.valid = true;
+    std::swap(older_frame, newer_frame);
+    std::swap(newer_frame, recording_frame);
+    recording_frame.clear();
+    next_region = (frame_region + 1u) % kFrameRegions;
+
+    // The picture, before the game draws anything else into its target.
+    std::string error;
+    Target &picture = pictures[newer_picture ^ 1u];
+    if (picture.color == VK_NULL_HANDLE && !create_target(picture, error)) {
+        std::cout << "[render] frame interpolation has no room for its pictures: " << error << "\n";
+        destroy_target(picture);
+        newer_picture_valid = older_picture_valid = false;
+        return;
+    }
+    newer_picture ^= 1u;
+    older_picture_valid = newer_picture_valid;
+    initialize_layouts(command_buffer, picture);
+    transition(command_buffer, source, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    transition(command_buffer, picture.color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkImageCopy copy{};
+    copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u};
+    copy.dstSubresource = copy.srcSubresource;
+    copy.extent = {target_extent.width, target_extent.height, 1u};
+    vkCmdCopyImage(command_buffer, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, picture.color,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &copy);
+    transition(command_buffer, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    transition(command_buffer, picture.color, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    newer_picture_valid = true;
+
+    if (older_frame.valid && older_frame.recorded && newer_frame.recorded) {
+        matching = matcher.match(older_frame.summaries, newer_frame.summaries, cut_thresholds);
+    } else {
+        matcher.forget_motion();
+        matching = interpolation::Matching{};
+        matching.cut = older_frame.valid ? "not recorded" : "no frame before";
+    }
+    camera_motion = matching.camera_found ? interpolation::rigid_motion(matching.camera) : interpolation::RigidMotion{};
+    InterpolationStats &stats = interpolation_stats;
+    ++stats.frames;
+    stats.eligible += matching.eligible_newer;
+    stats.matched += matching.matched;
+    if (matching.continued) ++stats.continued;
+    stats.rejected += matching.rejected;
+    stats.rejected_shared += matching.rejected_shared;
+    stats.max_own_motion = std::max(stats.max_own_motion, matching.max_own_motion);
+    if (matching.camera_found) {
+        stats.max_camera_angle = std::max(stats.max_camera_angle, matching.camera_angle_degrees);
+        stats.max_camera_distance = std::max(stats.max_camera_distance, matching.camera_distance);
+    }
+    if (matching.cut != nullptr) ++stats.cuts[matching.cut];
+    static const bool trace_frames = [] {
+        const char *text = portablekit::env("TRACE_INTERPOLATION");
+        return text != nullptr && (std::strcmp(text, "frames") == 0 || std::strcmp(text, "presents") == 0);
+    }();
+    if (trace_frames) {
+        std::printf("[interp] flip %llu at moment %lld us (%+.1f ms after the one before), %.1f ms after it\n",
+                    static_cast<unsigned long long>(frames), static_cast<long long>(moment_us),
+                    older_frame.valid ? static_cast<double>(moment_us - older_frame.moment_us) / 1000.0 : 0.0,
+                    static_cast<double>(to_us(std::chrono::steady_clock::now()) - moment_us) / 1000.0);
+    }
+    if (trace_frames || (trace_interpolation && matching.cut != nullptr && matching.eligible_newer != 0u) ||
+        (trace_interpolation && matching.rejected >= 50u)) {
+        std::printf("[interp] frame %llu: eligible %u/%u matched %u camera %.2f deg %.2f units, rejected %u (%u "
+                    "shared, up to %.0f units, kept up to %.0f)%s%s%s\n",
+                    static_cast<unsigned long long>(frames), matching.eligible_older, matching.eligible_newer,
+                    matching.matched, static_cast<double>(matching.camera_angle_degrees),
+                    static_cast<double>(matching.camera_distance), matching.rejected, matching.rejected_shared,
+                    static_cast<double>(matching.max_rejected_motion), static_cast<double>(matching.max_own_motion),
+                    matching.continued ? " (continued)" : "",
+                    matching.cut != nullptr ? " cut: " : "", matching.cut != nullptr ? matching.cut : "");
+        std::fflush(stdout);
+    }
+}
+
+// Presents the one present that is due at `now`, if any. `account`: its
+// time is added to the frame statistics, which the callers inside the
+// renderer's own timed work do not want.
+bool VulkanRenderer::Impl::poll_presents(std::chrono::steady_clock::time_point now, bool account, bool idle) {
+    if (!cycle_active) return false;
+    const auto due = present_clock.next_due();
+    if (!due || *due > to_us(now)) return false;
+    if (!idle && busy_presents * 2 > std::chrono::microseconds(present_clock.frame_us())) {
+        // Presents made while the game's code ran have taken half a frame:
+        // the rest wait for the kernel's idle time or the next flip.
+        ++interpolation_stats.over_budget;
+        (void)present_clock.take(to_us(now));
+        return false;
+    }
+    const auto present = present_clock.take(to_us(now));
+    if (!present) return false;
+    const auto start = std::chrono::steady_clock::now();
+    const bool made = present_between(*present, account);
+    if (!idle) busy_presents += std::chrono::steady_clock::now() - start;
+    return made;
+}
+
+bool VulkanRenderer::Impl::present_between(const pacing::PresentClock::Present &present, bool account) {
+    using Clock = std::chrono::steady_clock;
+    const Clock::time_point start = Clock::now();
+    InterpolationStats &stats = interpolation_stats;
+    stats.skipped += present.skipped;
+    stats.max_late = std::max(stats.max_late, Clock::duration(std::chrono::microseconds(
+                                                  std::max<std::int64_t>(0, to_us(start) - present.time_us -
+                                                                                present_clock.delay_us()))));
+    const std::uint32_t slot = present_slot;
+    present_slot ^= 1u;
+    VkCommandBuffer commands = present_commands[slot];
+    VkFence fence = present_fences[slot];
+    const perf::Clock::time_point wait_start = perf::Clock::now();
+    vkWaitForFences(device, 1u, &fence, VK_TRUE, UINT64_MAX);
+    perf::add_wait_time(perf::Clock::now() - wait_start, perf::Stall::Fence);
+    if (present_timed[slot]) {
+        std::array<std::uint64_t, 4> results{};
+        if (vkGetQueryPoolResults(device, present_timer, slot * 2u, 2u, sizeof(results), results.data(),
+                                  2u * sizeof(std::uint64_t),
+                                  VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) == VK_SUCCESS &&
+            results[1] != 0u && results[3] != 0u) {
+            const double ms =
+                static_cast<double>((results[2] - results[0]) & gpu_timer_mask) * gpu_timer_ns_per_tick / 1.0e6;
+            perf::add_gpu_time(ms);
+            stats.gpu_ms += ms;
+            ++stats.gpu_samples;
+        }
+        present_timed[slot] = false;
+    }
+    // An image first, waiting at most 3 ms for one: when the display has
+    // none free (it refreshes slower than the presents come), this present
+    // is dropped rather than hold the game until the next refresh.
+    if (swapchain_dirty || swapchain == VK_NULL_HANDLE) recreate_swapchain();
+    if (swapchain == VK_NULL_HANDLE) return false;
+    std::uint32_t image_index = 0u;
+    const perf::Clock::time_point acquire_start = perf::Clock::now();
+    const VkResult acquired = vkAcquireNextImageKHR(device, swapchain, 3'000'000u, image_available, VK_NULL_HANDLE, &image_index);
+    perf::add_wait_time(perf::Clock::now() - acquire_start, perf::Stall::Acquire);
+    if (acquired == VK_ERROR_OUT_OF_DATE_KHR) swapchain_dirty = true;
+    if (acquired != VK_SUCCESS && acquired != VK_SUBOPTIMAL_KHR) {
+        ++stats.blocked;
+        if (account) perf::add_render_time(Clock::now() - start);
+        return false;
+    }
+    acquired_image = image_index;
+    vkResetFences(device, 1u, &fence);
+    vkResetCommandBuffer(commands, 0u);
+    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(commands, &begin);
+
+    const Target &newer_image = pictures[newer_picture];
+    const Target &older_image = pictures[newer_picture ^ 1u];
+    VkImage image = newer_image.color;
+    bool blended = false;
+    if (present.t >= 0.999f || !older_picture_valid) ++stats.plain_newest;
+    if (present.t < 0.999f && older_picture_valid) {
+        image = older_image.color;
+        const bool paired = matching.cut == nullptr && older_frame.valid && older_frame.recorded && newer_frame.recorded;
+        const bool textures_kept = destroyed_texture_clock <= older_frame.texture_clock;
+        const bool can_blend = present.t > 0.001f && paired && textures_kept;
+        if (present.t <= 0.001f) ++stats.plain_oldest;
+        else if (!paired) ++stats.plain_cut;
+        else if (!textures_kept) ++stats.plain_textures;
+        std::string error;
+        Target &target = blend_targets[slot];
+        if (can_blend && (target.color != VK_NULL_HANDLE || create_target(target, error))) {
+            if (present_timer != VK_NULL_HANDLE) {
+                vkCmdResetQueryPool(commands, present_timer, slot * 2u, 2u);
+                vkCmdWriteTimestamp(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, present_timer, slot * 2u);
+            }
+            const Clock::time_point replay_start = Clock::now();
+            replay(commands, slot, present.t);
+            stats.replay_time += Clock::now() - replay_start;
+            if (present_timer != VK_NULL_HANDLE) {
+                vkCmdWriteTimestamp(commands, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, present_timer, slot * 2u + 1u);
+                present_timed[slot] = true;
+            }
+            image = target.color;
+            blended = true;
+        } else if (!error.empty()) {
+            std::cout << "[render] frame interpolation has no room to blend: " << error << "\n";
+            destroy_target(target);
+        }
+    }
+    ui_draw_data = frame_ui;
+    submit_and_present(commands, fence, image, true, false);
+    // <prefix>_INTERPOLATION_EXTRA_MS: busy CPU time added to each blended
+    // present, to try the step-down on a fast machine as if it were a slow one.
+    static const double extra_ms = [] {
+        const char *text = portablekit::env("INTERPOLATION_EXTRA_MS");
+        return text != nullptr ? std::clamp(std::strtod(text, nullptr), 0.0, 50.0) : 0.0;
+    }();
+    if (blended && extra_ms > 0.0) {
+        const Clock::time_point until =
+            Clock::now() + std::chrono::microseconds(static_cast<std::int64_t>(extra_ms * 1000.0));
+        while (Clock::now() < until) {
+        }
+    }
+
+    const Clock::duration spent = Clock::now() - start;
+    static const bool trace_presents = [] {
+        const char *text = portablekit::env("TRACE_INTERPOLATION");
+        return text != nullptr && std::strcmp(text, "presents") == 0;
+    }();
+    if (trace_presents)
+        std::printf("[interp] present at moment %+.1f ms, t %.3f, %s, late %.1f ms, skipped %u, %.2f ms\n",
+                    static_cast<double>(present.time_us - newer_frame.moment_us) / 1000.0,
+                    static_cast<double>(present.t),
+                    blended ? "blended" : image == newer_image.color ? "newer" : "older",
+                    static_cast<double>(to_us(start) - present.time_us - present_clock.delay_us()) / 1000.0,
+                    present.skipped, std::chrono::duration<double, std::milli>(spent).count());
+    ++stats.presents;
+    if (blended) {
+        ++stats.blended;
+        stats.blend_time += spent;
+    } else {
+        stats.plain_time += spent;
+    }
+    if (account) perf::add_render_time(spent);
+    perf::count_present();
+    return true;
+}
+
+// Draws the older frame into the slot's blend target with every matched
+// draw's transforms blended a fraction `t` towards the newer frame's. Draws
+// without a partner in the newer frame, and those never blended (2D, the
+// interface, other framebuffers' content), are drawn as the older frame drew
+// them.
+void VulkanRenderer::Impl::replay(VkCommandBuffer commands, std::uint32_t slot, float t) {
+    const FrameRecord &older = older_frame;
+    const FrameRecord &newer = newer_frame;
+    Target &target = blend_targets[slot];
+    initialize_layouts(commands, target);
+    VkRenderPassBeginInfo pass{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    pass.renderPass = render_pass;
+    pass.framebuffer = target.framebuffer;
+    pass.renderArea = {{0, 0}, target_extent};
+    vkCmdBeginRenderPass(commands, &pass, VK_SUBPASS_CONTENTS_INLINE);
+    // The game clears its framebuffer itself; start from a known state for
+    // any part it does not.
+    std::array<VkClearAttachment, 2> clears{};
+    clears[0].aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    clears[0].colorAttachment = 0u;
+    clears[0].clearValue.color = {{0.0f, 0.0f, 0.0f, 0.0f}};
+    clears[1].aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    clears[1].clearValue.depthStencil = {0.0f, 0u};
+    const VkClearRect whole{{{0, 0}, target_extent}, 0u, 1u};
+    vkCmdClearAttachments(commands, static_cast<std::uint32_t>(clears.size()), clears.data(), 1u, &whole);
+
+    // The slot's scratch area: blended vertices and object blocks.
+    VkDeviceSize scratch_at =
+        static_cast<VkDeviceSize>(kFrameRegions) * kVertexBufferBytes + slot * kPresentScratchBytes;
+    const VkDeviceSize scratch_end = scratch_at + kPresentScratchBytes;
+    auto *mapped = static_cast<std::uint8_t *>(vertex_mapped);
+
+    // What the command buffer has, so that unchanged state is not set again.
+    DrawState set{};
+    bool known = false;
+    // Blended transforms are computed once while the matrices they come from
+    // repeat: the view and projection usually stay the same for the whole
+    // frame, and consecutive groups often share a world matrix.
+    struct Pair {
+        const interpolation::Matrix *from{};
+        const interpolation::Matrix *to{};
+        [[nodiscard]] bool same(const interpolation::Matrix &a, const interpolation::Matrix &b) const {
+            return from != nullptr && (from == &a || std::memcmp(from, &a, sizeof(a)) == 0) &&
+                   (to == &b || std::memcmp(to, &b, sizeof(b)) == 0);
+        }
+    };
+    Pair view_pair{}, projection_pair{}, world_pair{};
+    interpolation::Matrix projection{}, world{}, view_world{}, transform{};
+    bool transform_valid = false;
+    std::uint32_t written_object = kNone;
+    interpolation::Matrix written_world{};
+    std::uint32_t written_offset = 0u;
+    std::uint64_t replayed = 0u;
+    std::uint64_t flipbook_steps = 0u;
+    std::uint64_t followed = 0u;
+    // <prefix>_INTERPOLATION_NO_FLIPBOOK_GUARD blends texture offsets up to
+    // half the texture, as before; <prefix>_INTERPOLATION_NO_MOTION_GUARD
+    // leaves draws without a partner where the older frame drew them.
+    static const bool flipbook_guard = portablekit::env("INTERPOLATION_NO_FLIPBOOK_GUARD") == nullptr;
+    static const bool motion_guard = portablekit::env("INTERPOLATION_NO_MOTION_GUARD") == nullptr;
+
+    for (const ReplayGroup &drawn : older.groups) {
+        if (drawn.target != older.displayed) continue;
+        DrawState state = drawn.state;
+        VkDeviceSize vertex_base = drawn.vertex_base;
+        std::int32_t partner = -1;
+        std::uint32_t member = drawn.first_draw;
+        for (std::uint32_t i = drawn.first_draw; i < drawn.first_draw + drawn.draws; ++i) {
+            if (matching.newer_of[i] < 0) continue;
+            partner = matching.newer_of[i];
+            member = i;
+            break;
+        }
+        if (partner < 0 && t > 0.0f && motion_guard && camera_motion.valid &&
+            older.summaries[drawn.first_draw].eligible) {
+            // A 3D draw without a partner (drawn only in the older frame, or
+            // paired with a draw too far away to be itself) goes with the
+            // camera and nothing else: left where the older frame drew it,
+            // it would stand still on screen while the scene turns, and jump
+            // back at the next frame.
+            const interpolation::DrawSummary &from = older.summaries[drawn.first_draw];
+            const interpolation::Matrix eye = interpolation::multiply(
+                interpolation::rigid_at(camera_motion, t), interpolation::multiply(from.view, from.world));
+            state.push.transform = interpolation::multiply(from.projection, eye);
+            state.push.view_z = {eye[2], eye[6], eye[10], eye[14]};
+            transform_valid = false;
+            view_pair = projection_pair = world_pair = Pair{};
+            ++followed;
+        }
+        if (partner >= 0 && t > 0.0f) {
+            const interpolation::DrawSummary &from = older.summaries[member];
+            const interpolation::DrawSummary &to = newer.summaries[static_cast<std::size_t>(partner)];
+            const ReplayGroup &next = newer.groups[newer.group_of[static_cast<std::size_t>(partner)]];
+            // Eye space (view times world) is blended as a whole, following
+            // the camera's motion along its arcs (blend_eye): blending view
+            // and world apart let scenery swing on chords across a turn and
+            // the followed character wobble against it. The world matrix is
+            // still blended on its own for the lighting block.
+            bool changed = !transform_valid;
+            bool eye_changed = !transform_valid;
+            if (!view_pair.same(from.view, to.view)) {
+                view_pair = {&from.view, &to.view};
+                eye_changed = true;
+            }
+            if (!projection_pair.same(from.projection, to.projection)) {
+                projection = interpolation::blend_linear(from.projection, to.projection, t);
+                projection_pair = {&from.projection, &to.projection};
+                changed = true;
+            }
+            if (!world_pair.same(from.world, to.world)) {
+                world = interpolation::blend_affine(from.world, to.world, t);
+                world_pair = {&from.world, &to.world};
+                eye_changed = true;
+            }
+            if (eye_changed) {
+                view_world = interpolation::blend_eye(interpolation::multiply(from.view, from.world),
+                                                      interpolation::multiply(to.view, to.world), camera_motion, t);
+                changed = true;
+            }
+            if (changed) {
+                transform = interpolation::multiply(projection, view_world);
+                transform_valid = true;
+            }
+            state.push.transform = transform;
+            state.push.view_z = {view_world[2], view_world[6], view_world[10], view_world[14]};
+            // A texture that scrolls moves its offset a little each frame;
+            // a flipbook jumps to its next cell, and a wrap by the whole
+            // texture: both are held.
+            for (std::size_t axis = 2u; axis < 4u; ++axis) {
+                const float a = drawn.state.push.uv_transform[axis];
+                const float b = next.state.push.uv_transform[axis];
+                if (a == b || drawn.state.push.uv_transform[axis - 2u] != next.state.push.uv_transform[axis - 2u])
+                    continue;
+                // A flipbook's step to its next atlas cell is held, not
+                // blended (interpolation::blend_offset).
+                const float max_scroll = flipbook_guard ? interpolation::kMaxScrollStep : 0.5f;
+                if (!interpolation::scrolls(a, b, max_scroll)) ++flipbook_steps;
+                state.push.uv_transform[axis] = interpolation::blend_offset(a, b, t, max_scroll);
+            }
+            // A lit draw's object block carries the world matrix its lights
+            // are evaluated in; everything else in it stays.
+            if (drawn.object != kNone && world != older.objects[drawn.object].world) {
+                if (drawn.object != written_object || world != written_world) {
+                    ObjectBlock block = older.objects[drawn.object];
+                    block.world = world;
+                    const VkDeviceSize at =
+                        (scratch_at + uniform_alignment - 1u) / uniform_alignment * uniform_alignment;
+                    if (at + sizeof(ObjectBlock) <= scratch_end) {
+                        std::memcpy(mapped + at, &block, sizeof(block));
+                        scratch_at = at + sizeof(ObjectBlock);
+                        written_object = drawn.object;
+                        written_world = world;
+                        written_offset = static_cast<std::uint32_t>(at);
+                    }
+                }
+                if (drawn.object == written_object && world == written_world) state.lighting[1] = written_offset;
+            }
+            // Skinning is linear in the bone matrices, so blending the skinned
+            // vertices blends the bones.
+            if (drawn.skinned != kNone && next.skinned != kNone && next.vertex_count == drawn.vertex_count) {
+                const VkDeviceSize at = (scratch_at + 15u) & ~VkDeviceSize{15u};
+                const VkDeviceSize bytes = static_cast<VkDeviceSize>(drawn.vertex_count) * sizeof(GpuVertex);
+                if (at + bytes <= scratch_end) {
+                    const GpuVertex *a = older.skinned.data() + drawn.skinned;
+                    const GpuVertex *b = newer.skinned.data() + next.skinned;
+                    auto *out = reinterpret_cast<GpuVertex *>(mapped + at);
+                    for (std::uint32_t v = 0; v < drawn.vertex_count; ++v) {
+                        GpuVertex blended = a[v];
+                        blended.x += (b[v].x - blended.x) * t;
+                        blended.y += (b[v].y - blended.y) * t;
+                        blended.z += (b[v].z - blended.z) * t;
+                        blended.nx += (b[v].nx - blended.nx) * t;
+                        blended.ny += (b[v].ny - blended.ny) * t;
+                        blended.nz += (b[v].nz - blended.nz) * t;
+                        out[v] = blended;
+                    }
+                    scratch_at = at + bytes;
+                    vertex_base = at;
+                }
+            }
+        }
+
+        if (!known || std::memcmp(&state.viewport, &set.viewport, sizeof(VkViewport)) != 0)
+            vkCmdSetViewport(commands, 0u, 1u, &state.viewport);
+        if (!known || state.blend != set.blend) vkCmdSetBlendConstants(commands, state.blend.data());
+        if (!known || std::memcmp(&state.scissor, &set.scissor, sizeof(VkRect2D)) != 0)
+            vkCmdSetScissor(commands, 0u, 1u, &state.scissor);
+        if (!known || state.pipeline != set.pipeline)
+            vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, state.pipeline);
+        if (!known || state.texture != set.texture)
+            vkCmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout, 0u, 1u,
+                                    &state.texture, 0u, nullptr);
+        if (!known || state.lighting != set.lighting)
+            vkCmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout, 1u, 1u,
+                                    &lighting_descriptor, static_cast<std::uint32_t>(state.lighting.size()),
+                                    state.lighting.data());
+        if (!known || std::memcmp(&state.push, &set.push, sizeof(PushConstants)) != 0)
+            vkCmdPushConstants(commands, pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                               0u, sizeof(PushConstants), &state.push);
+        set = state;
+        known = true;
+        vkCmdBindVertexBuffers(commands, 0u, 1u, &vertex_buffer, &vertex_base);
+        if (drawn.index_buffer != VK_NULL_HANDLE) {
+            vkCmdBindIndexBuffer(commands, drawn.index_buffer, drawn.index_base, VK_INDEX_TYPE_UINT16);
+            vkCmdDrawIndexed(commands, drawn.count, 1u, 0u, 0, 0u);
+        } else {
+            vkCmdDraw(commands, drawn.count, 1u, 0u, 0u);
+        }
+        ++replayed;
+    }
+    vkCmdEndRenderPass(commands);
+    interpolation_stats.groups += replayed;
+    interpolation_stats.flipbook_steps += flipbook_steps;
+    interpolation_stats.followed += followed;
+}
+
+// Once a second while a faster frame rate is chosen: the [interp] line
+// (<prefix>_TRACE_INTERPOLATION) and the governor's turn.
+void VulkanRenderer::Impl::report_interpolation() {
+    using Clock = std::chrono::steady_clock;
+    InterpolationStats &stats = interpolation_stats;
+    const Clock::time_point now = Clock::now();
+    if (now - stats.window_start < std::chrono::seconds(1)) return;
+    const auto ms = [](Clock::duration duration) {
+        return std::chrono::duration<double, std::milli>(duration).count();
+    };
+    const std::uint32_t plain = stats.presents - stats.blended;
+    // Costs are kept across seconds: a second at 30 measures none.
+    if (stats.blended != 0u) blend_cost_ms = ms(stats.blend_time) / stats.blended;
+    if (plain != 0u) plain_cost_ms = ms(stats.plain_time) / plain;
+    const double frames_now = std::max(1u, stats.frames);
+    const std::uint32_t reasons_known =
+        stats.plain_newest + stats.plain_oldest + stats.plain_cut + stats.plain_textures;
+    if (trace_interpolation) {
+        std::string cuts;
+        for (const auto &[reason, count] : stats.cuts) cuts += ", " + reason + " " + std::to_string(count);
+        std::printf("[interp] %.0f of %.0f fps, %u frames: matched %.1f%% of %.0f draws per frame; camera up to "
+                    "%.2f deg %.2f units, %u continued; cuts %s; presents %u, %u blended (%.2f ms each, %.2f "
+                    "recording %.0f draw calls, gpu %.2f ms), %u plain (%.2f ms each), %u skipped, late up to %.1f "
+                    "ms; delay %.1f ms (code %.1f ms)\n",
+                    governor.rate(), governor.requested(), stats.frames,
+                    stats.eligible != 0u
+                        ? 100.0 * static_cast<double>(stats.matched) / static_cast<double>(stats.eligible)
+                        : 0.0,
+                    static_cast<double>(stats.eligible) / frames_now, static_cast<double>(stats.max_camera_angle),
+                    static_cast<double>(stats.max_camera_distance), stats.continued,
+                    cuts.empty() ? "none" : cuts.substr(2).c_str(), stats.presents, stats.blended,
+                    stats.blended != 0u ? ms(stats.blend_time) / stats.blended : 0.0,
+                    stats.blended != 0u ? ms(stats.replay_time) / stats.blended : 0.0,
+                    stats.blended != 0u ? static_cast<double>(stats.groups) / stats.blended : 0.0,
+                    stats.gpu_samples != 0u ? stats.gpu_ms / stats.gpu_samples : 0.0, plain,
+                    plain != 0u ? ms(stats.plain_time) / plain : 0.0, stats.skipped, ms(stats.max_late),
+                    static_cast<double>(present_clock.delay_us()) / 1000.0,
+                    static_cast<double>(present_clock.work_us()) / 1000.0);
+        std::printf("[interp] plain: %u at the newest frame, %u at the older, %u not blended (cut), %u textures "
+                    "dropped, %u other; not made: %u display busy, %u over budget\n",
+                    stats.plain_newest, stats.plain_oldest, stats.plain_cut, stats.plain_textures,
+                    plain > reasons_known ? plain - reasons_known : 0u, stats.blocked, stats.over_budget);
+        std::printf("[interp] guards: %u pairs moved too far on their own (%u with the same mesh drawn more than "
+                    "once), own motion kept up to %.1f units; %.0f draw calls a blend followed the camera only; "
+                    "%.0f texture offsets a blend held (flipbook steps)\n",
+                    stats.rejected, stats.rejected_shared, static_cast<double>(stats.max_own_motion),
+                    stats.blended != 0u ? static_cast<double>(stats.followed) / stats.blended : 0.0,
+                    stats.blended != 0u ? static_cast<double>(stats.flipbook_steps) / stats.blended : 0.0);
+        std::fflush(stdout);
+    }
+    const perf::Summary &summary = perf::last_second();
+    if (summary.valid && summary.second != governor_second) {
+        governor_second = summary.second;
+        pacing::Second second{};
+        second.speed = summary.speed;
+        second.idle_ms = summary.pacing_ms;
+        second.blend_ms = blend_cost_ms;
+        second.plain_ms = plain_cost_ms;
+        second.interpolation_ms = (ms(stats.blend_time) + ms(stats.plain_time)) / frames_now;
+        second.presents = stats.presents;
+        second.skipped = stats.skipped + stats.over_budget;
+        second.blocked = stats.blocked;
+        const double before = governor.rate();
+        if (governor.update(second)) {
+            std::printf("[interp] frame rate %.0f -> %.0f: %s (speed %.0f%%, spare %.1f ms a frame, %.2f ms a "
+                        "blended present)\n",
+                        before, governor.rate(), governor.reason(), summary.speed * 100.0, summary.pacing_ms,
+                        blend_cost_ms);
+            std::fflush(stdout);
+        }
+        perf::set_frame_rate_info(governor.rate(), governor.requested());
+    }
+    stats = InterpolationStats{};
+    stats.window_start = now;
+}
+
+// Copies a colour image resting in COLOR_ATTACHMENT_OPTIMAL to the CPU. Waits
+// for the device; only for checks.
+std::vector<std::uint32_t> VulkanRenderer::Impl::read_image(VkImage image) {
+    std::vector<std::uint32_t> pixels;
+    const VkDeviceSize bytes = static_cast<VkDeviceSize>(target_extent.width) * target_extent.height * 4u;
+    VkBuffer buffer{};
+    VkDeviceMemory memory{};
+    VkBufferCreateInfo buffer_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    buffer_info.size = bytes;
+    buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    if (vkCreateBuffer(device, &buffer_info, nullptr, &buffer) != VK_SUCCESS) return pixels;
+    VkMemoryRequirements requirements{};
+    vkGetBufferMemoryRequirements(device, buffer, &requirements);
+    VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocate.allocationSize = requirements.size;
+    allocate.memoryTypeIndex = find_memory_type(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                                                 VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (vkAllocateMemory(device, &allocate, nullptr, &memory) == VK_SUCCESS) {
+        vkBindBufferMemory(device, buffer, memory, 0u);
+        run_commands([&](VkCommandBuffer commands) {
+            transition(commands, image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            VkBufferImageCopy copy{};
+            copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u};
+            copy.imageExtent = {target_extent.width, target_extent.height, 1u};
+            vkCmdCopyImageToBuffer(commands, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer, 1u, &copy);
+            transition(commands, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        });
+        void *mapped = nullptr;
+        if (vkMapMemory(device, memory, 0u, VK_WHOLE_SIZE, 0u, &mapped) == VK_SUCCESS) {
+            pixels.resize(static_cast<std::size_t>(bytes / 4u));
+            std::memcpy(pixels.data(), mapped, static_cast<std::size_t>(bytes));
+            vkUnmapMemory(device, memory);
+        }
+    }
+    vkDestroyBuffer(device, buffer, nullptr);
+    vkFreeMemory(device, memory, nullptr);
+    return pixels;
+}
+
+// <prefix>_CHECK_REPLAY: every 150 flips, draws the older frame again from its
+// recording without blending and compares it with the older frame's own
+// picture, pixel for pixel; with <prefix>_SCREENSHOT_DIR it also writes both,
+// the frame halfway to the newer one and the newer frame as BMPs.
+void VulkanRenderer::Impl::check_replay() {
+    if (!older_frame.valid || !older_frame.recorded || !newer_frame.recorded || !older_picture_valid ||
+        matching.cut != nullptr || destroyed_texture_clock > older_frame.texture_clock)
+        return;
+    std::string error;
+    if (blend_targets[0].color == VK_NULL_HANDLE && !create_target(blend_targets[0], error)) return;
+    vkDeviceWaitIdle(device);
+    const auto draw = [&](float t) {
+        run_commands([&](VkCommandBuffer commands) { replay(commands, 0u, t); });
+        return read_image(blend_targets[0].color);
+    };
+    const std::vector<std::uint32_t> older_pixels = read_image(pictures[newer_picture ^ 1u].color);
+    const std::vector<std::uint32_t> replayed = draw(0.0f);
+    std::size_t differ = 0u;
+    for (std::size_t i = 0; i < std::min(older_pixels.size(), replayed.size()); ++i)
+        if (older_pixels[i] != replayed[i]) ++differ;
+    std::printf("[interp] replay check at frame %llu: %zu of %zu pixels differ from the frame drawn again "
+                "(%zu draw calls)\n",
+                static_cast<unsigned long long>(frames), differ, older_pixels.size(), older_frame.groups.size());
+    std::fflush(stdout);
+    static const char *directory = portablekit::env("SCREENSHOT_DIR");
+    if (directory == nullptr) return;
+    const std::string prefix = std::string(directory) + "/replay_" + std::to_string(frames);
+    const auto write = [&](const std::string &name, const std::vector<std::uint32_t> &pixels) {
+        if (!pixels.empty())
+            write_bmp(prefix + name, reinterpret_cast<const std::uint8_t *>(pixels.data()), target_extent.width,
+                      target_extent.height, false);
+    };
+    write("_older.bmp", older_pixels);
+    write("_again.bmp", replayed);
+    write("_half.bmp", draw(0.5f));
+    write("_newer.bmp", read_image(pictures[newer_picture].color));
+}
+
+void VulkanRenderer::Impl::reset_interpolation() {
+    recording_frame.clear();
+    newer_frame.clear();
+    older_frame.clear();
+    older_picture_valid = newer_picture_valid = false;
+    present_clock.reset();
+    matcher.forget_motion();
+    matching = interpolation::Matching{};
+    cycle_active = false;
+}
+
+void VulkanRenderer::Impl::destroy_interpolation_targets() {
+    for (Target &picture : pictures) destroy_target(picture);
+    for (Target &target : blend_targets) destroy_target(target);
+    older_picture_valid = newer_picture_valid = false;
+}
+
+bool VulkanRenderer::present(std::uint32_t display_address,
+                             std::optional<std::chrono::steady_clock::time_point> moment) {
     Impl &impl = *impl_;
-    if (!impl.ready) return;
+    if (!impl.ready) return false;
     if (!impl.recording) begin_frame();
     impl.end_pass();
 
     static const bool trace3d = portablekit::env("TRACE_3D") != nullptr;
+    static const bool trace_camera = portablekit::env("TRACE_CAMERA") != nullptr;
+    // The camera hunt reads the same measurement without printing it.
+    static const bool watch_camera = trace_camera || portablekit::env("FIND_CAMERA") != nullptr;
     if (trace3d && impl.frame_transformed_draws != 0u) {
         std::cout << "[3d] frame " << impl.frames << " through=" << impl.frame_through_draws
                   << " transformed=" << impl.frame_transformed_draws << " showing=0x" << std::hex << display_address
@@ -3237,6 +5227,50 @@ void VulkanRenderer::present(std::uint32_t display_address) {
                   << impl.frame_ndc_max[0] << "] y[" << impl.frame_ndc_min[1] << "," << impl.frame_ndc_max[1]
                   << "] z[" << impl.frame_ndc_min[2] << "," << impl.frame_ndc_max[2] << "]\n";
     }
+    if (watch_camera && !impl.frame_views.empty()) {
+        // The busiest view matrix of the frame is the scene the player looks
+        // at; the others belong to reflections and shadow passes.
+        const auto scene = std::max_element(impl.frame_views.begin(), impl.frame_views.end(),
+                                            [](const auto &a, const auto &b) { return a.second < b.second; });
+        const std::array<float, 16> &view = scene->first;
+        // A view matrix holds the camera's own axes as the rows of its
+        // rotation part, and the array is column major, so row 2 — the
+        // direction the camera looks along — is elements 2, 6 and 10.
+        const float forward_x = view[2];
+        const float forward_y = view[6];
+        const float forward_z = view[10];
+        constexpr float kDegrees = 57.29577951308232f;
+        const float yaw = std::atan2(forward_x, forward_z) * kDegrees;
+        const float pitch = std::asin(std::clamp(forward_y, -1.0f, 1.0f)) * kDegrees;
+        // The camera's world position is the rotation applied backwards to the
+        // translation, which tells a turn in place from the player moving.
+        const float tx = view[12];
+        const float ty = view[13];
+        const float tz = view[14];
+        const float px = -(view[0] * tx + view[1] * ty + view[2] * tz);
+        const float py = -(view[4] * tx + view[5] * ty + view[6] * tz);
+        const float pz = -(view[8] * tx + view[9] * ty + view[10] * tz);
+        float turn = yaw - impl.traced_yaw;
+        while (turn > 180.0f) turn -= 360.0f;
+        while (turn < -180.0f) turn += 360.0f;
+        impl.traced_yaw = yaw;
+        impl.reading = CameraReading{true, yaw, pitch, turn, {px, py, pz}, view};
+        if (trace_camera) {
+        const std::ios::fmtflags flags = std::cout.flags();
+        const std::streamsize precision = std::cout.precision();
+        std::cout << std::fixed << std::setprecision(4) << "[camera] frame " << impl.frames << " stick="
+                  << static_cast<int>(impl.pad.right_x) - 0x80 << "," << static_cast<int>(impl.pad.right_y) - 0x80
+                  << " yaw=" << yaw << " pitch=" << pitch << " turn=" << turn << " pos=" << std::setprecision(1) << px
+                  << "," << py << "," << pz << " views=" << impl.frame_views.size() << "\n";
+        std::cout.flags(flags);
+        // Precision is not one of a stream's flags, so restoring the flags
+        // leaves it wherever the line left it -- here at one significant digit
+        // for the position -- and every number printed afterwards by anything
+        // else comes out rounded to one digit for the rest of the run.
+        std::cout.precision(precision);
+        }
+    }
+    impl.frame_views.clear();
     impl.frame_through_draws = 0u;
     impl.frame_transformed_draws = 0u;
     impl.frame_transformed_vertices = 0u;
@@ -3245,6 +5279,11 @@ void VulkanRenderer::present(std::uint32_t display_address) {
     impl.frame_ndc_min = {1e30f, 1e30f, 1e30f};
     impl.frame_ndc_max = {-1e30f, -1e30f, -1e30f};
     impl.frame_transformed_targets.clear();
+
+    static const bool check_direct = portablekit::env("CHECK_DIRECT_VERTICES") != nullptr;
+    if (check_direct && impl.frames % 300u == 0u)
+        std::cout << "[direct-check] " << impl.direct_checked << " draws compared, " << impl.direct_mismatched
+                  << " differed" << std::endl;
 
     static const bool no_writeback = portablekit::env("NO_FB_TEXTURES") != nullptr;
     if (!no_writeback) impl.record_writeback(display_address);
@@ -3255,8 +5294,147 @@ void VulkanRenderer::present(std::uint32_t display_address) {
     VkImage source = displayed != impl.targets.end() ? displayed->second.color : VK_NULL_HANDLE;
     impl.presented_target = displayed != impl.targets.end() ? displayed->first : 0u;
     if (impl.holding) source = impl.held.color;
+    if (display_address != impl.display_addresses[0]) {
+        impl.display_addresses[1] = impl.display_addresses[0];
+        impl.display_addresses[0] = display_address;
+    }
+    const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+    // <prefix>_FRAME_RATE_CYCLE=30,60,90: the frame rate moves to the next one
+    // listed every <prefix>_FRAME_RATE_CYCLE_SECONDS (default 10), so one run
+    // measures them all on the same scene.
+    static const std::vector<settings::FrameRate> cycle = [] {
+        std::vector<settings::FrameRate> rates;
+        const char *text = portablekit::env("FRAME_RATE_CYCLE");
+        if (text == nullptr) return rates;
+        const std::string list = std::string(text) + ",";
+        std::size_t start = 0u;
+        for (std::size_t comma = list.find(','); comma != std::string::npos; comma = list.find(',', start)) {
+            const std::string name = list.substr(start, comma - start);
+            start = comma + 1u;
+            const std::pair<const char *, settings::FrameRate> known[] = {
+                {"30", settings::FrameRate::Fps30},   {"45", settings::FrameRate::Fps45},
+                {"60", settings::FrameRate::Fps60},   {"90", settings::FrameRate::Fps90},
+                {"120", settings::FrameRate::Fps120}, {"display", settings::FrameRate::Display}};
+            for (const auto &[spelling, rate] : known)
+                if (name == spelling) rates.push_back(rate);
+        }
+        return rates;
+    }();
+    if (!cycle.empty()) {
+        static const auto period = std::chrono::seconds([] {
+            const char *text = portablekit::env("FRAME_RATE_CYCLE_SECONDS");
+            return text != nullptr ? std::max(1, std::atoi(text)) : 10;
+        }());
+        static std::size_t next = 0u;
+        static std::chrono::steady_clock::time_point switch_at = now;
+        if (now >= switch_at) {
+            const settings::FrameRate rate = cycle[next];
+            next = (next + 1u) % cycle.size();
+            switch_at = now + period;
+            set_frame_rate(rate);
+            std::printf("[interp] cycle: frame rate %s\n",
+                        rate == settings::FrameRate::Fps30    ? "30"
+                        : rate == settings::FrameRate::Fps45  ? "45"
+                        : rate == settings::FrameRate::Fps60  ? "60"
+                        : rate == settings::FrameRate::Fps90  ? "90"
+                        : rate == settings::FrameRate::Fps120 ? "120"
+                                                              : "display");
+            std::fflush(stdout);
+        }
+    }
+    if (impl.frame_rate != settings::FrameRate::Fps30) {
+        const double wanted = impl.wanted_rate();
+        if (std::fabs(wanted - impl.governor.requested()) > 0.5) {
+            impl.governor.set_requested(wanted);
+            perf::set_frame_rate_info(impl.governor.rate(), impl.governor.requested());
+        }
+    }
+    if (impl.interpolation_wanted() && source != VK_NULL_HANDLE) {
+        // Frame interpolation: the frame is submitted now and shown by the
+        // presents between this flip and the next (frame_pacing.hpp).
+        impl.frame_ui = impl.ui_draw_data;
+        impl.ui_draw_data = nullptr;
+        const std::int64_t moment_us = moment ? to_us(*moment) : to_us(now);
+        impl.finish_interpolated_frame(source, impl.presented_target, moment_us);
+        impl.submit_frame();
+        ++impl.frames;
+        impl.present_clock.set_presents_per_frame(pacing::presents_per_frame(impl.governor.rate()));
+        impl.present_clock.flip(moment_us, to_us(now));
+        impl.cycle_active = impl.newer_picture_valid;
+        static const bool check = portablekit::env("CHECK_REPLAY") != nullptr;
+        if (check && impl.frames % 150u == 0u) impl.check_replay();
+        impl.report_interpolation();
+        impl.follow_window();
+        // A present due now is made at once; it counts itself.
+        impl.busy_presents = {};
+        impl.poll_presents(std::chrono::steady_clock::now(), false, false);
+        return false;
+    }
+    // The game's frame as it is, at its flip.
+    if (impl.cycle_active || impl.newer_frame.valid) impl.reset_interpolation();
     impl.submit_and_present(source, true);
     ++impl.frames;
+    if (impl.frame_rate != settings::FrameRate::Fps30) impl.report_interpolation();
+    impl.follow_window();
+    return true;
+}
+
+void VulkanRenderer::present_due() {
+    if (!impl_ || !impl_->ready || !impl_->cycle_active) return;
+    impl_->poll_presents(std::chrono::steady_clock::now(), true, false);
+}
+
+void VulkanRenderer::present_until(std::chrono::steady_clock::time_point wake) {
+    if (!impl_ || !impl_->ready) return;
+    Impl &impl = *impl_;
+    using Clock = std::chrono::steady_clock;
+    while (impl.cycle_active) {
+        const std::optional<std::int64_t> due = impl.present_clock.next_due();
+        if (!due) return;
+        const Clock::time_point at{std::chrono::microseconds(*due)};
+        if (at > wake) return;
+        const Clock::time_point now = Clock::now();
+        if (at > now) {
+            std::this_thread::sleep_until(at);
+            perf::add_pacing_time(Clock::now() - now);
+        }
+        // A present not made (the display had no image free) ends the wait's
+        // presents: the next ones would find none either.
+        if (!impl.poll_presents(Clock::now(), true, true)) return;
+    }
+}
+
+void VulkanRenderer::pause_interpolation() {
+    if (!impl_) return;
+    // The game stands still: the presents it had scheduled are dropped and
+    // the frames' moments start over when it resumes.
+    impl_->present_clock.reset();
+    impl_->cycle_active = false;
+}
+
+void VulkanRenderer::set_frame_rate(settings::FrameRate rate) {
+    if (!impl_) return;
+    Impl &impl = *impl_;
+    if (impl.frame_rate == rate) return;
+    impl.frame_rate = rate;
+    impl.governor.set_requested(rate == settings::FrameRate::Fps30 ? 30.0 : impl.wanted_rate());
+    impl.reset_interpolation();
+    perf::set_frame_rate_info(rate == settings::FrameRate::Fps30 ? 0.0 : impl.governor.rate(),
+                              rate == settings::FrameRate::Fps30 ? 0.0 : impl.governor.requested());
+}
+
+void VulkanRenderer::set_frame_rate_auto(bool automatic) {
+    if (!impl_) return;
+    impl_->governor.set_automatic(automatic);
+    if (impl_->frame_rate != settings::FrameRate::Fps30)
+        perf::set_frame_rate_info(impl_->governor.rate(), impl_->governor.requested());
+}
+
+float VulkanRenderer::display_refresh() const noexcept { return impl_ ? impl_->display_hz : 0.0f; }
+
+double VulkanRenderer::frame_rate_now() const noexcept {
+    if (!impl_ || impl_->frame_rate == settings::FrameRate::Fps30) return 30.0;
+    return impl_->governor.rate();
 }
 
 bool VulkanRenderer::capture_frame(const std::string &path) {
@@ -3357,6 +5535,9 @@ void VulkanRenderer::shutdown() {
     if (impl.ui_render_pass != VK_NULL_HANDLE) vkDestroyRenderPass(impl.device, impl.ui_render_pass, nullptr);
     for (auto &[key, texture] : impl.textures) impl.destroy_texture(texture);
     impl.textures.clear();
+    impl.replacements.shutdown();
+    impl.pack.reset();
+    impl.dumper.reset();
     impl.destroy_texture(impl.white_texture);
     if (impl.overlay_mapped != nullptr) vkUnmapMemory(impl.device, impl.overlay_staging_memory);
     vkDestroyBuffer(impl.device, impl.overlay_staging, nullptr);
@@ -3368,9 +5549,12 @@ void VulkanRenderer::shutdown() {
     impl.destroy_writeback();
     for (auto &[key, pipeline] : impl.pipelines) vkDestroyPipeline(impl.device, pipeline, nullptr);
     impl.pipelines.clear();
+    impl.last_pipeline = VK_NULL_HANDLE;
     if (impl.vertex_mapped != nullptr) vkUnmapMemory(impl.device, impl.vertex_memory);
     vkDestroyBuffer(impl.device, impl.vertex_buffer, nullptr);
     vkFreeMemory(impl.device, impl.vertex_memory, nullptr);
+    vkDestroyBuffer(impl.device, impl.index_buffer, nullptr);
+    vkFreeMemory(impl.device, impl.index_memory, nullptr);
     vkDestroySampler(impl.device, impl.sampler, nullptr);
     vkDestroySampler(impl.device, impl.sharp_sampler, nullptr);
     vkDestroySampler(impl.device, impl.clamp_sampler, nullptr);
@@ -3386,10 +5570,15 @@ void VulkanRenderer::shutdown() {
     impl.destroy_target(impl.held);
     impl.held = {};
     impl.holding = false;
+    impl.destroy_interpolation_targets();
+    for (VkFence fence : impl.present_fences) vkDestroyFence(impl.device, fence, nullptr);
+    if (impl.present_timer != VK_NULL_HANDLE) vkDestroyQueryPool(impl.device, impl.present_timer, nullptr);
     vkDestroyRenderPass(impl.device, impl.render_pass, nullptr);
     vkDestroySemaphore(impl.device, impl.image_available, nullptr);
     vkDestroySemaphore(impl.device, impl.render_finished, nullptr);
     vkDestroyFence(impl.device, impl.frame_fence, nullptr);
+    if (impl.gpu_timer != VK_NULL_HANDLE) vkDestroyQueryPool(impl.device, impl.gpu_timer, nullptr);
+    impl.destroy_upload_buffer();
     vkDestroyCommandPool(impl.device, impl.command_pool, nullptr);
     vkDestroySwapchainKHR(impl.device, impl.swapchain, nullptr);
     vkDestroyDevice(impl.device, nullptr);

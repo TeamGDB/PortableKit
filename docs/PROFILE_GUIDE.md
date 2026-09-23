@@ -47,11 +47,29 @@ Read the values off the player's own disc rather than recalling them:
 | `executable_sha256` | `sha256` of what the installer decrypts it to |
 | `decryption_tag` | The word at offset 0xD0 of `EBOOT.BIN` |
 | `decryption_key` | The published key table's entry for that tag |
+| `decryption_key_table` | Instead of `decryption_key`, for a tag that selects the older header layout: the published 0x90-byte table for that tag. Where the disc also carries an unencrypted `PSP_GAME/SYSDIR/BOOT.BIN`, the decrypted result can be compared with it byte for byte, which is how to check the table |
 | `load_base`, `guest_ram_bytes` | The ELF's program headers |
 | `overlay_slots` | The executable's section table, inside the load image's BSS |
 | `save_game_name`, `save_folders` | The paths the executable itself contains |
 
+`release_name` and `other_releases` are for the installer's refusal: the first names the supported release ("the Japanese release"), the second gives the sentence to add for a release a player is likely to have instead. Yakumo tells a player with the original PSP release, ULJM05800, that it is not the HD release.
+
 Two fields are hooks rather than values. `register_extra_hle` adds calls this game makes that the framework does not implement, or replaces one it gets wrong for this game. `patch_loaded_image` is for per-game fixes with no better home. Both may be null, and a profile that needs neither is the goal.
+
+Two more are for a port that goes further than the PSP did, and both are null until a game has earned them:
+
+- `camera`, a `CameraDriver`: drives the game's own camera from what the player asks of it. The framework turns every device — the second stick, camera keys, the mouse — into one request (`host/camera/camera_input.hpp`); the driver takes it at each flip and says whether the game must stop acting on the second stick meanwhile, whether the game is aiming, and how fast the current camera turns (`host/camera/camera_driver.hpp` has the framework's side and its defaults). Where a game keeps its camera is the game's, so the driver is too. Without one, Analog camera and its rows are not offered and what the devices ask of the camera is dropped. Yakumo's `host/camera/game_camera.cpp` is the example.
+- `view_aspect_frame`: called at each flip with the shape of the picture the game is drawn into, so a game that can widen its own view does. Without it the renderer does not offer Fill. Yakumo's `host/camera/game_aspect.cpp` is the example.
+
+`trigger_profiles` are for how a game is played rather than how it is run: what the triggers may press instead of L and R, each with the key settings.ini keeps and the label the menu shows. Yakumo offers Bows (R on L2 to hold the aim, △ on R2 to shoot) and Bowguns (R and ○). Without any, the triggers press L and R and the menu has no row for them.
+
+`player_name_label` and `default_player_name` are what the interface calls the name a game asks for and what it answers before the player sets one: "Player name" and "Player" unless a profile says otherwise. Yakumo says "Hunter name" and "Hunter".
+
+`glyph_cache` is for changing the font while a game runs. A game that caches the glyphs it has drawn keeps them until its atlas needs the cell, so a new font shows only in text it has not drawn yet. Where the game keeps that atlas, read off its own text code, lets the framework make it draw them again. Null for any game nobody has traced.
+
+`interpolation_thresholds` is for frame interpolation, which blends the game's frames and must not blend across a camera cut. The angles and fractions it uses to tell a cut from motion hold for any game; its distances are in the game's own world units, and the defaults were measured on Monster Hunter Portable 3rd. A game whose world is on a very different scale gives its own; one that does not, gets those defaults.
+
+A driver writes into the game's memory, so check the code it relies on before it writes anything — Yakumo compares every instruction and constant it depends on at start-up, from `patch_loaded_image`, and stays out, saying why, if one differs.
 
 ## Generated code stays out of the repository
 

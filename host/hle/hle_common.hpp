@@ -54,6 +54,10 @@ private:
 // Reads from an open guest file descriptor without moving its position.
 // Returns the number of bytes read; 0 when the descriptor is unknown.
 std::size_t read_open_file(std::uint32_t fd, std::uint64_t offset, std::uint8_t *output, std::size_t size);
+// Opens a guest path for reading, reads from it and closes it again, without
+// the game seeing a descriptor. Returns the number of bytes read, or the
+// negative error sceIoOpen would have returned.
+std::int64_t read_guest_file(const std::string &path, std::uint64_t offset, std::uint8_t *output, std::size_t size);
 
 // True when <prefix>_TRACE_SYNC is set: logs kernel object activity.
 [[nodiscard]] bool trace_sync();
@@ -69,6 +73,7 @@ void register_system(HleRegistrar &hle);
 void register_media(HleRegistrar &hle);
 void register_atrac(HleRegistrar &hle);
 void register_mpeg(HleRegistrar &hle);
+void register_psmfplayer(HleRegistrar &hle);
 void register_font(HleRegistrar &hle);
 void register_utility(HleRegistrar &hle, const std::filesystem::path &memory_stick);
 void register_savedata(HleRegistrar &hle, const std::filesystem::path &memory_stick);

@@ -9,6 +9,7 @@
 #include "ui/input_script.hpp"
 #include "ui/layer.hpp"
 #include "ui/save_screen.hpp"
+#include "ui/texture_pack_screen.hpp"
 #include "ui/text_input.hpp"
 #include "ui/widgets.hpp"
 
@@ -18,6 +19,7 @@
 #include "audio/audio_sink.hpp"
 #include "gpu/vulkan_renderer.hpp"
 #include "profile.hpp"
+#include "input/bindings.hpp"
 #include "install/installer.hpp"
 #include "install/user_data.hpp"
 #include "perf/frame_stats.hpp"
@@ -54,9 +56,9 @@ using Clock = std::chrono::steady_clock;
 // Seconds the "how to open the menu" hint stays up at start, until the menu
 // has been opened once.
 constexpr double kHintSeconds = 12.0;
-// The longest hunter name the game takes: its name buffer holds 12
-// characters and a terminator.
-constexpr std::size_t kHunterNameLength = 12u;
+// The longest fixed name the menu takes. A game's own request says what it
+// takes when it asks; this only bounds what is typed here.
+constexpr std::size_t kNameLength = 12u;
 // Resolutions the menu offers. <prefix>_INTERNAL_SCALE goes up to 8, but a
 // setting that runs out of video memory would fail on every start.
 constexpr int kMenuMaxInternalScale = 6;
@@ -126,6 +128,7 @@ private:
     bool back_{};  // the back button was pressed this frame
     Confirm confirm_{Confirm::None};
     bool confirm_opened_{};  // the confirmation was on screen last frame
+    std::optional<input::Action> binding_;  // waiting for a key for this control
 };
 
 bool Menu::frame() {
@@ -135,7 +138,9 @@ bool Menu::frame() {
         text_input_frame();
         return true;
     }
-    if (layer.take_menu_toggle()) return false;
+    // A texture pack copy keeps the menu open until it ends.
+    texture_pack_import_tick();
+    if (layer.take_menu_toggle() && !texture_pack_import_busy()) return false;
     const bool back = layer.take_back();
     // The pad's back button closes the menu too, once nothing is being edited.
     const ImGuiKey cancel = layer.confirm_south() ? ImGuiKey_GamepadFaceRight : ImGuiKey_GamepadFaceDown;
@@ -143,7 +148,8 @@ bool Menu::frame() {
     const bool start = ImGui::IsKeyPressed(ImGuiKey_GamepadStart, false);
     // Back closes the font list, or the save import and export, before it
     // closes the menu.
-    const bool font_list_was_open = (tab_ == 0 && font_list_open()) || (tab_ == 4 && save_screen_open());
+    const bool font_list_was_open = (tab_ == 0 && (font_list_open() || texture_pack_screen_open())) ||
+                                    (tab_ == 4 && save_screen_open());
     back_ = back || pad_back;
 
     begin_panel("##menu", portablekit::game().project_name, paused_ ? "Paused" : "Running", true);
@@ -179,6 +185,7 @@ bool Menu::frame() {
     } else if (!font_list_was_open && (((back || pad_back) && !was_editing_) || start)) {
         close_ = true;
     }
+    if (close_ && !quit_ && texture_pack_import_busy()) close_ = false;
     if (!confirm_dialog()) return false;
     was_editing_ = ImGui::IsAnyItemActive();
     return !close_;
@@ -186,16 +193,24 @@ bool Menu::frame() {
 
 void Menu::video() {
     if (font_list(back_)) return;
+    if (texture_pack_screen(back_)) return;
     settings::Settings &s = settings::current();
     section("Picture");
     {
         RowOptions o = options_for("video.internal_scale",
-                                   "The game is drawn at a multiple of the PSP's 480×272. Higher is sharper and "
-                                   "needs more from the GPU.");
-        const std::string value = "×" + std::to_string(s.internal_scale) + "   " + size_text(s.internal_scale);
+                                   "Auto draws the game at the window's own size and follows it (at most 1632 "
+                                   "lines). ×1 to ×6 draw 272 lines per step, 480×272 times the step unless the "
+                                   "aspect ratio is Fill. Higher is sharper and needs more from the GPU.");
+        const std::array<std::uint32_t, 2> size = renderer().target_size();
+        const std::string drawn = std::to_string(size[0]) + "×" + std::to_string(size[1]);
+        const std::string value =
+            (s.internal_scale == 0u ? std::string("Auto") : "×" + std::to_string(s.internal_scale)) + "   " + drawn;
         if (const int delta = choice_row("Resolution", value, o)) {
+            // Auto, then ×1 up to the menu's largest (or a larger one a
+            // variable once chose).
             const int limit = std::max<int>(kMenuMaxInternalScale, static_cast<int>(s.internal_scale));
-            s.internal_scale = static_cast<std::uint32_t>(cycle(static_cast<int>(s.internal_scale) - 1, delta, limit) + 1);
+            s.internal_scale =
+                static_cast<std::uint32_t>(cycle(static_cast<int>(s.internal_scale), delta, limit + 1));
             renderer().set_internal_scale(s.internal_scale);
             settings::save();
         }
@@ -224,12 +239,22 @@ void Menu::video() {
             settings::save();
         }
     }
-    if (choice_row("Aspect ratio", s.keep_aspect ? "Original" : "Stretch",
-                   options_for("video.keep_aspect", "Original keeps the PSP's shape with black bars at the sides or "
-                                                    "top; Stretch fills the window."))) {
-        s.keep_aspect = !s.keep_aspect;
-        renderer().set_keep_aspect(s.keep_aspect);
-        settings::save();
+    {
+        static const char *const kAspects[] = {"Original", "Stretch", "Fill"};
+        // Fill is offered only to a game that can widen its own view.
+        const bool fill = gpu::VulkanRenderer::supports_fill();
+        const int current = static_cast<int>(gpu::VulkanRenderer::usable_aspect(s.aspect));
+        const std::string description =
+            std::string("Original keeps the PSP's shape with black bars at the sides or top. Stretch fills the "
+                        "window by stretching the picture.") +
+            (fill ? " Fill widens (or narrows) the game's view to the window's shape, keeping its height, and "
+                    "keeps the interface in the PSP's proportions."
+                  : "");
+        if (const int delta = choice_row("Aspect ratio", kAspects[current], options_for("video.aspect", description))) {
+            s.aspect = static_cast<settings::Aspect>(cycle(current, delta, fill ? 3 : 2));
+            renderer().set_aspect(s.aspect);
+            settings::save();
+        }
     }
     if (choice_row("Scaling filter", s.sharp_screen ? "Sharp" : "Smooth",
                    options_for("video.sharp_screen", "How the finished picture is scaled to the window: smooth "
@@ -245,6 +270,28 @@ void Menu::video() {
         renderer().set_sharp_textures(s.sharp_textures);
         settings::save();
     }
+    {
+        RowOptions o = options_for("video.texture_pack",
+                                   std::string("Draws an HD texture pack in PPSSPP's format from textures/") +
+                                       portablekit::game().disc_id + " in the data folder instead of the game's textures.");
+        // The footer shows the note under the description: what is loaded,
+        // or where the pack was looked for.
+        if (o.note.empty()) {
+            const std::string status = renderer().texture_pack_status();
+            o.note = status == "Not installed" ? "No pack in " + renderer().texture_pack_folder() : status;
+            // A pack used in place that has moved: its path is on the "Pack
+            // used from" row below; the footer has room for its name only.
+            if (status.rfind("Folder missing: ", 0) == 0)
+                o.note = "Pack folder missing: " +
+                         install::path_to_utf8(install::path_from_utf8(status.substr(16)).filename());
+        }
+        if (choice_row("Texture pack", s.texture_pack ? "On" : "Off", o)) {
+            s.texture_pack = !s.texture_pack;
+            renderer().set_texture_pack(s.texture_pack);
+            settings::save();
+        }
+    }
+    texture_pack_rows();
     section("Timing");
     {
         struct Mode {
@@ -265,6 +312,51 @@ void Menu::video() {
                                                   "each frame at once; the game's speed is the same either way."))) {
             s.present_mode = modes[static_cast<std::size_t>(cycle(current, delta, static_cast<int>(modes.size())))].mode;
             renderer().set_present_mode(s.present_mode);
+            settings::save();
+        }
+    }
+    {
+        static const char *const kRates[] = {"30", "45", "60", "90", "120", "Match display"};
+        RowOptions o = options_for("video.frame_rate",
+                                   "Frames between the game's 30 a second, blending its movement. Steps down by "
+                                   "itself rather than slow the game.");
+        if (s.unthrottled && !o.disabled) {
+            o.disabled = true;
+            o.note = "Game speed is Unlimited";
+        }
+        const int current = static_cast<int>(s.frame_rate);
+        std::string value = kRates[current];
+        if (s.frame_rate == settings::FrameRate::Display && renderer().display_refresh() > 0.0f)
+            value += "  " + std::to_string(static_cast<int>(std::lround(renderer().display_refresh()))) + " Hz";
+        if (s.frame_rate != settings::FrameRate::Fps30 && !o.disabled) {
+            // Vsync caps the rate at the display's, and the renderer steps
+            // down rather than slow the game.
+            const double now = renderer().frame_rate_now();
+            const double chosen = s.frame_rate == settings::FrameRate::Display
+                                      ? static_cast<double>(renderer().display_refresh())
+                                      : std::stod(kRates[current]);
+            if (now + 0.5 < chosen) {
+                value += " (running at " + std::to_string(static_cast<int>(std::lround(now))) + ")";
+                o.description = s.present_mode == settings::PresentMode::Fifo && renderer().display_refresh() > 0.0f &&
+                                        now + 0.5 >= static_cast<double>(renderer().display_refresh())
+                                    ? "With Vsync on, no faster than the display refreshes."
+                                    : "Lowered to keep the game at full speed; it tries the chosen rate again later.";
+            }
+        }
+        if (const int delta = choice_row("Frame rate", value, o)) {
+            s.frame_rate = static_cast<settings::FrameRate>(cycle(current, delta, 6));
+            renderer().set_frame_rate(s.frame_rate);
+            settings::save();
+        }
+    }
+    {
+        RowOptions o = options_for("video.frame_rate_auto",
+                                   "On lowers the frame rate by itself when presenting that often would slow the "
+                                   "game. Off keeps the chosen rate, and the game may then run below full speed.");
+        if (s.unthrottled || s.frame_rate == settings::FrameRate::Fps30) o.disabled = true;
+        if (choice_row("Lower when behind", s.frame_rate_auto ? "On" : "Off", o)) {
+            s.frame_rate_auto = !s.frame_rate_auto;
+            renderer().set_frame_rate_auto(s.frame_rate_auto);
             settings::save();
         }
     }
@@ -296,19 +388,25 @@ void Menu::video() {
         restore("video.internal_scale", s.internal_scale, d.internal_scale);
         restore("video.fullscreen", s.fullscreen, d.fullscreen);
         restore("video.window_scale", s.window_scale, d.window_scale);
-        restore("video.keep_aspect", s.keep_aspect, d.keep_aspect);
+        restore("video.aspect", s.aspect, d.aspect);
         restore("video.sharp_screen", s.sharp_screen, d.sharp_screen);
         restore("video.sharp_textures", s.sharp_textures, d.sharp_textures);
+        restore("video.texture_pack", s.texture_pack, d.texture_pack);
         restore("video.present_mode", s.present_mode, d.present_mode);
+        restore("video.frame_rate", s.frame_rate, d.frame_rate);
+        restore("video.frame_rate_auto", s.frame_rate_auto, d.frame_rate_auto);
         restore("video.unthrottled", s.unthrottled, d.unthrottled);
         restore("video.performance", s.perf, d.perf);
         renderer().set_internal_scale(s.internal_scale);
         renderer().set_fullscreen(s.fullscreen);
         renderer().set_window_scale(s.window_scale);
-        renderer().set_keep_aspect(s.keep_aspect);
+        renderer().set_aspect(s.aspect);
         renderer().set_sharp_screen(s.sharp_screen);
         renderer().set_sharp_textures(s.sharp_textures);
+        renderer().set_texture_pack(s.texture_pack);
         renderer().set_present_mode(s.present_mode);
+        renderer().set_frame_rate(s.frame_rate);
+        renderer().set_frame_rate_auto(s.frame_rate_auto);
         renderer().set_perf_overlay(perf::options().overlay);
         settings::save();
     }
@@ -451,7 +549,7 @@ void Menu::controls() {
     {
         SDL_Gamepad *pad = renderer().gamepad();
         const char *name = pad != nullptr ? SDL_GetGamepadName(pad) : nullptr;
-        info_row("Connected", pad == nullptr ? "No gamepad; the keyboard drives the game"
+        info_row("Connected", pad == nullptr ? "No gamepad; the keyboard and mouse drive the game"
                                              : (name != nullptr ? name : "Gamepad"));
     }
     if (choice_row("Confirm button", s.confirm_south ? "Bottom (Western)" : "Right, ○ (Japanese)",
@@ -462,16 +560,30 @@ void Menu::controls() {
     }
     int dead_zone = static_cast<int>(std::lround(s.dead_zone * 100.0f));
     if (slider_row("Stick dead zone", dead_zone, 0, 50, 1, "%d%%",
-                   options_for("input.dead_zone", "How far the left stick moves before the hunter does. Raise it if "
-                                                  "the hunter drifts."))) {
+                   options_for("input.dead_zone", "How far the left stick moves before the game sees it. Raise it if "
+                                                  "the character drifts."))) {
         s.dead_zone = static_cast<float>(dead_zone) / 100.0f;
         settings::save();
     }
     int trigger = static_cast<int>(std::lround(s.trigger * 100.0f));
     if (slider_row("Trigger point", trigger, 5, 100, 5, "%d%%",
-                   options_for("input.trigger", "How far LT/RT (L2/R2) travel before they press L/R."))) {
+                   options_for("input.trigger", "How far LT/RT (L2/R2) travel before they press anything."))) {
         s.trigger = static_cast<float>(trigger) / 100.0f;
         settings::save();
+    }
+    // Only a game with trigger profiles of its own has anything to choose.
+    if (const std::span<const TriggerProfile> profiles = portablekit::game().trigger_profiles; !profiles.empty()) {
+        const int count = static_cast<int>(profiles.size()) + 1;
+        const int current = std::min(static_cast<int>(s.trigger_profile), count - 1);
+        std::string description = "What LT/RT (L2/R2) press. Standard: L and R, like the shoulders.";
+        if (const char *note = portablekit::game().trigger_profiles_note; note != nullptr)
+            description += std::string(" ") + note;
+        if (const int delta = choice_row("Trigger profile",
+                                         current == 0 ? "Standard (L / R)" : profiles[current - 1].label,
+                                         options_for("input.trigger_profile", description))) {
+            s.trigger_profile = static_cast<std::uint32_t>(cycle(current, delta, count));
+            settings::save();
+        }
     }
     {
         static const char *const kModes[] = {"Camera", "D-pad", "Off"};
@@ -485,6 +597,47 @@ void Menu::controls() {
         }
     }
     const bool camera = s.right_stick == settings::RightStick::Camera;
+    // Only a game with a camera driver can be turned by how far the stick is
+    // pushed; for any other the rows would change nothing.
+    if (const CameraDriver *driver = portablekit::game().camera; driver != nullptr) {
+        RowOptions o = options_for("input.analog_camera",
+                                   "Turn and tilt the quest camera as far as the stick is pushed, instead of the "
+                                   "game's fixed-speed turn and vertical presets. Release holds the angle; the D-pad "
+                                   "and recentre return to the game's camera. Off is the game's own camera, untouched.");
+        if (!camera && !o.disabled) {
+            o.disabled = true;
+            o.note = "Right stick is not the camera";
+        }
+        if (toggle_row("Analog camera", s.analog_camera, o)) {
+            s.analog_camera = !s.analog_camera;
+            settings::save();
+        }
+        o = options_for("input.camera_speed", "How fast the camera turns at full deflection, in degrees a second.");
+        if (!s.analog_camera && !o.disabled) {
+            o.disabled = true;
+            o.note = "Analog camera is off";
+        }
+        int speed = static_cast<int>(s.camera_speed);
+        if (slider_row("Camera speed", speed, 20, 720, 10, "%d deg/s", o)) {
+            s.camera_speed = static_cast<float>(speed);
+            settings::save();
+        }
+        // And only a driver that aims has an aim to set the speed of.
+        if (driver->aim_boost != nullptr) {
+            o = options_for("input.aim_speed", "How fast a bow or a bowgun aims at full deflection, in degrees a "
+                                               "second. The game's own aim moves at about 100 and only past half "
+                                               "the stick's travel.");
+            if (!s.analog_camera && !o.disabled) {
+                o.disabled = true;
+                o.note = "Analog camera is off";
+            }
+            int aim = static_cast<int>(s.aim_speed);
+            if (slider_row("Aim speed", aim, 10, 360, 5, "%d deg/s", o)) {
+                s.aim_speed = static_cast<float>(aim);
+                settings::save();
+            }
+        }
+    }
     {
         RowOptions o = options_for("input.invert_camera_x", "Turn the camera the other way left and right.");
         if (!camera && !o.disabled) {
@@ -519,7 +672,7 @@ void Menu::controls() {
         }
     }
 
-    section("Hunter name");
+    section(game().player_name_label);
     {
         const bool keyboard = s.name_entry == settings::NameEntry::Keyboard;
         if (choice_row("When the game asks for a name", keyboard ? "On-screen keyboard" : "Use the name below",
@@ -530,28 +683,91 @@ void Menu::controls() {
             settings::save();
         }
     }
-    if (text_row("name", "Hunter name", s.name, kHunterNameLength, false, hunter_name_character,
+    if (text_row("name", game().player_name_label, s.name, kNameLength, false, name_character,
                  options_for("input.name", "Given when the game asks for a name and the on-screen keyboard is "
                                            "off, and to other players when the network nickname is empty. "
                                            "Letters, digits, spaces and simple punctuation.")))
         settings::save();
 
-    section("Keyboard");
-    static const std::array<std::pair<const char *, const char *>, 10> kKeys{{
-        {"Arrow keys", "D-pad"},
-        {"I  J  K  L", "Analog stick"},
-        {"X", "○  (confirm)"},
-        {"Z", "×  (back)"},
-        {"A", "□"},
-        {"S", "△"},
-        {"Q  /  W", "L  /  R"},
-        {"Enter", "START"},
-        {"Right Shift, Backspace", "SELECT"},
-        {"Esc", "This menu"},
-    }};
-    for (const auto &[key, button] : kKeys) info_row(key, button);
+    section("Keyboard and mouse");
+    {
+        RowOptions o = options_for("input.mouse",
+                                   "While the game runs, the window takes the pointer: moving the mouse turns the "
+                                   "camera and its buttons press what they are bound to. Esc opens this menu and "
+                                   "gives the pointer back.");
+        if (toggle_row("Mouse", s.mouse, o)) {
+            s.mouse = !s.mouse;
+            settings::save();
+        }
+        o = options_for("input.mouse_sensitivity",
+                        "Degrees the camera turns for each count of mouse motion. While a bow or a bowgun aims, "
+                        "the mouse is slowed as Aim speed is to Camera speed.");
+        if (!s.mouse && !o.disabled) {
+            o.disabled = true;
+            o.note = "Mouse is off";
+        }
+        int sensitivity = static_cast<int>(std::lround(s.mouse_sensitivity * 100.0f));
+        if (slider_row("Mouse sensitivity", sensitivity, 1, 99, 1, "0.%02d deg", o)) {
+            s.mouse_sensitivity = static_cast<float>(sensitivity) / 100.0f;
+            settings::save();
+        }
+        o = options_for("input.invert_mouse_x", "Turn the camera the other way when the mouse moves sideways.");
+        if (!s.mouse && !o.disabled) {
+            o.disabled = true;
+            o.note = "Mouse is off";
+        }
+        if (toggle_row("Invert mouse horizontally", s.invert_mouse_x, o)) {
+            s.invert_mouse_x = !s.invert_mouse_x;
+            settings::save();
+        }
+        o = options_for("input.invert_mouse_y", "Push the mouse forward to look down instead of up.");
+        if (!s.mouse && !o.disabled) {
+            o.disabled = true;
+            o.note = "Mouse is off";
+        }
+        if (toggle_row("Invert mouse vertically", s.invert_mouse_y, o)) {
+            s.invert_mouse_y = !s.invert_mouse_y;
+            settings::save();
+        }
+    }
+    // One row per control: activate it, then press a key or a mouse button.
+    Layer &layer = Layer::get();
+    if (binding_) {
+        if (const auto pressed = layer.take_captured_binding()) {
+            if (*pressed != input::kNone) {
+                input::assign(s.bindings, *binding_, *pressed);
+                settings::save();
+            }
+            binding_.reset();
+        } else if (!layer.capturing_binding()) {
+            binding_.reset();
+        }
+    }
+    for (std::size_t i = 0; i < input::kActions; ++i) {
+        const auto action = static_cast<input::Action>(i);
+        std::string value = input::format(s.bindings[i]);
+        if (binding_ == action) value = "Press a key or a mouse button";
+        else if (value.empty()) value = "None";
+        const RowOptions o{false, {},
+                           "Press a key or a mouse button to add it, or one it has already to remove it; Esc "
+                           "cancels. A key taken from another control leaves that one."};
+        if (value_row(input::info(action).label, value, o) && !binding_) {
+            binding_ = action;
+            layer.begin_binding_capture();
+        }
+    }
+    info_row("Esc", "This menu");
+    info_row("F3", "Performance overlay");
+    if (button_row("Use the classic keyboard layout",
+                   {false, {}, "The keys of earlier versions, for play without a mouse: I J K L move, Z X A S are "
+                               "the face buttons, Q and W are L and R."})) {
+        s.bindings = input::classic_bindings();
+        settings::save();
+    }
     ImGui::Dummy({0.0f, font_gap()});
-    if (button_row("Restore control defaults", {false, {}, std::string("Every gamepad and name setting back to how ") + portablekit::game().project_name + " ships."})) {
+    if (button_row("Restore control defaults",
+                   {false, {}, std::string("Every gamepad, keyboard, mouse and name setting back to how ") +
+                                   portablekit::game().project_name + " ships."})) {
         const settings::Settings &d = settings::defaults();
         const auto restore = [&](const char *key, auto &value, const auto &fallback) {
             if (settings::overridden_by(key).empty()) value = fallback;
@@ -559,12 +775,21 @@ void Menu::controls() {
         restore("input.confirm", s.confirm_south, d.confirm_south);
         restore("input.dead_zone", s.dead_zone, d.dead_zone);
         restore("input.trigger", s.trigger, d.trigger);
+        restore("input.trigger_profile", s.trigger_profile, d.trigger_profile);
         restore("input.right_stick", s.right_stick, d.right_stick);
         restore("input.right_stick_zone", s.right_stick_zone, d.right_stick_zone);
+        restore("input.analog_camera", s.analog_camera, d.analog_camera);
+        restore("input.camera_speed", s.camera_speed, d.camera_speed);
+        restore("input.aim_speed", s.aim_speed, d.aim_speed);
         restore("input.invert_camera_x", s.invert_camera_x, d.invert_camera_x);
         restore("input.invert_camera_y", s.invert_camera_y, d.invert_camera_y);
         restore("input.name_entry", s.name_entry, d.name_entry);
         restore("input.name", s.name, d.name);
+        restore("input.mouse", s.mouse, d.mouse);
+        restore("input.mouse_sensitivity", s.mouse_sensitivity, d.mouse_sensitivity);
+        restore("input.invert_mouse_x", s.invert_mouse_x, d.invert_mouse_x);
+        restore("input.invert_mouse_y", s.invert_mouse_y, d.invert_mouse_y);
+        s.bindings = d.bindings;
         settings::save();
     }
 }
@@ -760,7 +985,7 @@ void Menu::network() {
         adhoc_apply_settings();
     }
     if (text_row("nickname", "Nickname", s.adhoc_nickname, 32u, true, printable_ascii,
-                 options_for("network.nickname", "The name other players and the server see. Empty: the hunter name. "
+                 options_for("network.nickname", "The name other players and the server see. Empty: the player name. "
                                                  "Applies the next time the game goes on line."))) {
         settings::save();
         adhoc_apply_settings();

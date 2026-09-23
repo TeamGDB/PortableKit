@@ -3,9 +3,13 @@
 #include "../profile.hpp"
 #include "ge_state.hpp"
 
+#include <array>
+#include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -18,7 +22,7 @@ struct ImDrawData;
 
 namespace portablekit::gpu {
 
-// PSP pad state gathered from the keyboard and the gamepad.
+// PSP pad state gathered from the keyboard, the mouse's buttons and the gamepad.
 struct PadState {
     std::uint32_t buttons{};
     std::uint8_t analog_x{0x80u};
@@ -30,13 +34,41 @@ struct PadState {
     std::uint8_t right_y{0x80u};
 };
 
+// The mouse the input script's events come from. With scripted input on,
+// only these reach the game, so a person moving the real pointer over the
+// window does not disturb a scripted run.
+inline constexpr std::uint32_t kScriptedMouse = 0xFFFFFF00u;
+
+// Relative mouse motion, in counts, while the pointer is captured for the game.
+struct MouseMotion {
+    float x{};
+    float y{};
+};
+
+// The camera the game itself set, read back from the view matrix it uploads.
+// Only filled while <prefix>_TRACE_CAMERA or <prefix>_FIND_CAMERA is on.
+struct CameraReading {
+    bool valid{};
+    float yaw{};    // degrees, from the direction the camera looks along
+    float pitch{};  // degrees
+    float turn{};   // degrees of yaw since the previous traced frame
+    std::array<float, 3> position{};
+    // The matrix itself, in the layout the game holds it in: the GE's twelve
+    // uploaded floats expanded to a 4x4, which is byte for byte the matrix the
+    // game passed to the GE.
+    std::array<float, 16> view{};
+};
+
 struct RendererConfig {
     std::string title{portablekit::game().app_name};
 };
 
 // Vulkan backend for the GE. Draw calls are rendered into an offscreen target
-// the size of the PSP framebuffer times the internal scale, which is blitted to
-// the window once per guest frame.
+// per guest framebuffer, which is blitted to the window once per guest frame.
+// A target holds the game's 480x272 screen at a multiple of that size, or,
+// under Fill, at the window's shape: then each PSP pixel is wider (or taller)
+// than square, the game draws a view of that shape (GameProfile::view_aspect_frame),
+// and the 2D interface is drawn at its own proportions.
 class VulkanRenderer {
 public:
     VulkanRenderer();
@@ -52,6 +84,18 @@ public:
     // Pumps window events; returns false once the window has been closed.
     bool pump_events();
     [[nodiscard]] PadState pad() const noexcept;
+    // Reads the keyboard, mouse buttons and gamepad again for pad() without
+    // handling window events (issue #8): the game reads its pad each frame,
+    // and taking the state then instead of at the last flip saves up to a
+    // game frame of latency.
+    void sample_pad();
+    // The mouse's motion gathered by the pumps since the last call. Only
+    // motion made while the pointer was captured for the game counts.
+    [[nodiscard]] MouseMotion take_mouse_motion() noexcept;
+    // The pointer is captured for the game: hidden, and its motion and
+    // buttons go to the game. That is while the mouse setting is on, the game
+    // has input, no interface screen is up and the window has focus.
+    [[nodiscard]] bool mouse_captured() const noexcept;
 
     [[nodiscard]] bool quit_requested() const noexcept;
 
@@ -73,8 +117,29 @@ public:
     void read_back_framebuffer(std::uint32_t source, GuestMemory &memory);
     // Ends the frame and shows the target the guest just flipped to. Draws go to
     // a separate offscreen target per guest framebuffer address, so only the
-    // displayed one reaches the window.
-    void present(std::uint32_t display_address);
+    // displayed one reaches the window. `moment` is the real time the flip's
+    // emulated time stands for (Kernel::real_time_of). With frame
+    // interpolation the frame is shown by the presents that follow, between
+    // this flip and the next, which count themselves (perf::count_present);
+    // returns whether the flip itself presented the frame.
+    bool present(std::uint32_t display_address,
+                 std::optional<std::chrono::steady_clock::time_point> moment = std::nullopt);
+    // Frame interpolation (Video > Frame rate; gpu/frame_pacing.hpp). The
+    // kernel calls present_due() while the game's code runs, to make a
+    // present that has fallen due, and present_until() while it waits for
+    // real time, to make those due before `wake`, sleeping up to each.
+    void present_due();
+    void present_until(std::chrono::steady_clock::time_point wake);
+    // Drops the presents scheduled, as the game pauses.
+    void pause_interpolation();
+    void set_frame_rate(settings::FrameRate rate);
+    // On, the frame rate steps down by itself rather than slow the game.
+    void set_frame_rate_auto(bool automatic);
+    // The refresh rate of the window's display as SDL reports it, 0 when unknown.
+    [[nodiscard]] float display_refresh() const noexcept;
+    // The rate frames are presented at now: the setting's, or a slower one
+    // the renderer stepped down to so that the game keeps its speed.
+    [[nodiscard]] double frame_rate_now() const noexcept;
     // Shows a frame the game wrote to memory itself instead of drawing it
     // with the GE, as the movie player does: the next present of
     // `display_address` shows these `width` x `height` pixels (R, G, B, A in
@@ -91,16 +156,46 @@ public:
     void capture_window(const std::string &path);
 
     // Display settings, applied at once. The initial values come from
-    // settings::current() in initialize().
+    // settings::current() in initialize(). A scale of 0 follows the window's
+    // size in pixels, including every later change of it.
     void set_internal_scale(std::uint32_t scale);
     void set_window_scale(std::uint32_t scale);
     void set_fullscreen(bool fullscreen);
     void set_present_mode(settings::PresentMode mode);
     [[nodiscard]] bool supports_present_mode(settings::PresentMode mode) const;
-    void set_keep_aspect(bool keep_aspect);
+    void set_aspect(settings::Aspect aspect);
+    // Fill needs a game that can widen its own view (GameProfile::
+    // view_aspect_frame); for any other it is drawn as Original.
+    [[nodiscard]] static bool supports_fill() noexcept;
+    [[nodiscard]] static settings::Aspect usable_aspect(settings::Aspect aspect) noexcept;
     void set_sharp_screen(bool sharp);
     void set_sharp_textures(bool sharp);
+    // Draws an installed HD texture pack's images instead of the game's own
+    // textures (texture_pack.hpp). Takes effect from the next frame; off
+    // draws exactly what no pack would.
+    void set_texture_pack(bool enabled);
+    // For the menu: "Off", "Not installed", or how many textures the pack has
+    // and how many of them are on the GPU.
+    [[nodiscard]] std::string texture_pack_status() const;
+    // Opens the pack again from the next frame, e.g. after an import.
+    void reload_texture_pack();
+    // While held, no pack is open, so an import can move its folder; true
+    // from texture_pack_held() once the pack has been closed.
+    void hold_texture_pack(bool hold);
+    [[nodiscard]] bool texture_pack_held() const;
+    // The folder the pack is read from (texture_pack_import.hpp): the
+    // installed one, textures/<disc id> in the data directory, or the one the
+    // player uses in place or <prefix>_TEXTURE_PACK names.
+    [[nodiscard]] std::string texture_pack_folder() const;
+    // textures/ in the data directory.
+    [[nodiscard]] static std::filesystem::path textures_root();
     void set_perf_overlay(bool visible);
+
+    // The shape the game's 3D view should have, width over height: the
+    // target's under Fill, the PSP's 480/272 otherwise.
+    [[nodiscard]] float game_aspect() const noexcept;
+    // The size the game is drawn at, in pixels.
+    [[nodiscard]] std::array<std::uint32_t, 2> target_size() const noexcept;
 
     [[nodiscard]] SDL_Window *window() const noexcept;
     [[nodiscard]] std::string device_name() const;
@@ -114,6 +209,15 @@ public:
     // buttons still held until they are released, so the button that closed
     // a menu does not reach the game.
     void set_game_input(bool enabled);
+    // An interface screen is up (host/ui), even one without the game behind
+    // it such as the setup: the pointer stays free for it.
+    void set_pointer_free(bool free);
+    // The input script (<prefix>_INPUT_SCRIPT): keys it holds reach the game as
+    // well as the interface, and with scripted input on, the pointer counts as
+    // captured without the window having focus and without taking the real
+    // pointer, so scripted mouse steps reach the game from the background.
+    void set_scripted_key(int position, bool down);
+    void set_scripted_input(bool scripted);
     void request_quit() noexcept;
     // While held, the window keeps showing the frame on screen when hold
     // began instead of the frames the game flips to. The game blanks its
@@ -136,6 +240,7 @@ public:
 
     [[nodiscard]] std::uint64_t frames_presented() const noexcept;
     [[nodiscard]] std::uint64_t draws_submitted() const noexcept;
+    [[nodiscard]] CameraReading camera() const noexcept;
 
 private:
     struct Impl;

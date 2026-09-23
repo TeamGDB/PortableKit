@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Turn an overlay dump into a shared library the port loads at run time.
 
-    add_overlay.py [-j N] [--no-build] <build_dir> <overlay.bin> <base_address>
+    add_overlay.py [-j N] [--no-build] [--profile-dir DIR] <build_dir> <overlay.bin> <base_address>
 
 Steps: identify the dump from its header (name, sizes, FNV-1a hash of the header
 and the code after it), wrap it in a minimal ELF, run psp_recomp with a
 per-overlay symbol prefix, then build the one CMake target for that overlay with
 N parallel jobs (default 2). The executable is not relinked. --no-build stops
 after psp_recomp and prints the target name, so a caller can build many
-overlays in one Ninja run.
+overlays in one Ninja run. The corpus goes into <profile>/overlays/, where
+portablekit_add_game() looks for it; --profile-dir names the profile, which a
+port whose repository holds PortableKit as a submodule must pass.
 """
 
 import argparse
@@ -18,8 +20,10 @@ import struct
 import subprocess
 import sys
 
-PROFILE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OVERLAY_DIR = os.path.join(PROFILE_DIR, "overlays")
+TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+# Where the corpus goes when no profile is named: next to these tools, as it
+# was when they lived inside the one profile.
+DEFAULT_PROFILE_DIR = os.path.dirname(TOOLS_DIR)
 HEADER_BYTES = 64
 
 
@@ -42,11 +46,23 @@ def parse_header(data, base):
     return name, HEADER_BYTES + code_size + data_size, code_size
 
 
+def find_recompiler(build_dir):
+    """psp_recomp is at the top of a framework build and in portablekit/ when
+    a port's build adds the framework as a subdirectory."""
+    for candidate in (os.path.join(build_dir, "psp_recomp"), os.path.join(build_dir, "portablekit", "psp_recomp")):
+        for path in (candidate, candidate + ".exe"):
+            if os.path.isfile(path):
+                return path
+    raise SystemExit(f"no psp_recomp in {build_dir}; build the psp_recomp target first")
+
+
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0],
                                      usage=__doc__.strip().splitlines()[2].strip())
     parser.add_argument("-j", "--jobs", type=int, default=2, help="parallel build jobs (default 2)")
     parser.add_argument("--no-build", action="store_true", help="recompile only; print the target")
+    parser.add_argument("--profile-dir", default=DEFAULT_PROFILE_DIR,
+                        help="the profile whose overlays/ receives the corpus")
     parser.add_argument("build_dir")
     parser.add_argument("dump_path")
     parser.add_argument("base_text")
@@ -59,13 +75,13 @@ def main(argv):
     # data section of a loaded overlay.
     digest = fnv1a64(data[:HEADER_BYTES + code_size])
     prefix = f"ovl{base:08X}_{name}_{digest:016X}"
-    target = os.path.join(OVERLAY_DIR, prefix)
+    target = os.path.join(os.path.abspath(options.profile_dir), "overlays", prefix)
     os.makedirs(target, exist_ok=True)
 
     elf_path = os.path.join(target, "overlay.elf")
-    subprocess.run([sys.executable, os.path.join(PROFILE_DIR, "tools", "wrap_overlay.py"),
+    subprocess.run([sys.executable, os.path.join(TOOLS_DIR, "wrap_overlay.py"),
                     dump_path, base_text, elf_path], check=True)
-    subprocess.run([os.path.join(build_dir, "psp_recomp"), elf_path, "--auto", target,
+    subprocess.run([find_recompiler(build_dir), elf_path, "--auto", target,
                     base_text, "--prefix", prefix], check=True)
     # The metadata the host identifies the corpus by. CMake reads it to configure
     # the library entry point. The build does not need an explicit reconfigure:

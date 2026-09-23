@@ -92,12 +92,12 @@ ImportResult import_save(const SaveCheck &save, const std::filesystem::path &mem
 struct ExportResult {
     bool ok{};
     std::string error;
-    std::filesystem::path folder;       // <target>/MHP3rd saves <time>
+    std::filesystem::path folder;       // <target>/<project name> saves <time>
     std::vector<std::string> exported;  // folder names
 };
 
 // Copies this game's save folders from the memory stick to
-// <target>/MHP3rd saves <time>/PSP/SAVEDATA/, the layout of a memory stick,
+// <target>/<project name> saves <time>/PSP/SAVEDATA/, the layout of a memory stick,
 // so the PSP folder can be copied onto one as it is.
 ExportResult export_saves(const std::filesystem::path &memory_stick, const std::filesystem::path &target,
                           std::chrono::system_clock::time_point time);

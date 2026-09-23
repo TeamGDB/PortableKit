@@ -401,7 +401,7 @@ ExportResult export_saves(const fs::path &memory_stick, const fs::path &target,
         result.error = "The folder " + text(target) + " does not exist.";
         return result;
     }
-    result.folder = unused_path(target, "MHP3rd saves " + timestamp_for_path(time));
+    result.folder = unused_path(target, std::string(game().project_name) + " saves " + timestamp_for_path(time));
     const fs::path savedata = result.folder / "PSP" / "SAVEDATA";
     for (const std::string &name : names) {
         std::string error;

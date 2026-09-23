@@ -58,6 +58,12 @@ struct TextureState {
     std::uint32_t clut_shift{};
     std::uint32_t clut_mask{};
     std::uint32_t clut_offset{};
+    // For texture packs, which hash the palette as it was loaded: the CLUT
+    // format command word as the GE received it (command byte included), the
+    // bytes the last CLUT load read, and the most any load has read.
+    std::uint32_t clut_format_word{0xC5000000u};
+    std::uint32_t clut_load_bytes{};
+    std::uint32_t clut_max_bytes{};
     std::uint32_t function{};        // TFX: modulate/decal/blend/replace/add
     bool alpha_from_texture{};       // TCC
     std::uint32_t min_filter{};
@@ -166,6 +172,11 @@ struct DrawCall {
     bool clear_mode{};                   // CLEARMODE is active for this draw
     std::uint32_t clear_flags{};         // CLEARMODE bits 8..10: color, alpha/stencil, depth
     std::uint32_t vertex_type{};
+    // Where the vertices and indices were read from and how many the prim
+    // consumed: what recognises the same draw in the next frame.
+    std::uint32_t vertex_address{};
+    std::uint32_t index_address{};
+    std::uint32_t primitive_count{};
     std::uint32_t material_color{0xFFFFFFFFu};
     bool lighting_enabled{};
     bool has_vertex_color{};             // the vertex type carries a colour
@@ -219,6 +230,8 @@ public:
 
     [[nodiscard]] const RenderTarget &target() const noexcept { return target_; }
     [[nodiscard]] std::uint64_t draw_count() const noexcept { return draw_count_; }
+    // The display-list address the last view matrix was uploaded from.
+    [[nodiscard]] std::uint32_t view_matrix_source() const noexcept { return view_matrix_source_; }
     [[nodiscard]] std::uint64_t vertex_count() const noexcept { return vertex_count_; }
     [[nodiscard]] std::uint64_t unhandled_command_count() const noexcept { return unhandled_commands_; }
     // Every GE command the state machine ignored, with how often and the first
@@ -236,7 +249,11 @@ private:
     void handle_command(const GuestMemory &memory, std::uint32_t command, std::uint32_t data);
     void trace_unhandled(std::uint32_t command, std::uint32_t data);
     void draw_primitive(const GuestMemory &memory, std::uint32_t data);
-    void draw_bezier_or_spline(std::uint32_t command);
+    // Copies the state every draw is made with into call_.
+    void fill_draw_state(DrawCall &call) const;
+    // BEZIER and SPLINE: tessellates the surface the control points describe
+    // and draws it as triangles (or lines or points, as PATCHPRIMITIVE says).
+    void draw_patch(const GuestMemory &memory, std::uint32_t command, std::uint32_t data);
 
     std::array<std::uint32_t, 256> registers_{};
     RenderTarget target_{};
@@ -269,6 +286,7 @@ private:
     // single counter lets interleaved uploads scribble over each other.
     std::uint32_t world_write_index_{};
     std::uint32_t view_write_index_{};
+    std::uint32_t view_matrix_source_{};
     std::uint32_t projection_write_index_{};
     std::uint32_t texture_write_index_{};
     std::uint32_t bone_write_index_{};
