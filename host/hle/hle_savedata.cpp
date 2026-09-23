@@ -21,6 +21,9 @@
 #include "psprecomp/common.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <ctime>
+#include <filesystem>
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -57,6 +60,9 @@ constexpr std::uint32_t kMsData = 0x5D4u;
 constexpr std::uint32_t kUtilityData = 0x5D8u;
 constexpr std::uint32_t kKey = 0x5DCu;  // char[16], firmware 2.00 and later
 constexpr std::uint32_t kSecureVersion = 0x5ECu;
+// LIST: a pointer to {maxCount, resultCount, entries}. Read off a game's own
+// request (the only pointer in the block past the names), not recalled.
+constexpr std::uint32_t kIdList = 0x5F4u;
 constexpr std::uint32_t kMinimumSizeWithKey = 0x5ECu;
 } // namespace param
 
@@ -343,6 +349,77 @@ std::optional<std::string> pick_from_list(psprecomp::GuestMemory &memory, std::u
     return std::nullopt;
 }
 
+// A save name pattern as LIST takes it: '?' stands for any one character.
+bool name_matches(std::string_view pattern, std::string_view name) {
+    if (pattern.size() != name.size()) return false;
+    for (std::size_t i = 0; i < name.size(); ++i)
+        if (pattern[i] != '?' && pattern[i] != name[i]) return false;
+    return true;
+}
+
+// LIST: which saves of this game match the save name, up to the list's
+// capacity. Each entry is a folder mode word, three 16-byte date records
+// (created, accessed, modified) and the 20-byte save name. Only the count has
+// been seen used, by a game with no saves yet; the entry layout is the
+// documented one, not traced.
+std::uint32_t do_list(psprecomp::GuestMemory &memory, std::uint32_t params) {
+    const std::uint32_t list = memory.load32(params + param::kIdList);
+    if (list == 0u || !memory.contains(list, 12u)) return result::kLoadParam;
+    const std::uint32_t capacity = memory.load32(list);
+    const std::uint32_t entries = memory.load32(list + 8u);
+    const std::string game_name = read_cstring(memory, params + param::kGameName, 13u);
+    const std::string pattern = save_name_at(memory, params + param::kSaveName);
+    std::vector<std::pair<std::string, std::filesystem::file_time_type>> found;
+    std::error_code error;
+    for (const auto &entry : std::filesystem::directory_iterator(savedata::savedata_root(state().memory_stick), error)) {
+        if (!entry.is_directory()) continue;
+        const std::string folder = entry.path().filename().string();
+        if (!folder.starts_with(game_name)) continue;
+        const std::string save = folder.substr(game_name.size());
+        if (!name_matches(pattern, save)) continue;
+        found.emplace_back(save, entry.last_write_time(error));
+    }
+    std::sort(found.begin(), found.end());
+    constexpr std::uint32_t kEntrySize = 4u + 3u * 16u + 20u;
+    std::uint32_t count = 0u;
+    for (const auto &[save, written] : found) {
+        if (count >= capacity || entries == 0u) break;
+        const std::uint32_t at = entries + count * kEntrySize;
+        if (!memory.contains(at, kEntrySize)) break;
+        memory.store32(at, 0x11FFu);  // a folder, readable and writable
+        // file_time_type's clock is not the system clock everywhere, and not
+        // every standard library converts between them; offset by now.
+        const auto system_time = std::chrono::system_clock::now() +
+                                 std::chrono::duration_cast<std::chrono::system_clock::duration>(
+                                     written - std::filesystem::file_time_type::clock::now());
+        const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(system_time.time_since_epoch());
+        const std::time_t time = static_cast<std::time_t>(seconds.count());
+        std::tm tm{};
+#if defined(_WIN32)
+        localtime_s(&tm, &time);
+#else
+        localtime_r(&time, &tm);
+#endif
+        for (std::uint32_t record = 0; record < 3u; ++record) {
+            const std::uint32_t date = at + 4u + record * 16u;
+            memory.store16(date, static_cast<std::uint16_t>(tm.tm_year + 1900));
+            memory.store16(date + 2u, static_cast<std::uint16_t>(tm.tm_mon + 1));
+            memory.store16(date + 4u, static_cast<std::uint16_t>(tm.tm_mday));
+            memory.store16(date + 6u, static_cast<std::uint16_t>(tm.tm_hour));
+            memory.store16(date + 8u, static_cast<std::uint16_t>(tm.tm_min));
+            memory.store16(date + 10u, static_cast<std::uint16_t>(tm.tm_sec));
+            memory.store32(date + 12u, 0u);
+        }
+        write_cstring(memory, at + 52u, save, 20u);
+        ++count;
+    }
+    memory.store32(list + 4u, count);
+    if (trace_savedata())
+        std::cerr << "[savedata] LIST " << game_name << pattern << ": " << count << " of " << found.size()
+                  << " matching saves\n";
+    return result::kOk;
+}
+
 std::uint32_t run_request(psprecomp::GuestMemory &memory, std::uint32_t params) {
     const std::uint32_t mode = memory.load32(params + param::kMode);
     const std::string save_name = save_name_at(memory, params + param::kSaveName);
@@ -384,10 +461,26 @@ std::uint32_t run_request(psprecomp::GuestMemory &memory, std::uint32_t params) 
     // and stops the game there.
     case kGetSize:
         return do_sizes(memory, params);
+    case kList:
+        return do_list(memory, params);
     default:
         // Not used by this game. Report a parameter error so the guest takes
         // its failure path instead of reading results that were never written.
         std::cerr << "[savedata] mode " << mode << " (" << mode_name(mode) << ") is not implemented\n";
+        if (trace_savedata()) {
+            // What the game put in the block past the names, so a mode can be
+            // implemented from what a game sends rather than from memory.
+            const std::uint32_t size = memory.load32(params);
+            for (std::uint32_t offset = 0x580u; offset + 4u <= std::min<std::uint32_t>(size, 0x800u); offset += 4u)
+                if (const std::uint32_t word = memory.load32(params + offset); word != 0u) {
+                    std::cerr << "[savedata]   +" << psprecomp::hex32(offset) << " = " << psprecomp::hex32(word);
+                    // A pointer into RAM: what it points at, too.
+                    if (memory.contains(word, 16u))
+                        for (std::uint32_t i = 0; i < 4u; ++i)
+                            std::cerr << (i == 0u ? " -> " : " ") << psprecomp::hex32(memory.load32(word + i * 4u));
+                    std::cerr << "\n";
+                }
+        }
         return result::kLoadParam;
     }
 }
