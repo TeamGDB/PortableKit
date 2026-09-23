@@ -135,6 +135,10 @@ public:
     void set_present_mode(settings::PresentMode mode);
     [[nodiscard]] bool supports_present_mode(settings::PresentMode mode) const;
     void set_aspect(settings::Aspect aspect);
+    // Fill needs a game that can widen its own view (GameProfile::
+    // view_aspect_frame); for any other it is drawn as Original.
+    [[nodiscard]] static bool supports_fill() noexcept;
+    [[nodiscard]] static settings::Aspect usable_aspect(settings::Aspect aspect) noexcept;
     void set_sharp_screen(bool sharp);
     void set_sharp_textures(bool sharp);
     // Draws an installed HD texture pack's images instead of the game's own

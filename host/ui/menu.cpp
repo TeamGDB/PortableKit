@@ -235,14 +235,17 @@ void Menu::video() {
     }
     {
         static const char *const kAspects[] = {"Original", "Stretch", "Fill"};
-        const int current = static_cast<int>(s.aspect);
-        if (const int delta = choice_row(
-                "Aspect ratio", kAspects[current],
-                options_for("video.aspect", "Original keeps the PSP's shape with black bars at the sides or top. "
-                                            "Stretch fills the window by stretching the picture. Fill widens (or "
-                                            "narrows) the game's view to the window's shape, keeping its height, "
-                                            "and keeps the interface in the PSP's proportions."))) {
-            s.aspect = static_cast<settings::Aspect>(cycle(current, delta, 3));
+        // Fill is offered only to a game that can widen its own view.
+        const bool fill = gpu::VulkanRenderer::supports_fill();
+        const int current = static_cast<int>(gpu::VulkanRenderer::usable_aspect(s.aspect));
+        const std::string description =
+            std::string("Original keeps the PSP's shape with black bars at the sides or top. Stretch fills the "
+                        "window by stretching the picture.") +
+            (fill ? " Fill widens (or narrows) the game's view to the window's shape, keeping its height, and "
+                    "keeps the interface in the PSP's proportions."
+                  : "");
+        if (const int delta = choice_row("Aspect ratio", kAspects[current], options_for("video.aspect", description))) {
+            s.aspect = static_cast<settings::Aspect>(cycle(current, delta, fill ? 3 : 2));
             renderer().set_aspect(s.aspect);
             settings::save();
         }

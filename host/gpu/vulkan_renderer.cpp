@@ -941,7 +941,7 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     const std::uint32_t scale = impl.requested_scale != 0u ? impl.requested_scale : 2u;
     impl.target_extent = {kPspWidth * scale, kPspHeight * scale};
     impl.requested_present = player.present_mode;
-    impl.aspect = player.aspect;
+    impl.aspect = usable_aspect(player.aspect);
     impl.sharp_screen = player.sharp_screen;
     impl.sharp_textures = player.sharp_textures;
     const std::uint32_t window_scale = std::clamp<std::uint32_t>(player.window_scale, 1u, settings::kMaxWindowScale);
@@ -2729,9 +2729,18 @@ bool VulkanRenderer::supports_present_mode(settings::PresentMode mode) const {
 
 void VulkanRenderer::set_aspect(settings::Aspect aspect) {
     if (!impl_) return;
-    impl_->aspect = aspect;
+    impl_->aspect = usable_aspect(aspect);
     impl_->resize_now = true;
     impl_->follow_window();
+}
+
+bool VulkanRenderer::supports_fill() noexcept { return portablekit::game().view_aspect_frame != nullptr; }
+
+settings::Aspect VulkanRenderer::usable_aspect(settings::Aspect aspect) noexcept {
+    // Fill spreads the game's 480x272 over the window and counts on the game
+    // to draw a view of that shape. A game that cannot would be stretched,
+    // with its interface squared up over it, so it keeps the PSP's shape.
+    return aspect == settings::Aspect::Fill && !supports_fill() ? settings::Aspect::Original : aspect;
 }
 
 float VulkanRenderer::game_aspect() const noexcept {
