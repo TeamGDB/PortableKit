@@ -358,7 +358,8 @@ void ReplacementTextures::begin_frame(std::uint64_t frame) {
     if (resident_bytes_ > budget_bytes_ && !warned_budget_) {
         warned_budget_ = true;
         std::cerr << "[texpack] the replacements drawn right now need " << (resident_bytes_ >> 20u)
-                  << " MB, over the " << (budget_bytes_ >> 20u) << " MB budget (<prefix>_TEXTURE_PACK_MEMORY)\n";
+                  << " MB, over the " << (budget_bytes_ >> 20u) << " MB budget ("
+                  << portablekit::env_name("TEXTURE_PACK_MEMORY") << ")\n";
     }
 }
 

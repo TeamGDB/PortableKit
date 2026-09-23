@@ -381,7 +381,8 @@ std::vector<std::uint32_t> chosen_places(const std::vector<std::uint32_t> &place
     if (which == nullptr || *which == '\0') {
         log_once(std::string("poke-which-") + what,
                  std::string("[poke] ") + what + " matches " + std::to_string(places.size()) +
-                     " places; set <prefix>_POKE_WHICH to an index (0-based) to write one of them, or to"
+                     " places; set " + portablekit::env_name("POKE_WHICH") +
+                     " to an index (0-based) to write one of them, or to"
                      " 'all' to write every one, which will also write whatever else holds that value");
         return {};
     }
@@ -394,7 +395,7 @@ std::vector<std::uint32_t> chosen_places(const std::vector<std::uint32_t> &place
     const std::size_t index = static_cast<std::size_t>(std::strtoul(which, nullptr, 0));
     if (index >= places.size()) {
         log_once(std::string("poke-range-") + what,
-                 std::string("[poke] <prefix>_POKE_WHICH=") + which + " is past the " +
+                 "[poke] " + portablekit::env_name("POKE_WHICH") + "=" + which + " is past the " +
                      std::to_string(places.size()) + " places that match " + what);
         return {};
     }
