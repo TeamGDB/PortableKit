@@ -1424,6 +1424,18 @@ struct VulkanRenderer::Impl {
     static inline std::atomic<bool> surface_lost{};
     static inline std::atomic<bool> surface_returned{};
     void reset_surface();
+    // The native window the Vulkan surface was made for. A different one
+    // means Android replaced it while this thread was busy (a system picker
+    // blocks it through the whole pause), so no lifecycle event was seen.
+    void *native_window{};
+    void *current_native_window() const {
+        return SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER,
+                                      nullptr);
+    }
+    void check_native_window() {
+        void *now = current_native_window();
+        if (now != nullptr && now != native_window) surface_returned = true;
+    }
     static bool SDLCALL watch_lifecycle(void *, SDL_Event *event) {
         if (event->type == SDL_EVENT_WILL_ENTER_BACKGROUND || event->type == SDL_EVENT_DID_ENTER_BACKGROUND)
             surface_lost = true;
@@ -1563,6 +1575,7 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
 
 #if defined(__ANDROID__)
     SDL_AddEventWatch(&Impl::watch_lifecycle, &impl);
+    impl.native_window = impl.current_native_window();
 #endif
     if (!SDL_Vulkan_CreateSurface(impl.window, impl.instance, nullptr, &impl.surface)) {
         error = std::string("SDL_Vulkan_CreateSurface failed: ") + SDL_GetError();
@@ -2135,6 +2148,7 @@ void VulkanRenderer::Impl::reset_surface() {
         return;
     }
     surface_lost = false;
+    native_window = current_native_window();
     std::string error;
     if (!create_swapchain(error)) std::cout << "[render] cannot recreate the swapchain: " << error << "\n";
     else std::cout << "[render] surface made again after the app returned\n";
@@ -2449,6 +2463,7 @@ void VulkanRenderer::Impl::record_game_blit(VkCommandBuffer commands, VkImage so
 void VulkanRenderer::Impl::submit_and_present(VkCommandBuffer commands, VkFence fence, VkImage source,
                                               bool game_frame, bool main_frame) {
 #if defined(__ANDROID__)
+    check_native_window();
     if (surface_returned) reset_surface();
     // No window to show it in: the frame is recorded and finished, not shown
     // (an image acquired before the window went is still given back).
@@ -2483,6 +2498,9 @@ void VulkanRenderer::Impl::submit_and_present(VkCommandBuffer commands, VkFence 
         acquired = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, image_available, VK_NULL_HANDLE, &image_index);
         perf::add_wait_time(perf::Clock::now() - acquire_start, perf::Stall::Acquire);
         if (acquired == VK_ERROR_OUT_OF_DATE_KHR) swapchain_dirty = true;
+#if defined(__ANDROID__)
+        if (acquired == VK_ERROR_SURFACE_LOST_KHR) surface_returned = true;
+#endif
     }
     const bool can_present = acquired == VK_SUCCESS || acquired == VK_SUBOPTIMAL_KHR;
     bool capture = false;
@@ -2582,6 +2600,9 @@ void VulkanRenderer::Impl::submit_and_present(VkCommandBuffer commands, VkFence 
         const VkResult presented = vkQueuePresentKHR(queue, &present);
         perf::add_wait_time(perf::Clock::now() - present_start, perf::Stall::Present);
         if (presented == VK_ERROR_OUT_OF_DATE_KHR || presented == VK_SUBOPTIMAL_KHR) swapchain_dirty = true;
+#if defined(__ANDROID__)
+        if (presented == VK_ERROR_SURFACE_LOST_KHR) surface_returned = true;
+#endif
     }
     if (main_frame) recording = false;
     if (capture) write_capture(fence);
@@ -5265,6 +5286,7 @@ bool VulkanRenderer::Impl::present_between(const pacing::PresentClock::Present &
     // none free (it refreshes slower than the presents come), this present
     // is dropped rather than hold the game until the next refresh.
 #if defined(__ANDROID__)
+    check_native_window();
     if (surface_returned) reset_surface();
     if (surface_lost) return false;
 #endif
@@ -5275,6 +5297,9 @@ bool VulkanRenderer::Impl::present_between(const pacing::PresentClock::Present &
     const VkResult acquired = vkAcquireNextImageKHR(device, swapchain, 3'000'000u, image_available, VK_NULL_HANDLE, &image_index);
     perf::add_wait_time(perf::Clock::now() - acquire_start, perf::Stall::Acquire);
     if (acquired == VK_ERROR_OUT_OF_DATE_KHR) swapchain_dirty = true;
+#if defined(__ANDROID__)
+    if (acquired == VK_ERROR_SURFACE_LOST_KHR) surface_returned = true;
+#endif
     if (acquired != VK_SUCCESS && acquired != VK_SUBOPTIMAL_KHR) {
         ++stats.blocked;
         if (account) perf::add_render_time(Clock::now() - start);
