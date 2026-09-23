@@ -603,7 +603,10 @@ void Menu::controls() {
             settings::save();
         }
     }
-    const bool camera = s.right_stick == settings::RightStick::Camera;
+    // On Android a finger drag drives the analog camera whatever the right
+    // stick does, so the row stays open there.
+    const bool camera = s.right_stick == settings::RightStick::Camera ||
+                        settings::kPlatform == settings::Platform::Android;
     // Only a game with a camera driver can be turned by how far the stick is
     // pushed; for any other the rows would change nothing.
     if (const CameraDriver *driver = portablekit::game().camera; driver != nullptr) {

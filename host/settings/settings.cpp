@@ -416,6 +416,7 @@ State &state() {
 
 void load(State &s) {
     s.loaded = true;
+    s.values = defaults();
     try {
         s.data_dir = install::user_data_directory();
         s.file = install::read_settings_file(s.data_dir);
@@ -453,8 +454,18 @@ std::string game_default_name() {
     return name != nullptr ? name : "";
 }
 
+Settings defaults_for(Platform platform) {
+    Settings values{};
+    if (platform == Platform::Android) {
+        values.aspect = Aspect::Fill;
+        values.fullscreen = true;
+        values.mouse = false;
+    }
+    return values;
+}
+
 const Settings &defaults() {
-    static const Settings value{};
+    static const Settings value = defaults_for(kPlatform);
     return value;
 }
 
