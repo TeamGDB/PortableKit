@@ -83,19 +83,38 @@ void register_process(HleRegistrar &hle) {
     // Games load Sony's stock modules (font, codecs) as encrypted PRX blobs from
     // the disc. Their exports are served by this profile's HLE, so the load is
     // acknowledged with a module id and the image itself is never touched.
-    hle.add("ModuleMgrForUser", "sceKernelLoadModuleByID", [](Runtime &, AllegrexContext &ctx) {
-        std::array<std::uint8_t, 0x100> header{};
-        const std::size_t count = read_open_file(arg(ctx, 0), 0u, header.data(), header.size());
+    // The name logged is the one in the module's "~PSP" header.
+    const auto load_stock_module = [](AllegrexContext &ctx, const std::uint8_t *header, std::size_t count,
+                                      const std::string &where) {
         std::string name = "unknown";
         for (std::size_t i = 0; i + 0x2Au < count; ++i) {
-            if (std::memcmp(header.data() + i, "~PSP", 4u) != 0) continue;
-            const char *text = reinterpret_cast<const char *>(header.data() + i + 0x0Au);
+            if (std::memcmp(header + i, "~PSP", 4u) != 0) continue;
+            const char *text = reinterpret_cast<const char *>(header + i + 0x0Au);
             name.assign(text, strnlen(text, 28u));
             break;
         }
         const auto uid = static_cast<std::uint32_t>(kernel().allocate_uid());
-        log_once("module:" + name, "[module] loaded stock module " + name + " (HLE)");
+        log_once("module:" + name, "[module] loaded stock module " + name + where + " (HLE)");
         kernel().finish(ctx, uid);
+    };
+    hle.add("ModuleMgrForUser", "sceKernelLoadModuleByID", [load_stock_module](Runtime &, AllegrexContext &ctx) {
+        std::array<std::uint8_t, 0x100> header{};
+        const std::size_t count = read_open_file(arg(ctx, 0), 0u, header.data(), header.size());
+        load_stock_module(ctx, header.data(), count, "");
+    });
+    // The same by path. A path that does not open fails the way sceIoOpen
+    // would have.
+    hle.add("ModuleMgrForUser", "sceKernelLoadModule", [load_stock_module](Runtime &rt, AllegrexContext &ctx) {
+        const std::string path = read_cstring(rt.memory(), arg(ctx, 0), 256u);
+        std::array<std::uint8_t, 0x100> header{};
+        const std::int64_t count = read_guest_file(path, 0u, header.data(), header.size());
+        if (count < 0) {
+            std::cerr << "[module] cannot load " << path << ": " << psprecomp::hex32(static_cast<std::uint32_t>(count))
+                      << "\n";
+            kernel().finish(ctx, static_cast<std::uint32_t>(count));
+            return;
+        }
+        load_stock_module(ctx, header.data(), static_cast<std::size_t>(count), " from " + path);
     });
     for (const char *name : {"sceKernelStartModule", "sceKernelStopModule", "sceKernelUnloadModule"}) {
         hle.add("ModuleMgrForUser", name, [name](Runtime &, AllegrexContext &ctx) {
