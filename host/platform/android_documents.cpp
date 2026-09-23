@@ -1,4 +1,5 @@
 #include "platform/android_documents.hpp"
+#include "profile.hpp"
 
 #include "platform/android_jni.hpp"
 
@@ -167,7 +168,7 @@ std::optional<PickedImport> pick_saves_to_import(const fs::path &staging) {
     fs::create_directories(root / "SAVEDATA", ec);
     const std::string root_uri = tree_root(*tree);
     if (!list_folder(root_uri)) {
-        picked.error = "Android would not let Yakumo read that folder.";
+        picked.error = std::string("Android would not let ") + portablekit::game().project_name + " read that folder.";
         return picked;
     }
     std::string error;
