@@ -18,7 +18,7 @@ void adhoc_apply_settings(bool switch_now = false);
 // pausing it then would stop it answering the other players.
 [[nodiscard]] bool adhoc_session_active();
 
-// The name other players see: the nickname setting, or the hunter name.
+// The name other players see: the nickname setting, or the player name.
 [[nodiscard]] std::string adhoc_player_name();
 
 // The server the game goes on line with: this instance's own while it hosts,

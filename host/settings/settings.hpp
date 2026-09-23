@@ -18,6 +18,10 @@
 // Only the main thread reads or writes these.
 namespace portablekit::settings {
 
+// The profile's default player name (GameProfile::default_player_name), for
+// the fixed name before the player sets one.
+[[nodiscard]] std::string game_default_name();
+
 enum class PresentMode { Fifo, Mailbox, Immediate };
 // How the game's picture meets the window. Original keeps the PSP's shape with
 // black bars, Stretch fills the window by stretching it, and Fill gives the
@@ -26,7 +30,7 @@ enum class PresentMode { Fifo, Mailbox, Immediate };
 enum class Aspect { Original, Stretch, Fill };
 enum class PerfDisplay { Off, Overlay, OverlayAndLog, Log };
 enum class RightStick { Camera, DPad, Off };
-// What answers the game when it asks for text such as the hunter's name.
+// What answers the game when it asks for text such as the player's name.
 enum class NameEntry { Keyboard, Fixed };
 // Presents per second. The game makes 30 frames a second; the faster rates
 // add frames in between with blended movement (frame interpolation), and
@@ -86,12 +90,12 @@ struct Settings {
     bool invert_mouse_y{};
     input::Bindings bindings{input::default_bindings()};
     NameEntry name_entry{NameEntry::Keyboard};  // on-screen keyboard, or the name below at once
-    std::string name{"Hunter"};        // the fixed name
+    std::string name{game_default_name()};  // the fixed name
 
     // Network (ad hoc play through a PSP ad hoc server)
     bool adhoc{};                      // wireless switch on: the game may go on line
     std::string adhoc_server;          // host or host:port of the server; empty: none
-    std::string adhoc_nickname;        // shown to other players; empty: the hunter name
+    std::string adhoc_nickname;        // shown to other players; empty: the player name
     std::string adhoc_mac;             // this player's virtual MAC, made up on first use
     std::vector<std::string> adhoc_recent;  // sessions joined lately, the latest first
     std::uint32_t adhoc_host_port{27312};   // the built-in server's adhocctl port; the relay is on the next

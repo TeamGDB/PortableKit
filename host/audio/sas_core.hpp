@@ -86,8 +86,8 @@ private:
     std::array<SasVoice, kSasMaxVoices> voices_{};
 };
 
-// One core per guest SAS handle. MHP3rd only ever opens one, but the handle is
-// an argument to every call, so it is keyed rather than assumed.
+// One core per guest SAS handle. Games usually open one, but the handle is an
+// argument to every call, so it is keyed rather than assumed.
 [[nodiscard]] SasCore &sas_core(std::uint32_t handle);
 
 } // namespace portablekit::audio

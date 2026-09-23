@@ -481,7 +481,7 @@ void draw_grid(ImDrawList *draw, const std::vector<Row> &rows, float width) {
 
 bool printable_ascii(char32_t c) { return c >= 0x20u && c < 0x7Fu; }
 
-bool hunter_name_character(char32_t c) {
+bool name_character(char32_t c) {
     if ((c >= U'a' && c <= U'z') || (c >= U'A' && c <= U'Z') || (c >= U'0' && c <= U'9')) return true;
     // Every other printable ASCII character shows in the name, but '*' draws
     // as a bullet, and the brackets, quotes, backslash, caret, backquote,

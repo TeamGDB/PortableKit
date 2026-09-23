@@ -32,8 +32,9 @@ namespace osk {
 constexpr std::uint32_t kFieldCount = 0x30u;
 constexpr std::uint32_t kFields = 0x34u;
 constexpr std::uint32_t kState = 0x38u;
-// Field offsets. The game asks for its hunter name with input type 0xDF0F,
-// one line, an empty description, a 13-unit output buffer and no limit.
+// Field offsets. Monster Hunter Portable 3rd, for one, asks for a name with
+// input type 0xDF0F, one line, an empty description, a 13-unit output buffer
+// and no limit.
 constexpr std::uint32_t kInputType = 0x10u;
 constexpr std::uint32_t kLines = 0x14u;
 constexpr std::uint32_t kDescription = 0x1Cu;
@@ -249,7 +250,7 @@ void answer_request(psprecomp::GuestMemory &memory, std::uint32_t field) {
         if (request.prompt == request.title) request.prompt.clear();
         request.initial = initial;
         request.max_length = max_length;
-        request.allowed = ui::hunter_name_character;
+        request.allowed = ui::name_character;
         const bool opened = ui::open_game_text_input(std::move(request), [](std::optional<std::string> text) {
             OskState &keyboard = osk_state();
             keyboard.answer = OskAnswer{!text.has_value(), text.value_or(std::string{})};

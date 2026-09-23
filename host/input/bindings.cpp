@@ -77,7 +77,7 @@ Bindings make_default() {
     set(Action::Circle, mouse_button(3), key(hid::F));
     set(Action::Cross, key(hid::Space));
     set(Action::Square, key(hid::E));
-    // L puts the camera behind the hunter, R guards, runs and aims.
+    // L and R on the two keys a player already rests on.
     set(Action::L, key(hid::Q));
     set(Action::R, key(hid::LeftShift));
     set(Action::Start, key(hid::Return), key(hid::Tab));
@@ -86,7 +86,7 @@ Bindings make_default() {
     set(Action::Left, key(hid::Left));
     set(Action::Down, key(hid::Down));
     set(Action::Right, key(hid::Right));
-    // The camera without a mouse, where the old layout moved the hunter.
+    // The camera without a mouse.
     set(Action::CameraUp, key(hid::I));
     set(Action::CameraLeft, key(hid::J));
     set(Action::CameraDown, key(hid::K));

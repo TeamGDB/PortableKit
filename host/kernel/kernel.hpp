@@ -14,7 +14,7 @@
 #include <string>
 #include <vector>
 
-// Minimal PSP kernel for the MHP3rd profile: threads with a deterministic
+// Minimal PSP kernel: threads with a deterministic
 // virtual clock, synchronization objects, partition memory, and guest interrupt
 // delivery (VBlank sub-interrupts, VTimers, GE callbacks).
 //

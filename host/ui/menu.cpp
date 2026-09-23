@@ -56,9 +56,9 @@ using Clock = std::chrono::steady_clock;
 // Seconds the "how to open the menu" hint stays up at start, until the menu
 // has been opened once.
 constexpr double kHintSeconds = 12.0;
-// The longest hunter name the game takes: its name buffer holds 12
-// characters and a terminator.
-constexpr std::size_t kHunterNameLength = 12u;
+// The longest fixed name the menu takes. A game's own request says what it
+// takes when it asks; this only bounds what is typed here.
+constexpr std::size_t kNameLength = 12u;
 // Resolutions the menu offers. <prefix>_INTERNAL_SCALE goes up to 8, but a
 // setting that runs out of video memory would fail on every start.
 constexpr int kMenuMaxInternalScale = 6;
@@ -560,8 +560,8 @@ void Menu::controls() {
     }
     int dead_zone = static_cast<int>(std::lround(s.dead_zone * 100.0f));
     if (slider_row("Stick dead zone", dead_zone, 0, 50, 1, "%d%%",
-                   options_for("input.dead_zone", "How far the left stick moves before the hunter does. Raise it if "
-                                                  "the hunter drifts."))) {
+                   options_for("input.dead_zone", "How far the left stick moves before the game sees it. Raise it if "
+                                                  "the character drifts."))) {
         s.dead_zone = static_cast<float>(dead_zone) / 100.0f;
         settings::save();
     }
@@ -672,7 +672,7 @@ void Menu::controls() {
         }
     }
 
-    section("Hunter name");
+    section(game().player_name_label);
     {
         const bool keyboard = s.name_entry == settings::NameEntry::Keyboard;
         if (choice_row("When the game asks for a name", keyboard ? "On-screen keyboard" : "Use the name below",
@@ -683,7 +683,7 @@ void Menu::controls() {
             settings::save();
         }
     }
-    if (text_row("name", "Hunter name", s.name, kHunterNameLength, false, hunter_name_character,
+    if (text_row("name", game().player_name_label, s.name, kNameLength, false, name_character,
                  options_for("input.name", "Given when the game asks for a name and the on-screen keyboard is "
                                            "off, and to other players when the network nickname is empty. "
                                            "Letters, digits, spaces and simple punctuation.")))
@@ -985,7 +985,7 @@ void Menu::network() {
         adhoc_apply_settings();
     }
     if (text_row("nickname", "Nickname", s.adhoc_nickname, 32u, true, printable_ascii,
-                 options_for("network.nickname", "The name other players and the server see. Empty: the hunter name. "
+                 options_for("network.nickname", "The name other players and the server see. Empty: the player name. "
                                                  "Applies the next time the game goes on line."))) {
         settings::save();
         adhoc_apply_settings();

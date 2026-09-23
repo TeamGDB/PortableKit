@@ -63,6 +63,10 @@ Two more are for a port that goes further than the PSP did, and both are null un
 
 `trigger_profiles` are for how a game is played rather than how it is run: what the triggers may press instead of L and R, each with the key settings.ini keeps and the label the menu shows. Yakumo offers Bows (R on L2 to hold the aim, △ on R2 to shoot) and Bowguns (R and ○). Without any, the triggers press L and R and the menu has no row for them.
 
+`player_name_label` and `default_player_name` are what the interface calls the name a game asks for and what it answers before the player sets one: "Player name" and "Player" unless a profile says otherwise. Yakumo says "Hunter name" and "Hunter".
+
+`glyph_cache` is for changing the font while a game runs. A game that caches the glyphs it has drawn keeps them until its atlas needs the cell, so a new font shows only in text it has not drawn yet. Where the game keeps that atlas, read off its own text code, lets the framework make it draw them again. Null for any game nobody has traced.
+
 `interpolation_thresholds` is for frame interpolation, which blends the game's frames and must not blend across a camera cut. The angles and fractions it uses to tell a cut from motion hold for any game; its distances are in the game's own world units, and the defaults were measured on Monster Hunter Portable 3rd. A game whose world is on a very different scale gives its own; one that does not, gets those defaults.
 
 A driver writes into the game's memory, so check the code it relies on before it writes anything — Yakumo compares every instruction and constant it depends on at start-up, from `patch_loaded_image`, and stays out, saying why, if one differs.

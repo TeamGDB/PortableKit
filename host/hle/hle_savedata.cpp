@@ -1,12 +1,9 @@
 // sceUtilitySavedata*: the PSP's save-data dialog, backed by PSP-layout
 // folders on the host (see save_data/savedata_store.hpp).
 //
-// What the game asks for:
-//   - at boot, AUTOLOAD of its own save; when there is none, AUTOLOAD of the
-//     saves of two other games (ULJM05500, ULJM05710) and SIZES for its own,
-//     and "no data" answers lead to a new game;
-//   - to save, AUTOLOAD of its own save followed by AUTOSAVE;
-//   - after the title screen, AUTOLOAD again to read the characters.
+// Load, save, delete, sizes and the list modes are answered from those
+// folders; each game uses its own few. <prefix>_TRACE_SAVEDATA prints every
+// request, which is how to find out which a game asks for.
 // No save-data UI is drawn: modes that would show a list act as if the player
 // confirmed the first entry. Every mode, the failures included, reports QUIT
 // after a few polls; see utility_dialog.hpp.

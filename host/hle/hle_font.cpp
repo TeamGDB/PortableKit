@@ -115,21 +115,14 @@ void write_font_info(psprecomp::GuestMemory &memory, std::uint32_t address) {
     memory.store32(address + 88u, 0u);                                        // shadow map length
 }
 
-// The game keeps every glyph it has drawn in a texture atlas and draws it
+// A game may keep every glyph it has drawn in a texture atlas and draw it
 // again only once the atlas needs the cell for another glyph, which can take a
 // whole play session. To change the font while the game runs, the host makes
-// the game forget those glyphs: its text code (traced from the call that asks
-// for glyph images) keeps, in the object that owns the atlas, a table from
-// character code to atlas cell, where 0xFFFF means "not drawn yet". Clearing
-// it makes the game draw each character again the next time it shows it.
-constexpr std::uint32_t kGlyphImageCaller = 0x088EA3A4u;   // return address of the game's only call
-constexpr std::uint32_t kCellWidthOffset = 276u;            // u8, from the font info's maximum width
-constexpr std::uint32_t kCellHeightOffset = 277u;           // u8
-constexpr std::uint32_t kCellCountOffset = 286u;            // u16, cells in the whole atlas
-constexpr std::uint32_t kCodeToCellOffset = 22168u;         // u16 per character code below 0xFFF0
-constexpr std::uint32_t kCodeToCellEntries = 0xFFF0u;
-constexpr std::uint32_t kAtlasPages = 8u;
-
+// the game forget those glyphs, where the profile says how
+// (GameProfile::glyph_cache): the object that owns the atlas keeps a table
+// from character code to atlas cell, where 0xFFFF means "not drawn yet", and
+// clearing it makes the game draw each character again the next time it
+// shows it.
 struct GameGlyphCache {
     psprecomp::GuestMemory *memory{};
     std::uint32_t object{};  // 0: not recognised
@@ -140,10 +133,10 @@ GameGlyphCache &game_cache() {
     return value;
 }
 
-// The game's cell count for our cell size: 256x256 pages, cells a cell width
-// apart and the cell height plus 2 apart.
-constexpr std::uint32_t expected_cells() {
-    return (256u / fonts::kCell) * (256u / (fonts::kCell + 2u)) * kAtlasPages;
+// The cell count the game's layout gives for our cell size: 256x256 pages,
+// cells a cell width apart and the cell height plus the gap apart.
+std::uint32_t expected_cells(const GlyphCacheLayout &layout) {
+    return (256u / fonts::kCell) * (256u / (fonts::kCell + layout.row_gap)) * layout.atlas_pages;
 }
 
 // Remembers the object whose atlas the game is filling, once its layout
@@ -151,12 +144,13 @@ constexpr std::uint32_t expected_cells() {
 void note_game_cache(psprecomp::GuestMemory &memory, const AllegrexContext &ctx) {
     GameGlyphCache &cache = game_cache();
     cache.memory = &memory;
-    if (cache.object != 0u || ctx.gpr[31] != kGlyphImageCaller) return;
-    const std::uint32_t object = ctx.gpr[17];  // s1 in that function
-    if (!memory.contains(object, kCodeToCellOffset + kCodeToCellEntries * 2u)) return;
-    if (memory.load8(object + kCellWidthOffset) != fonts::kCell ||
-        memory.load8(object + kCellHeightOffset) != fonts::kCell ||
-        memory.load16(object + kCellCountOffset) != expected_cells())
+    const GlyphCacheLayout *layout = game().glyph_cache;
+    if (layout == nullptr || cache.object != 0u || ctx.gpr[31] != layout->caller) return;
+    const std::uint32_t object = ctx.gpr[layout->object_register & 31u];
+    if (!memory.contains(object, layout->code_to_cell_offset + layout->code_to_cell_entries * 2u)) return;
+    if (memory.load8(object + layout->cell_width_offset) != fonts::kCell ||
+        memory.load8(object + layout->cell_height_offset) != fonts::kCell ||
+        memory.load16(object + layout->cell_count_offset) != expected_cells(*layout))
         return;
     cache.object = object;
     trace("game glyph cache at %08X", object);
@@ -164,12 +158,17 @@ void note_game_cache(psprecomp::GuestMemory &memory, const AllegrexContext &ctx)
 
 void forget_game_glyphs() {
     const GameGlyphCache &cache = game_cache();
+    const GlyphCacheLayout *layout = game().glyph_cache;
+    if (layout == nullptr) {
+        std::cout << "[font] the new font applies to text the game draws from now on\n";
+        return;
+    }
     if (cache.memory == nullptr || cache.object == 0u) {
         std::cout << "[font] the game has not drawn any text yet; nothing to redraw\n";
         return;
     }
-    for (std::uint32_t code = 0; code < kCodeToCellEntries; ++code)
-        cache.memory->store16(cache.object + kCodeToCellOffset + code * 2u, 0xFFFFu);
+    for (std::uint32_t code = 0; code < layout->code_to_cell_entries; ++code)
+        cache.memory->store16(cache.object + layout->code_to_cell_offset + code * 2u, 0xFFFFu);
     std::cout << "[font] the game redraws its text with the new font\n";
 }
 

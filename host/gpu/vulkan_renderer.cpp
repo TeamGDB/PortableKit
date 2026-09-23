@@ -409,8 +409,8 @@ void read_gamepad(SDL_Gamepad *device, PadState &pad, int &analog_x, int &analog
     held(SDL_GAMEPAD_BUTTON_SOUTH, tuning.confirm_south ? 0x2000u : 0x4000u);
     held(SDL_GAMEPAD_BUTTON_EAST, tuning.confirm_south ? 0x4000u : 0x2000u);
 
-    // The PSP triggers are digital, but hunters hold L for the camera all the
-    // time, so the analog triggers press the same bits as the shoulders.
+    // The PSP triggers are digital, and games hold L or R for long stretches,
+    // so the analog triggers press the same bits as the shoulders.
     const auto axis = [&](SDL_GamepadAxis id) {
         return std::clamp(static_cast<float>(SDL_GetGamepadAxis(device, id)) / 32767.0f, -1.0f, 1.0f);
     };
@@ -5243,7 +5243,7 @@ bool VulkanRenderer::present(std::uint32_t display_address,
         const float yaw = std::atan2(forward_x, forward_z) * kDegrees;
         const float pitch = std::asin(std::clamp(forward_y, -1.0f, 1.0f)) * kDegrees;
         // The camera's world position is the rotation applied backwards to the
-        // translation, which tells a turn in place from the hunter walking.
+        // translation, which tells a turn in place from the player moving.
         const float tx = view[12];
         const float ty = view[13];
         const float tz = view[14];

@@ -51,6 +51,29 @@ struct OtherRelease {
     const char *note;    // a whole sentence, e.g. "This is the original PSP release of the game, ..."
 };
 
+// Where a game keeps the atlas of glyphs it has drawn, so that changing the
+// font while it runs can make it draw them again. Read off the game's own
+// text code; every number is the game's.
+struct GlyphCacheLayout {
+    // Return address of the game's call to sceFontGetCharGlyphImage, and the
+    // register that holds the atlas object there (17 is s1).
+    std::uint32_t caller;
+    std::uint32_t object_register;
+    // Offsets in that object: the cell width and height (u8 each), the
+    // number of cells in the whole atlas (u16), and the table from character
+    // code to cell (u16 each, 0xFFFF meaning not drawn yet).
+    std::uint32_t cell_width_offset;
+    std::uint32_t cell_height_offset;
+    std::uint32_t cell_count_offset;
+    std::uint32_t code_to_cell_offset;
+    std::uint32_t code_to_cell_entries;
+    // Pages of 256x256 the atlas spans, and the extra rows between cell rows;
+    // with the cell size, what the cell count must be for the object to be
+    // the one expected.
+    std::uint32_t atlas_pages;
+    std::uint32_t row_gap;
+};
+
 // A driver for the game's own camera. Every member may be null; the framework
 // reads camera/camera_driver.hpp's defaults for those.
 struct CameraDriver {
@@ -133,6 +156,13 @@ struct GameProfile {
     const char *save_game_name;             // the main folder, e.g. "ULJM05800"
     std::span<const SaveFolder> save_folders;
 
+    // --- What the player is called -----------------------------------------
+    // How the interface names the name the game asks for: "Hunter name".
+    const char *player_name_label = "Player name";
+    // The name given when the game asks and the on-screen keyboard is off,
+    // until the player sets one.
+    const char *default_player_name = "Player";
+
     // --- Ad hoc multiplayer ------------------------------------------------
     // The product code the game announces to other players. Two players must
     // agree on it, so it is the original release's code even when the port's
@@ -175,6 +205,11 @@ struct GameProfile {
     // defaults were measured on Monster Hunter Portable 3rd. A game whose world
     // is on another scale gives its own. Null: the defaults.
     const gpu::interpolation::CutThresholds *interpolation_thresholds = nullptr;
+
+    // --- Text ----------------------------------------------------------------
+    // Where the game caches the glyphs it has drawn. Null: a font changed while
+    // the game runs applies to text the game has not drawn yet.
+    const GlyphCacheLayout *glyph_cache = nullptr;
 };
 
 // Defined by the port, exactly once. Everything under host/ reads the game

@@ -434,6 +434,11 @@ Settings &current() {
     return s.values;
 }
 
+std::string game_default_name() {
+    const char *name = game().default_player_name;
+    return name != nullptr ? name : "";
+}
+
 const Settings &defaults() {
     static const Settings value{};
     return value;
