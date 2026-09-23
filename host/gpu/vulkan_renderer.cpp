@@ -1323,6 +1323,8 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     impl.sharp_screen = player.sharp_screen;
     impl.sharp_textures = player.sharp_textures;
     impl.trace_interpolation = portablekit::env("TRACE_INTERPOLATION") != nullptr;
+    if (const interpolation::CutThresholds *thresholds = portablekit::game().interpolation_thresholds)
+        impl.cut_thresholds = *thresholds;
     if (portablekit::env("INTERPOLATION_NO_MOTION_GUARD") != nullptr) impl.cut_thresholds.max_own_motion = 0.0f;
     impl.frame_rate = player.frame_rate;
     impl.governor.set_automatic(player.frame_rate_auto);

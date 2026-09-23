@@ -24,6 +24,9 @@ class Runtime;
 namespace portablekit {
 
 class HleRegistrar;
+namespace gpu::interpolation {
+struct CutThresholds;
+}
 
 // One save folder on the memory stick, as the game names it.
 struct SaveFolder {
@@ -160,6 +163,14 @@ struct GameProfile {
     // where it keeps its projection. Null: the game draws only the PSP's
     // 480:272, and the renderer does not offer to widen it.
     void (*view_aspect_frame)(psprecomp::Runtime &, float aspect) = nullptr;
+
+    // --- Frame interpolation -----------------------------------------------
+    // What tells a camera cut from motion when frames are blended
+    // (gpu/frame_interpolation.hpp). The angles and fractions there hold for
+    // any game; the distances are in the game's own world units, and the
+    // defaults were measured on Monster Hunter Portable 3rd. A game whose world
+    // is on another scale gives its own. Null: the defaults.
+    const gpu::interpolation::CutThresholds *interpolation_thresholds = nullptr;
 };
 
 // Defined by the port, exactly once. Everything under host/ reads the game
