@@ -222,6 +222,23 @@ if(PSPRECOMP_BUILD_TESTS)
     add_test(NAME portablekit_adhoc_tests COMMAND portablekit_adhoc_tests)
 endif()
 
+# Texture pack import: finding a pack in the layouts packs come in, the
+# checks made before copying, and the copy, swap and backup. No game data.
+if(PSPRECOMP_BUILD_TESTS)
+    add_executable(portablekit_texture_pack_tests
+        "${PORTABLEKIT_ROOT}/tests/texture_pack_tests.cpp"
+        "${PORTABLEKIT_ROOT}/tests/test_profile.cpp"
+        "${PORTABLEKIT_ROOT}/host/profile.cpp"
+        "${PORTABLEKIT_ROOT}/host/gpu/texture_pack.cpp"
+        "${PORTABLEKIT_ROOT}/host/gpu/texture_pack_import.cpp")
+    target_include_directories(portablekit_texture_pack_tests PRIVATE
+        "${PORTABLEKIT_ROOT}/host" "${PORTABLEKIT_ROOT}/host/gpu" "${PORTABLEKIT_ROOT}/third_party")
+    find_package(Threads REQUIRED)
+    target_link_libraries(portablekit_texture_pack_tests PRIVATE psprecomp_core Threads::Threads)
+    set_target_properties(portablekit_texture_pack_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME portablekit_texture_pack_tests COMMAND portablekit_texture_pack_tests)
+endif()
+
 # Keyboard and mouse bindings: names, settings.ini spelling, the menu's
 # assignment rules and what held keys press. No SDL or game data.
 if(PSPRECOMP_BUILD_TESTS)
