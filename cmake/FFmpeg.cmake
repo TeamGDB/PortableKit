@@ -195,6 +195,11 @@ else()
     endif()
     set(_portablekit_ffmpeg_src "${_portablekit_ffmpeg_root}/ffmpeg-${PORTABLEKIT_FFMPEG_VERSION}")
     set(_portablekit_ffmpeg_prefix "${_portablekit_ffmpeg_root}/install")
+    # FFmpeg keeps its configure line, prefix included, as a string in the
+    # libraries. It is configured for a neutral prefix and installed through
+    # DESTDIR, so no path of the build machine (a home directory, a user name)
+    # ends up in a shipped library.
+    set(_portablekit_ffmpeg_neutral_prefix /ffmpeg)
     # Platform settings that do not change what is built: where macOS finds the
     # libraries (the executable's rpath) and the compiler to use.
     set(_portablekit_ffmpeg_flags ${PORTABLEKIT_FFMPEG_CONFIGURE_FLAGS})
@@ -228,7 +233,7 @@ else()
     endif()
     # Built once per build directory; again only when the pin or the flags change.
     string(REPLACE ";" " " _portablekit_ffmpeg_stamp
-        "${PORTABLEKIT_FFMPEG_VERSION} ${PORTABLEKIT_FFMPEG_SHA256} ${_portablekit_ffmpeg_flags}")
+        "${PORTABLEKIT_FFMPEG_VERSION} ${PORTABLEKIT_FFMPEG_SHA256} --prefix=${_portablekit_ffmpeg_neutral_prefix} ${_portablekit_ffmpeg_flags}")
     set(_portablekit_ffmpeg_stamp_file "${_portablekit_ffmpeg_prefix}/portablekit.stamp")
     set(_portablekit_ffmpeg_built "")
     if(EXISTS "${_portablekit_ffmpeg_stamp_file}")
@@ -244,7 +249,7 @@ else()
         file(MAKE_DIRECTORY "${_portablekit_ffmpeg_root}/build")
         set(_log "${_portablekit_ffmpeg_root}/build")
         _portablekit_ffmpeg_run(configure "${_log}/configure.log"
-            sh "${_portablekit_ffmpeg_src}/configure" "--prefix=${_portablekit_ffmpeg_prefix}" ${_portablekit_ffmpeg_flags})
+            sh "${_portablekit_ffmpeg_src}/configure" "--prefix=${_portablekit_ffmpeg_neutral_prefix}" ${_portablekit_ffmpeg_flags})
         # The licensing in docs/SOURCE_PROVENANCE.md assumes exactly this.
         file(READ "${_log}/configure.log" _portablekit_ffmpeg_configure)
         file(READ "${_log}/config.h" _portablekit_ffmpeg_config)
@@ -255,7 +260,11 @@ else()
                 "see ${_log}/configure.log")
         endif()
         _portablekit_ffmpeg_run(build "${_log}/build.log" "${PORTABLEKIT_MAKE}" -j${PSPRECOMP_GENERATED_JOBS})
-        _portablekit_ffmpeg_run(install "${_log}/install.log" "${PORTABLEKIT_MAKE}" install)
+        file(REMOVE_RECURSE "${_portablekit_ffmpeg_root}/destdir")
+        _portablekit_ffmpeg_run(install "${_log}/install.log"
+            "${PORTABLEKIT_MAKE}" install "DESTDIR=${_portablekit_ffmpeg_root}/destdir")
+        file(RENAME "${_portablekit_ffmpeg_root}/destdir${_portablekit_ffmpeg_neutral_prefix}" "${_portablekit_ffmpeg_prefix}")
+        file(REMOVE_RECURSE "${_portablekit_ffmpeg_root}/destdir")
         file(WRITE "${_portablekit_ffmpeg_stamp_file}" "${_portablekit_ffmpeg_stamp}")
     endif()
 
