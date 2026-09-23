@@ -175,11 +175,21 @@ void forget_game_glyphs() {
 
 std::int32_t floor_div64(std::int32_t value) { return value >= 0 ? value / 64 : -((-value + 63) / 64); }
 
+// The part of the buffer a glyph may be drawn into, in pixels. The plain call
+// draws anywhere in the buffer; the _Clip call names a rectangle inside it.
+struct Clip {
+    std::int32_t x{};
+    std::int32_t y{};
+    std::int32_t width{0x7FFFFFFF};
+    std::int32_t height{0x7FFFFFFF};
+};
+
 // Draws one glyph into the guest buffer described by SceFontGlyphImage. The
 // position is 26.6 fixed point; its fraction becomes a subpixel shift. Pixels
 // only ever get darker ink: the game draws some glyphs twice, slightly apart,
 // to embolden them, and a second pass must not erase the first.
-void blit_glyph(psprecomp::GuestMemory &memory, std::uint32_t image_address, std::uint32_t code) {
+void blit_glyph(psprecomp::GuestMemory &memory, std::uint32_t image_address, std::uint32_t code,
+                const Clip &clip = {}) {
     const std::uint32_t pixel_format = memory.load32(image_address);
     const auto x64 = static_cast<std::int32_t>(memory.load32(image_address + 4u));
     const auto y64 = static_cast<std::int32_t>(memory.load32(image_address + 8u));
@@ -200,10 +210,12 @@ void blit_glyph(psprecomp::GuestMemory &memory, std::uint32_t image_address, std
     for (int row = 0; row < glyph.height; ++row) {
         const std::int32_t y = y_origin + row;
         if (y < 0 || static_cast<std::uint32_t>(y) >= buffer_height) continue;
+        if (y < clip.y || y - clip.y >= clip.height) continue;
         const std::uint32_t line = buffer + static_cast<std::uint32_t>(y) * bytes_per_line;
         for (int column = 0; column < glyph.width; ++column) {
             const std::int32_t x = x_origin + column;
             if (x < 0 || static_cast<std::uint32_t>(x) >= buffer_width) continue;
+            if (x < clip.x || x - clip.x >= clip.width) continue;
             const std::uint8_t value = glyph.pixels[static_cast<std::size_t>(row) * glyph.width + column];
             if (value == 0u) continue;
             switch (pixel_format) {
@@ -330,6 +342,16 @@ void register_font(HleRegistrar &hle) {
         }
         note_game_cache(rt.memory(), ctx);
         if (image != 0u && fonts::ready()) blit_glyph(rt.memory(), image, arg(ctx, 1));
+        kernel().finish(ctx, 0u);
+    });
+    // The same, drawing only inside the rectangle (a3, t0) sized (t1, t2).
+    hle.add("sceLibFont", "sceFontGetCharGlyphImage_Clip", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t image = arg(ctx, 2);
+        const Clip clip{static_cast<std::int32_t>(arg(ctx, 3)), static_cast<std::int32_t>(arg(ctx, 4)),
+                        static_cast<std::int32_t>(arg(ctx, 5)), static_cast<std::int32_t>(arg(ctx, 6))};
+        trace("GetCharGlyphImage_Clip code=%04X clip=%d,%d %dx%d ra=%08X", arg(ctx, 1), clip.x, clip.y, clip.width,
+              clip.height, ctx.gpr[31]);
+        if (image != 0u && fonts::ready()) blit_glyph(rt.memory(), image, arg(ctx, 1), clip);
         kernel().finish(ctx, 0u);
     });
 }
