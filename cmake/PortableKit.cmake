@@ -219,12 +219,28 @@ function(portablekit_add_game target)
     set_target_properties(${target}_generated PROPERTIES JOB_POOL_COMPILE psprecomp_generated)
     _portablekit_inherit_settings(${target}_generated)
 
-    add_executable(${target}
+    # An Android app is a shared library, libmain.so, that SDL's Java activity
+    # loads and calls; the command-line executable still builds for Android
+    # without this and runs from adb shell.
+    option(PORTABLEKIT_ANDROID_APP "Build the Android app's libmain.so instead of an executable" OFF)
+    if(PORTABLEKIT_ANDROID_APP AND NOT (ANDROID AND PORTABLEKIT_RENDERER))
+        message(FATAL_ERROR "PORTABLEKIT_ANDROID_APP needs the Android NDK toolchain and the renderer (SDL3 and Vulkan)")
+    endif()
+    set(program_sources
         "${PORTABLEKIT_ROOT}/host/main.cpp"
         ${host_sources}
         ${profile_sources}
         ${renderer_sources}
         $<TARGET_OBJECTS:${target}_generated>)
+    if(PORTABLEKIT_ANDROID_APP)
+        add_library(${target} SHARED ${program_sources} "${PORTABLEKIT_ROOT}/host/platform/android_app.cpp")
+        target_compile_definitions(${target} PRIVATE PORTABLEKIT_ANDROID_APP=1)
+        set_target_properties(${target} PROPERTIES
+            OUTPUT_NAME main
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    else()
+        add_executable(${target} ${program_sources})
+    endif()
     target_compile_features(${target} PRIVATE cxx_std_20)
     _portablekit_inherit_settings(${target})
     add_dependencies(${target} ${target}_version)
@@ -358,10 +374,12 @@ function(_portablekit_add_overlay host_target meta_path output_dir)
     # of the runtime state the host already owns.
     target_include_directories(${target} PRIVATE
         "${source_dir}" "${PORTABLEKIT_ROOT}/host" "${PORTABLEKIT_ROOT}/include")
-    if(WIN32 OR APPLE)
+    if(WIN32 OR APPLE OR PORTABLEKIT_ANDROID_APP)
         # Both linkers want the host binary while linking the module: MSVC for
         # its import library, ld64 as the bundle loader. ELF leaves the host
-        # symbols undefined and resolves them when the module is loaded.
+        # symbols undefined and resolves them when the module is loaded. In an
+        # Android app the host is libmain.so, which the app loads privately,
+        # so the module names it as a dependency to find its symbols.
         target_link_libraries(${target} PRIVATE ${host_target})
     else()
         add_dependencies(${target} ${host_target})
@@ -392,4 +410,8 @@ function(_portablekit_add_overlay host_target meta_path output_dir)
         SUFFIX "${CMAKE_SHARED_LIBRARY_SUFFIX}"
         OUTPUT_NAME "${PORTABLEKIT_OVERLAY_PREFIX}"
         LIBRARY_OUTPUT_DIRECTORY "${output_dir}")
+    if(PORTABLEKIT_ANDROID_APP)
+        # An APK only carries libraries named lib*.so.
+        set_target_properties(${target} PROPERTIES PREFIX "lib")
+    endif()
 endfunction()
