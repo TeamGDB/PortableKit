@@ -64,9 +64,9 @@ ctest --test-dir out --output-on-failure
 
 | Platform | What you need |
 | --- | --- |
-| Linux | A C++20 compiler (GCC 12+ or Clang 16+), CMake 3.20+, Ninja, Python 3 |
-| macOS | Xcode command line tools (Apple Clang 15+), CMake 3.20+, Ninja, Python 3 (`brew install cmake ninja python`) |
-| Windows | Visual Studio 2022 with the C++ workload, CMake 3.20+, Python 3. Use the Visual Studio generator, or Ninja from a developer command prompt |
+| Linux | A C++20 compiler, CMake 3.20+, Ninja, Python 3. CI uses GCC 13 on Ubuntu 24.04 |
+| macOS | Xcode command line tools, CMake 3.20+, Ninja, Python 3 (`brew install cmake ninja python`). CI uses Apple Clang 15 on macOS 14 |
+| Windows | Visual Studio 2022 with the C++ workload, CMake 3.20+, Python 3. Use the Visual Studio generator (then `--config Release` and `ctest -C Release`), or Ninja from a developer command prompt. CI uses MSVC 19.44 |
 
 A **port** additionally needs SDL3, a Vulkan loader and headers, and `glslangValidator` for the renderer, plus `make` and a C compiler to build the bundled FFmpeg (or an installed FFmpeg with `-DPORTABLEKIT_FFMPEG=system`). On macOS, Vulkan runs through MoltenVK: `brew install sdl3 molten-vk vulkan-loader vulkan-headers glslang`. `ccache` is used automatically when it is installed and saves hours. [docs/BUILDING.md](docs/BUILDING.md) has the details.
 
