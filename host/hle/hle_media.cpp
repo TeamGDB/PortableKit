@@ -318,6 +318,133 @@ void present_frame(Runtime &rt) {
 #endif
 }
 
+// One sample of the pad, as the game reads it.
+struct CtrlSample {
+    std::uint32_t buttons = 0u;
+    std::uint8_t analog_x = 0x80u;
+    std::uint8_t analog_y = 0x80u;
+    std::uint8_t right_x = 0x80u;
+    std::uint8_t right_y = 0x80u;
+};
+
+CtrlSample sample_ctrl() {
+    CtrlSample sample;
+#if defined(PORTABLEKIT_HAS_RENDERER)
+    if (media().renderer && media().renderer->available()) {
+        // The pad as it is now, not as it was at the last flip (#8).
+        // <prefix>_PAD_AT_FLIP keeps the state of the flip, as before.
+        static const bool at_flip = portablekit::env("PAD_AT_FLIP") != nullptr;
+        if (!at_flip) media().renderer->sample_pad();
+        const gpu::PadState pad = media().renderer->pad();
+        sample.buttons = pad.buttons;
+        sample.analog_x = pad.analog_x;
+        sample.analog_y = pad.analog_y;
+        sample.right_x = pad.right_x;
+        sample.right_y = pad.right_y;
+        // Keep the game's digital commands neutral while the analog
+        // camera consumes these axes: otherwise the game's one-shot
+        // vertical command fires from the same push and glides the camera
+        // against what the port is doing. The physical D-pad stays available.
+        if (camera::game_camera_driving()) {
+            sample.right_x = 0x80u;
+            sample.right_y = 0x80u;
+        } else if (camera::game_camera_aim_boost()) {
+            // Past the dead zone, any push reaches the game at full
+            // length in the same direction, so its aim steps and the
+            // driver decides how far. With the stick idle, the mouse's
+            // direction stands in for it.
+            int dx = static_cast<int>(sample.right_x) - 0x80;
+            int dy = static_cast<int>(sample.right_y) - 0x80;
+            if (dx == 0 && dy == 0) {
+                if (const auto mouse = camera::game_camera_mouse_aim()) {
+                    dx = static_cast<int>(std::lround(mouse->x * 127.0f));
+                    dy = static_cast<int>(std::lround(mouse->y * 127.0f));
+                }
+            }
+            const float length = std::sqrt(static_cast<float>(dx * dx + dy * dy));
+            if (length > 0.0f) {
+                sample.right_x = static_cast<std::uint8_t>(std::clamp(0x80 + static_cast<int>(std::lround(dx * 127.0f / length)), 0, 255));
+                sample.right_y = static_cast<std::uint8_t>(std::clamp(0x80 + static_cast<int>(std::lround(dy * 127.0f / length)), 0, 255));
+            }
+        } else if (sample.right_x == 0x80u && sample.right_y == 0x80u &&
+                   settings::current().right_stick == settings::RightStick::Camera) {
+            // The game's own camera: the mouse switches its turn on while
+            // it moves sideways. Not in the D-pad mode, where the same
+            // bits move cursors in the game's menus.
+            if (const int turn = camera::game_camera_mouse_stock_turn()) sample.right_x = turn > 0 ? 0xFFu : 0x01u;
+        }
+    }
+#endif
+    return sample;
+}
+
+// Writes `count` SceCtrlData entries of the same sample.
+void write_ctrl_buffer(psprecomp::GuestMemory &memory, std::uint32_t address, std::uint32_t count,
+                       const CtrlSample &sample) {
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const std::uint32_t entry = address + i * 16u;
+        memory.store32(entry, static_cast<std::uint32_t>(kernel().now_us()));
+        memory.store32(entry + 4u, sample.buttons);
+        memory.store8(entry + 8u, sample.analog_x);
+        memory.store8(entry + 9u, sample.analog_y);
+        // Bytes 10 and 11 are the HD release's second stick, not padding.
+        // Leaving them zero reads as a full diagonal deflection and turns
+        // the camera every frame; 0x80 is the centre the guest tests for.
+        memory.store8(entry + 10u, sample.right_x);
+        memory.store8(entry + 11u, sample.right_y);
+        for (std::uint32_t j = 12u; j < 16u; ++j) memory.store8(entry + j, 0u);
+    }
+}
+
+// The latch: which buttons went down and which came up since the game last
+// read it. The PSP samples the pad once a vblank and accumulates the edges
+// between reads, so a press shorter than the game's frame is still seen.
+struct CtrlLatch {
+    bool sampling = false;
+    std::uint32_t previous = 0u;
+    std::uint32_t make = 0u;
+    std::uint32_t release = 0u;
+    std::uint32_t samples = 0u;
+};
+
+CtrlLatch &ctrl_latch() {
+    static CtrlLatch latch;
+    return latch;
+}
+
+void sample_latch() {
+    CtrlLatch &latch = ctrl_latch();
+    const std::uint32_t now = sample_ctrl().buttons;
+    latch.make |= now & ~latch.previous;
+    latch.release |= latch.previous & ~now;
+    latch.previous = now;
+    ++latch.samples;
+}
+
+// SceCtrlLatch: make, break, press, release. Reading it starts the next
+// accumulation. Returns the number of samples since the last read.
+std::uint32_t read_latch(psprecomp::GuestMemory &memory, std::uint32_t address) {
+    CtrlLatch &latch = ctrl_latch();
+    if (!latch.sampling) {
+        // Start sampling the first time a game asks; until then there were
+        // no edges to see.
+        latch.sampling = true;
+        latch.previous = sample_ctrl().buttons;
+        kernel().add_vblank_hook(sample_latch);
+    }
+    if (address != 0u) {
+        memory.store32(address, latch.make);
+        memory.store32(address + 4u, latch.release);
+        memory.store32(address + 8u, latch.previous);
+        memory.store32(address + 12u, ~latch.previous);
+    }
+    const std::uint32_t samples = latch.samples;
+    latch.make = 0u;
+    latch.release = 0u;
+    latch.samples = 0u;
+    return samples;
+}
+
 void register_display_ctrl(HleRegistrar &hle) {
     hle.add("sceDisplay", "sceDisplaySetMode", [](Runtime &, AllegrexContext &ctx) {
         media().display.mode = arg(ctx, 0);
@@ -350,76 +477,27 @@ void register_display_ctrl(HleRegistrar &hle) {
     });
     // Reading the controller buffer blocks until the next sample (vblank).
     hle.add("sceCtrl", "sceCtrlReadBufferPositive", [](Runtime &rt, AllegrexContext &ctx) {
-        const std::uint32_t address = arg(ctx, 0);
         const std::uint32_t count = std::clamp<std::uint32_t>(arg(ctx, 1), 1u, 64u);
-        std::uint32_t buttons = 0u;
-        std::uint8_t analog_x = 0x80u;
-        std::uint8_t analog_y = 0x80u;
-        std::uint8_t right_x = 0x80u;
-        std::uint8_t right_y = 0x80u;
-#if defined(PORTABLEKIT_HAS_RENDERER)
-        if (media().renderer && media().renderer->available()) {
-            // The pad as it is now, not as it was at the last flip (#8).
-            // <prefix>_PAD_AT_FLIP keeps the state of the flip, as before.
-            static const bool at_flip = portablekit::env("PAD_AT_FLIP") != nullptr;
-            if (!at_flip) media().renderer->sample_pad();
-            const gpu::PadState pad = media().renderer->pad();
-            buttons = pad.buttons;
-            analog_x = pad.analog_x;
-            analog_y = pad.analog_y;
-            right_x = pad.right_x;
-            right_y = pad.right_y;
-            // Keep the game's digital commands neutral while the analog
-            // camera consumes these axes: otherwise the game's one-shot
-            // vertical command fires from the same push and glides the camera
-            // against what the port is doing. The physical D-pad stays available.
-            if (camera::game_camera_driving()) {
-                right_x = 0x80u;
-                right_y = 0x80u;
-            } else if (camera::game_camera_aim_boost()) {
-                // Past the dead zone, any push reaches the game at full
-                // length in the same direction, so its aim steps and the
-                // driver decides how far. With the stick idle, the mouse's
-                // direction stands in for it.
-                int dx = static_cast<int>(right_x) - 0x80;
-                int dy = static_cast<int>(right_y) - 0x80;
-                if (dx == 0 && dy == 0) {
-                    if (const auto mouse = camera::game_camera_mouse_aim()) {
-                        dx = static_cast<int>(std::lround(mouse->x * 127.0f));
-                        dy = static_cast<int>(std::lround(mouse->y * 127.0f));
-                    }
-                }
-                const float length = std::sqrt(static_cast<float>(dx * dx + dy * dy));
-                if (length > 0.0f) {
-                    right_x = static_cast<std::uint8_t>(std::clamp(0x80 + static_cast<int>(std::lround(dx * 127.0f / length)), 0, 255));
-                    right_y = static_cast<std::uint8_t>(std::clamp(0x80 + static_cast<int>(std::lround(dy * 127.0f / length)), 0, 255));
-                }
-            } else if (right_x == 0x80u && right_y == 0x80u &&
-                       settings::current().right_stick == settings::RightStick::Camera) {
-                // The game's own camera: the mouse switches its turn on while
-                // it moves sideways. Not in the D-pad mode, where the same
-                // bits move cursors in the game's menus.
-                if (const int turn = camera::game_camera_mouse_stock_turn()) right_x = turn > 0 ? 0xFFu : 0x01u;
-            }
-        }
-#endif
-        auto &memory = rt.memory();
-        for (std::uint32_t i = 0; i < count; ++i) {
-            const std::uint32_t entry = address + i * 16u;
-            memory.store32(entry, static_cast<std::uint32_t>(kernel().now_us()));
-            memory.store32(entry + 4u, buttons);
-            memory.store8(entry + 8u, analog_x);
-            memory.store8(entry + 9u, analog_y);
-            // Bytes 10 and 11 are the HD release's second stick, not padding.
-            // Leaving them zero reads as a full diagonal deflection and turns
-            // the camera every frame; 0x80 is the centre the guest tests for.
-            memory.store8(entry + 10u, right_x);
-            memory.store8(entry + 11u, right_y);
-            for (std::uint32_t j = 12u; j < 16u; ++j) memory.store8(entry + j, 0u);
-        }
+        write_ctrl_buffer(rt.memory(), arg(ctx, 0), count, sample_ctrl());
         WaitState wait{};
         wait.type = WaitType::VBlank;
         kernel().block(ctx, wait, count);
+    });
+    // Peeking returns the latest sample at once.
+    hle.add("sceCtrl", "sceCtrlPeekBufferPositive", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t count = std::clamp<std::uint32_t>(arg(ctx, 1), 1u, 64u);
+        write_ctrl_buffer(rt.memory(), arg(ctx, 0), count, sample_ctrl());
+        kernel().finish(ctx, count);
+    });
+    hle.add("sceCtrl", "sceCtrlPeekLatch", [](Runtime &rt, AllegrexContext &ctx) {
+        kernel().finish(ctx, read_latch(rt.memory(), arg(ctx, 0)));
+    });
+    // Reading the latch waits for the next sample, like reading the buffer.
+    hle.add("sceCtrl", "sceCtrlReadLatch", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t samples = read_latch(rt.memory(), arg(ctx, 0));
+        WaitState wait{};
+        wait.type = WaitType::VBlank;
+        kernel().block(ctx, wait, std::max(samples, 1u));
     });
 }
 
