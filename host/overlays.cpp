@@ -130,13 +130,13 @@ std::map<std::uint32_t, std::uint64_t> &installed_headers() {
 
 std::filesystem::path overlay_directory() {
     if (const char *dir = portablekit::env("OVERLAY_DIR"); dir != nullptr && *dir != '\0') return dir;
-    const std::filesystem::path directory = executable_directory();
 #if defined(PORTABLEKIT_ANDROID_APP)
     // An APK's libraries all sit in one flat directory, next to libmain.so.
-    return directory;
+    return executable_directory();
 #else
+    const std::filesystem::path directory = bundled_overlay_directory();
     if (directory.empty()) return "overlays";
-    return directory / "overlays";
+    return directory;
 #endif
 }
 
