@@ -1,5 +1,6 @@
 #pragma once
 
+#include "camera/camera_input.hpp"
 #include "profile.hpp"
 #include "settings/settings.hpp"
 
@@ -16,9 +17,15 @@ namespace portablekit::camera {
 
 // Once per presented game frame, at the game's flip (never per interpolated
 // present).
+// A game without a driver has nothing to take what the stick and the mouse
+// ask for, so it is dropped here rather than left to build up.
 inline void game_camera_frame(psprecomp::Runtime &runtime) {
     const CameraDriver *driver = game().camera;
-    if (driver != nullptr && driver->frame != nullptr) driver->frame(runtime);
+    if (driver == nullptr) {
+        discard();
+        return;
+    }
+    if (driver->frame != nullptr) driver->frame(runtime);
 }
 
 // The port is driving the game's camera right now, so the game must not also

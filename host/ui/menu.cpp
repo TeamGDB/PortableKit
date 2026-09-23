@@ -531,7 +531,9 @@ void Menu::controls() {
         }
     }
     const bool camera = s.right_stick == settings::RightStick::Camera;
-    {
+    // Only a game with a camera driver can be turned by how far the stick is
+    // pushed; for any other the rows would change nothing.
+    if (const CameraDriver *driver = portablekit::game().camera; driver != nullptr) {
         RowOptions o = options_for("input.analog_camera",
                                    "Turn and tilt the quest camera as far as the stick is pushed, instead of the "
                                    "game's fixed-speed turn and vertical presets. Release holds the angle; the D-pad "
@@ -554,17 +556,20 @@ void Menu::controls() {
             s.camera_speed = static_cast<float>(speed);
             settings::save();
         }
-        o = options_for("input.aim_speed", "How fast a bow or a bowgun aims at full deflection, in degrees a "
-                                           "second. The game's own aim moves at about 100 and only past half "
-                                           "the stick's travel.");
-        if (!s.analog_camera && !o.disabled) {
-            o.disabled = true;
-            o.note = "Analog camera is off";
-        }
-        int aim = static_cast<int>(s.aim_speed);
-        if (slider_row("Aim speed", aim, 10, 360, 5, "%d deg/s", o)) {
-            s.aim_speed = static_cast<float>(aim);
-            settings::save();
+        // And only a driver that aims has an aim to set the speed of.
+        if (driver->aim_boost != nullptr) {
+            o = options_for("input.aim_speed", "How fast a bow or a bowgun aims at full deflection, in degrees a "
+                                               "second. The game's own aim moves at about 100 and only past half "
+                                               "the stick's travel.");
+            if (!s.analog_camera && !o.disabled) {
+                o.disabled = true;
+                o.note = "Analog camera is off";
+            }
+            int aim = static_cast<int>(s.aim_speed);
+            if (slider_row("Aim speed", aim, 10, 360, 5, "%d deg/s", o)) {
+                s.aim_speed = static_cast<float>(aim);
+                settings::save();
+            }
         }
     }
     {
