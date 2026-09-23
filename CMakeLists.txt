@@ -248,6 +248,20 @@ if(PSPRECOMP_BUILD_TESTS)
     add_test(NAME portablekit_render_tests COMMAND portablekit_render_tests)
 endif()
 
+# Frame interpolation checks: matching draws, cuts, blending, the present
+# clock and the frame rate governor.
+if(PSPRECOMP_BUILD_TESTS)
+    add_executable(portablekit_interpolation_tests
+        "${PORTABLEKIT_ROOT}/tests/interpolation_tests.cpp"
+        "${PORTABLEKIT_ROOT}/host/gpu/frame_interpolation.cpp"
+        "${PORTABLEKIT_ROOT}/host/gpu/frame_pacing.cpp")
+    target_compile_features(portablekit_interpolation_tests PRIVATE cxx_std_20)
+    target_include_directories(portablekit_interpolation_tests PRIVATE
+        "${PORTABLEKIT_ROOT}/host" "${PORTABLEKIT_ROOT}/include")
+    set_target_properties(portablekit_interpolation_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME portablekit_interpolation_tests COMMAND portablekit_interpolation_tests)
+endif()
+
 # Keyboard and mouse bindings: names, settings.ini spelling, the menu's
 # assignment rules and what held keys press. No SDL or game data.
 if(PSPRECOMP_BUILD_TESTS)

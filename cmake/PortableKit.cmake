@@ -75,6 +75,8 @@ set(PORTABLEKIT_HOST_SOURCES
     CACHE INTERNAL "PortableKit system-layer sources, relative to PORTABLEKIT_ROOT")
 
 set(PORTABLEKIT_RENDERER_SOURCES
+    host/gpu/frame_interpolation.cpp
+    host/gpu/frame_pacing.cpp
     host/gpu/replacement_textures.cpp
     host/gpu/vulkan_renderer.cpp
     host/ui/file_browser.cpp
