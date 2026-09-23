@@ -249,7 +249,13 @@ std::uint32_t do_load(psprecomp::GuestMemory &memory, std::uint32_t params, cons
     std::cerr << "[savedata] loaded " << count << " bytes from "
               << savedata::save_folder(state().memory_stick, files).string()
               << (files.key ? " (decrypted)" : "") << "\n";
-    if (data.size() > capacity)
+    // An encrypted file is padded with zeros to a multiple of 16 bytes, so a
+    // buffer the size the game saved leaves up to 15 zero bytes behind. Only
+    // data that does not fit is worth saying.
+    const bool cut = data.size() > capacity &&
+                     (data.size() - capacity >= 16u ||
+                      std::any_of(data.begin() + capacity, data.end(), [](std::uint8_t b) { return b != 0u; }));
+    if (cut)
         std::cerr << "[savedata] " << files.file_name << " holds " << data.size() << " bytes; the buffer takes "
                   << capacity << "\n";
     return result::kOk;
