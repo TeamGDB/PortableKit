@@ -182,6 +182,13 @@ void register_platform(HleRegistrar &hle) {
         memory.store32(out + 12u, static_cast<std::uint32_t>(now % 1'000'000u));
         kernel().finish(ctx, 0u);
     });
+    // The RTC's tick: microseconds since 0001-01-01 00:00:00 UTC, which is
+    // 719162 days before the Unix epoch.
+    hle.add("sceRtc", "sceRtcGetCurrentTick", [](Runtime &rt, AllegrexContext &ctx) {
+        constexpr std::uint64_t kUnixEpochTick = 719'162ull * 86'400ull * 1'000'000ull;
+        if (arg(ctx, 0) != 0u) store64(rt.memory(), arg(ctx, 0), kUnixEpochTick + guest_unix_us());
+        kernel().finish(ctx, 0u);
+    });
     hle.add("sceImpose", "sceImposeSetLanguageMode", success);
     // The shell's "the disc has been ejected" popup. There is no shell and no
     // disc to eject, so whether the game wants it makes no difference.

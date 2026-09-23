@@ -68,6 +68,39 @@ void register_threads(HleRegistrar &hle) {
         else kernel().finish(ctx, as_unsigned(thread->exit_status));
     });
 
+    // Waits until the thread has ended and answers its exit status. A thread
+    // that deletes itself as it ends is gone by the time the waiter looks, and
+    // its status with it; that answers 0. The timeout is in microseconds at a1.
+    const auto wait_thread_end = [](Runtime &rt, AllegrexContext &ctx) {
+        const SceUID uid = as_signed(arg(ctx, 0));
+        const Thread *thread = kernel().find_thread(uid);
+        if (thread == nullptr) {
+            kernel().finish(ctx, error::kUnknownThid);
+            return;
+        }
+        if (uid == kernel().current_uid()) {
+            kernel().finish(ctx, error::kIllegalThid);
+            return;
+        }
+        const std::uint32_t timeout_address = arg(ctx, 1);
+        std::optional<std::uint64_t> timeout;
+        if (timeout_address != 0u) timeout = rt.memory().load32(timeout_address);
+        auto &memory = rt.memory();
+        kernel().wait_host(ctx, timeout, [uid, timeout_address, &memory](bool timed_out) -> std::optional<std::uint32_t> {
+            const Thread *waited = kernel().find_thread(uid);
+            if (waited == nullptr) return 0u;
+            if (waited->status == ThreadStatus::Dormant || waited->status == ThreadStatus::Dead)
+                return as_unsigned(waited->exit_status);
+            if (timed_out) {
+                if (timeout_address != 0u) memory.store32(timeout_address, 0u);
+                return error::kWaitTimeout;
+            }
+            return std::nullopt;
+        });
+    };
+    hle.add("ThreadManForUser", "sceKernelWaitThreadEnd", wait_thread_end);
+    hle.add("ThreadManForUser", "sceKernelWaitThreadEndCB", wait_thread_end);
+
     // The *CB variants run the thread's notified callbacks before waiting.
     const auto sleep_cb = [](Runtime &, AllegrexContext &ctx) {
         Thread *thread = kernel().current_thread();
