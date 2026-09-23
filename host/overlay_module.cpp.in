@@ -1,0 +1,25 @@
+// Entry point of one overlay library, configured from the overlay's meta.txt by
+// the profile's CMakeLists.txt. Everything else in the library is psp_recomp
+// output carrying the @PORTABLEKIT_OVERLAY_PREFIX@ symbol prefix.
+#define PORTABLEKIT_OVERLAY_MODULE 1
+#include "overlay_module.hpp"
+
+#include "psprecomp/runtime.hpp"
+
+namespace psprecomp {
+void register_@PORTABLEKIT_OVERLAY_PREFIX@_functions(Runtime &runtime);
+}
+
+namespace {
+
+constexpr portablekit::OverlayModuleInfo kInfo{portablekit::kOverlayAbiVersion, @PORTABLEKIT_OVERLAY_BASE@u,
+                                          @PORTABLEKIT_OVERLAY_SIZE@u, @PORTABLEKIT_OVERLAY_CODE_SIZE@u,
+                                          @PORTABLEKIT_OVERLAY_HASH@ull, "@PORTABLEKIT_OVERLAY_NAME@"};
+
+} // namespace
+
+const portablekit::OverlayModuleInfo *portablekit_overlay_info() { return &kInfo; }
+
+void portablekit_register_overlay(psprecomp::Runtime &runtime) {
+    psprecomp::register_@PORTABLEKIT_OVERLAY_PREFIX@_functions(runtime);
+}
