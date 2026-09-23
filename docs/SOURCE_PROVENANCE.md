@@ -10,7 +10,7 @@ The project may use public hardware documentation, observable program behavior a
 
 ## Decryption
 
-The framework contains no EBOOT/PRX decryption. The installer (`host/install`) prepares the game's executable from the player's own disc image: it accepts exactly one encrypted file per profile, identified by the SHA-256 the profile declares, with the key that profile supplies for its release's tag, and checks its output against the SHA-256 of the executable the profile was generated from. It was written for this project from public descriptions of the file format and the crypto primitives; no code from other implementations was copied or adapted. Its AES implementation is tiny-AES-c (public domain), kept with its notice in `third_party/tiny_aes`. Developers can still prepare the executable outside the project and supply it through `the profile's game directory`.
+The framework contains no general-purpose EBOOT or PRX decrypter. The installer (`host/install`) prepares one game's executable from the player's own disc image: it accepts exactly one encrypted file per profile, identified by the SHA-256 the profile declares, decrypts it with the fixed crypto-engine keys the file format uses and the key the profile supplies for its release's tag, and checks its output against the SHA-256 of the executable the profile was generated from. Any other file is refused. It was written for this project from public descriptions of the file format and the crypto primitives; no code from other implementations was copied or adapted. The key values are published technical constants. Its AES implementation is tiny-AES-c (public domain), kept with its notice in `third_party/tiny_aes`. Developers can still prepare the executable outside the project and supply it through the profile's game directory (`<PREFIX>_GAME_DIR`).
 
 ## Save data
 
@@ -28,11 +28,11 @@ The built-in server (`server.cpp`, used by *Host a session* and `--adhoc-server`
 
 ## Profile code
 
-A profile owns its generated AOT corpus, address-specific lowering, HLE behavior and native fast paths. Those files remain isolated under `a profile's repository` so they do not become hidden dependencies of the generic framework.
+A profile owns its generated AOT corpus, address-specific lowering, HLE behavior and native fast paths. Those files stay in the profile's own repository, and generated code is never committed at all, so they do not become hidden dependencies of the generic framework.
 
 ## Third-party components
 
-Third-party source, binary dependencies, shader code and notices stay beside the profile that needs them. Their original copyright and license notices must be preserved.
+Third-party source, binary dependencies, shader code and notices stay beside the code that needs them. Their original copyright and license notices must be preserved.
 
 | Component | Used by | License | How it is included |
 | --- | --- | --- | --- |
@@ -46,6 +46,17 @@ Third-party source, binary dependencies, shader code and notices stay beside the
 | [Noto Sans CJK JP](https://github.com/notofonts/noto-cjk) | a port's releases: fallback font for Japanese text | SIL Open Font License 1.1 | Downloaded by the release build, shipped in `fonts/`; not in the repository |
 
 A port carries these notices in its own packaging, together with the license texts.
+
+## Binary releases
+
+The source is MIT, but a binary release of a port is a combination, and it has to meet every component's terms:
+
+- **Notices.** Ship the licence text of every component in the table above that the binary contains or bundles: Dear ImGui, stb, xxHash and tiny-AES-c are compiled in; SDL3 and FFmpeg are shipped as shared libraries.
+- **FFmpeg (LGPL).** It must stay dynamically linked and replaceable by the user: ship the libraries as separate files, unmodified, with their licence text and a note saying where their exact source is (the build writes that note next to the libraries). Do not link FFmpeg statically into a release, and do not enable its GPL or non-free parts; the bundled build refuses to. The prebuilt Windows libraries are LGPL-3.0-or-later, which additionally means a user must be able to replace them and run the result.
+- **Patents.** The bundled FFmpeg decodes H.264 video. Codec patents are separate from copyright licences, and the LGPL does not grant them; whoever publishes binaries is responsible for any patent licensing that applies where they distribute. This is not legal advice.
+- **Fonts.** A release that ships Noto Sans CJK ships its OFL-1.1 licence with it.
+
+
 
 ## Contribution rule
 

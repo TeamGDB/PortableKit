@@ -1,17 +1,17 @@
 # AGENTS.md
 
-Working notes for anyone changing this repository: people and coding agents alike. Read this first. It is short on purpose and links to the longer documents instead of repeating them.
+Working notes for anyone changing this repository: people and coding agents alike. Read this first; [CONTRIBUTING.md](CONTRIBUTING.md) is the same rules for someone opening their first pull request. It is short on purpose and links to the longer documents instead of repeating them.
 
 PortableKit turns a PlayStation Portable game into a native application. It recompiles the game's PSP (MIPS) code to C++ ahead of time and supplies the PSP system around it: the kernel, HLE modules, a Vulkan GE renderer, audio, input, save data, ad hoc networking, an ImGui interface and a first-run installer. The recompiler and the core runtime are in `src/` and `include/psprecomp/`; the system layer is in `host/`.
 
-**A game is not in this repository.** Each port is its own repository with its own profile: [Yakumo](https://github.com/TeamGDB/Yakumo) for *Monster Hunter Portable 3rd HD Ver.*, [Tenkawa](https://github.com/TeamGDB/Tenkawa) for *Dragon Ball Z: Tenkaichi Tag Team*. A profile is a file of constants and a four-line `CMakeLists.txt`; if it ever needs to be more, that is a gap in the framework, not in the profile.
+**A game is not in this repository.** Each port is its own repository with its own profile: [Yakumo](https://github.com/TeamGDB/Yakumo) for *Monster Hunter Portable 3rd HD Ver.*, [Tenkawa](https://github.com/TeamGDB/Tenkawa) for *Dragon Ball Z: Tenkaichi Tag Team*, [Purun](https://github.com/TeamGDB/Purun) for *LocoRoco 2*. A profile is a file of constants and a short `CMakeLists.txt`; if it ever needs to be more, that is a gap in the framework, not in the profile.
 
 ## Rules
 
 - **English only** in everything committed: code, comments, docs, commit messages, pull requests.
 - **Branch and pull request.** Never push to `main`.
 - **No game data, ever.** Disc images, executables, generated code, overlay corpora and saves stay local. The same goes for anything personal: home paths, user names, machine names, addresses.
-- **Nothing about one game in `host/`, `src/` or `include/`.** A game's disc id, its addresses, its save folders, its quirks go in that game's profile. If the framework needs to know something, it is a field of `portablekit::GameProfile` in [`host/profile.hpp`](../host/profile.hpp) or a hook on it, and the framework asks.
+- **Nothing about one game in `host/`, `src/` or `include/`.** A game's disc id, its addresses, its save folders, its quirks go in that game's profile. If the framework needs to know something, it is a field of `portablekit::GameProfile` in [`host/profile.hpp`](host/profile.hpp) or a hook on it, and the framework asks.
 - **Write it yourself.** Read public documentation and other projects to understand the PSP, file formats and protocols. Never copy, paste or line-by-line translate code from a project whose licence is incompatible with this repository's MIT licence. Constants, offsets and format facts are fine. Record where intentionally included third-party code comes from; see [SOURCE_PROVENANCE.md](docs/SOURCE_PROVENANCE.md).
 - **Say what you did not verify.** A pull request lists what was tested, on which platform and with which game, and what was not.
 

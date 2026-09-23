@@ -1,0 +1,60 @@
+# Builds the framework on its own and runs its tests: the recompiler, the
+# runtime, the system layer's host check and every test that needs no game.
+# No game data, no secrets and no GPU are involved.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux (GCC)
+            os: ubuntu-24.04
+            generator: Ninja
+          - name: macOS (Apple Clang)
+            os: macos-14
+            generator: Ninja
+          - name: Windows (MSVC)
+            os: windows-2022
+            generator: Visual Studio 17 2022
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Install Ninja (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Install Ninja (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      - name: Configure
+        run: >
+          cmake -S . -B out -G "${{ matrix.generator }}"
+          -DCMAKE_BUILD_TYPE=Release
+          -DPSPRECOMP_CCACHE=OFF
+
+      - name: Build
+        run: cmake --build out --config Release --parallel 2
+
+      - name: Test
+        run: ctest --test-dir out --build-config Release --output-on-failure --timeout 300
