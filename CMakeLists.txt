@@ -114,6 +114,19 @@ if(PSPRECOMP_LTO)
     endif()
 endif()
 
+# A port calls portablekit_add_game() from its own directory, which is a
+# sibling of this one, so none of the directory settings above reach its
+# targets: not the compiler cache, not the AOT switches, not whole-program
+# optimization. Record them for portablekit_add_game() to apply.
+get_directory_property(_portablekit_definitions COMPILE_DEFINITIONS)
+get_directory_property(_portablekit_options COMPILE_OPTIONS)
+set_property(GLOBAL PROPERTY PORTABLEKIT_CXX_COMPILER_LAUNCHER "${CMAKE_CXX_COMPILER_LAUNCHER}")
+set_property(GLOBAL PROPERTY PORTABLEKIT_COMPILE_DEFINITIONS "${_portablekit_definitions}")
+set_property(GLOBAL PROPERTY PORTABLEKIT_COMPILE_OPTIONS "${_portablekit_options}")
+if(PSPRECOMP_LTO AND PSPRECOMP_LTO_SUPPORTED)
+    set_property(GLOBAL PROPERTY PORTABLEKIT_IPO ON)
+endif()
+
 # Keep the runtime as an object library so profile executables own its objects.
 # On Windows this also lets WINDOWS_EXPORT_ALL_SYMBOLS include runtime symbols
 # in the executable's import library for separately linked overlay modules.

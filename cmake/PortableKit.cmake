@@ -101,6 +101,31 @@ function(_portablekit_prefix out root)
     set(${out} "${result}" PARENT_SCOPE)
 endfunction()
 
+# The framework's build settings, for a target made in the port's directory
+# (see the end of the framework's CMakeLists.txt). A setting the port's own
+# directory already has is left as the port set it.
+function(_portablekit_inherit_settings target)
+    get_property(launcher GLOBAL PROPERTY PORTABLEKIT_CXX_COMPILER_LAUNCHER)
+    if(launcher AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
+        set_property(TARGET ${target} PROPERTY CXX_COMPILER_LAUNCHER "${launcher}")
+    endif()
+    get_property(definitions GLOBAL PROPERTY PORTABLEKIT_COMPILE_DEFINITIONS)
+    if(definitions)
+        target_compile_definitions(${target} PRIVATE ${definitions})
+    endif()
+    get_property(options GLOBAL PROPERTY PORTABLEKIT_COMPILE_OPTIONS)
+    if(options)
+        target_compile_options(${target} PRIVATE ${options})
+    endif()
+    get_property(ipo GLOBAL PROPERTY PORTABLEKIT_IPO)
+    if(ipo)
+        set_target_properties(${target} PROPERTIES
+            INTERPROCEDURAL_OPTIMIZATION_RELEASE ON
+            INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON
+            INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL ON)
+    endif()
+endfunction()
+
 function(portablekit_add_game target)
     cmake_parse_arguments(GAME "" "PROFILE_DIR" "SOURCES" ${ARGN})
     if(NOT GAME_PROFILE_DIR)
@@ -187,6 +212,7 @@ function(portablekit_add_game target)
     target_include_directories(${target}_generated PRIVATE
         "${PORTABLEKIT_ROOT}/include" "${GAME_PROFILE_DIR}/generated")
     set_target_properties(${target}_generated PROPERTIES JOB_POOL_COMPILE psprecomp_generated)
+    _portablekit_inherit_settings(${target}_generated)
 
     add_executable(${target}
         "${PORTABLEKIT_ROOT}/host/main.cpp"
@@ -195,6 +221,7 @@ function(portablekit_add_game target)
         ${renderer_sources}
         $<TARGET_OBJECTS:${target}_generated>)
     target_compile_features(${target} PRIVATE cxx_std_20)
+    _portablekit_inherit_settings(${target})
     add_dependencies(${target} ${target}_version)
     if(PORTABLEKIT_RENDERER)
         add_dependencies(${target} ${target}_shaders)
@@ -321,6 +348,7 @@ function(_portablekit_add_overlay host_target meta_path output_dir)
     set(target "overlay_${PORTABLEKIT_OVERLAY_PREFIX}")
     add_library(${target} MODULE ${sources} "${entry_point}")
     target_compile_features(${target} PRIVATE cxx_std_20)
+    _portablekit_inherit_settings(${target})
     # Headers only: linking psprecomp_core would give the module its own copy
     # of the runtime state the host already owns.
     target_include_directories(${target} PRIVATE
