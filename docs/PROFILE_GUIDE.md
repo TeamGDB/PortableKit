@@ -53,6 +53,13 @@ Read the values off the player's own disc rather than recalling them:
 
 Two fields are hooks rather than values. `register_extra_hle` adds calls this game makes that the framework does not implement, or replaces one it gets wrong for this game. `patch_loaded_image` is for per-game fixes with no better home. Both may be null, and a profile that needs neither is the goal.
 
+Two more are for a port that goes further than the PSP did, and both are null until a game has earned them:
+
+- `camera`, a `CameraDriver`: drives the game's own camera from what the player asks of it. The framework turns every device — the second stick, camera keys, the mouse — into one request (`host/camera/camera_input.hpp`); the driver takes it at each flip and says whether the game must stop acting on the second stick meanwhile, whether the game is aiming, and how fast the current camera turns (`host/camera/camera_driver.hpp` has the framework's side and its defaults). Where a game keeps its camera is the game's, so the driver is too. Without one, Analog camera and its rows are not offered and what the devices ask of the camera is dropped. Yakumo's `host/camera/game_camera.cpp` is the example.
+- `view_aspect_frame`: called at each flip with the shape of the picture the game is drawn into, so a game that can widen its own view does. Without it the renderer does not offer Fill. Yakumo's `host/camera/game_aspect.cpp` is the example.
+
+A driver writes into the game's memory, so check the code it relies on before it writes anything — Yakumo compares every instruction and constant it depends on at start-up, from `patch_loaded_image`, and stays out, saying why, if one differs.
+
 ## Generated code stays out of the repository
 
 Recompiled code is a translation of the game's own executable, so it is derived from copyrighted material. Every player generates it from their own copy. Make that reproducible by documenting the executable identity and hash the profile expects, the exact generator command, and any deterministic pass that follows it.
