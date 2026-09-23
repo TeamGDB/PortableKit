@@ -47,6 +47,7 @@ Read the values off the player's own disc rather than recalling them:
 | `executable_sha256` | `sha256` of what the installer decrypts it to |
 | `decryption_tag` | The word at offset 0xD0 of `EBOOT.BIN` |
 | `decryption_key` | The published key table's entry for that tag |
+| `decryption_key_table` | Instead of `decryption_key`, for a tag that selects the older header layout: the published 0x90-byte table for that tag. Where the disc also carries an unencrypted `PSP_GAME/SYSDIR/BOOT.BIN`, the decrypted result can be compared with it byte for byte, which is how to check the table |
 | `load_base`, `guest_ram_bytes` | The ELF's program headers |
 | `overlay_slots` | The executable's section table, inside the load image's BSS |
 | `save_game_name`, `save_folders` | The paths the executable itself contains |

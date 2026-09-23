@@ -105,6 +105,10 @@ struct GameProfile {
     // framework knows the header layout; only the key is per-release.
     std::uint32_t decryption_tag;
     std::array<std::uint8_t, 16> decryption_key;
+    // For a tag that selects the older header layout, the 0x90-byte table it
+    // selects instead of a 16-byte key, as the published tables give it
+    // (already scrambled). Empty: the tag selects decryption_key.
+    std::span<const std::uint8_t> decryption_key_table = {};
 
     // --- How the game sits in guest memory ---------------------------------
     std::uint32_t load_base;
