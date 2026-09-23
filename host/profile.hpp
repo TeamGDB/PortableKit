@@ -32,6 +32,13 @@ struct SaveFolder {
     bool exported;           // included when the player exports or backs up
 };
 
+// Another release of the game than the one a port supports, and what the
+// installer tells a player who hands it that one.
+struct OtherRelease {
+    const char *disc_id; // DISC_ID in its PARAM.SFO, e.g. "ULJM05800"
+    const char *note;    // a whole sentence, e.g. "This is the original PSP release of the game, ..."
+};
+
 // A driver for the game's own camera. Every member may be null; the framework
 // reads camera/camera_driver.hpp's defaults for those.
 struct CameraDriver {
@@ -71,6 +78,13 @@ struct GameProfile {
     const char *game_title;
     const char *executable_path_on_disc; // "PSP_GAME/SYSDIR/EBOOT.BIN"
     const char *param_sfo_path_on_disc;  // "PSP_GAME/PARAM.SFO"
+    // Which release that is, as the installer names it when it is handed
+    // another one: "the Japanese release". Null: it is named by disc id alone.
+    const char *release_name = nullptr;
+    // Releases a player may mistake for it. The installer says the note of
+    // the one it was handed, instead of "Other releases and regions are not
+    // supported."
+    std::span<const OtherRelease> other_releases = {};
     // SHA-256 of the encrypted executable on the disc, and of the executable
     // the recompiled code was generated from. The installer checks both.
     const char *encrypted_executable_sha256;

@@ -51,6 +51,8 @@ Read the values off the player's own disc rather than recalling them:
 | `overlay_slots` | The executable's section table, inside the load image's BSS |
 | `save_game_name`, `save_folders` | The paths the executable itself contains |
 
+`release_name` and `other_releases` are for the installer's refusal: the first names the supported release ("the Japanese release"), the second gives the sentence to add for a release a player is likely to have instead. Yakumo tells a player with the original PSP release, ULJM05800, that it is not the HD release.
+
 Two fields are hooks rather than values. `register_extra_hle` adds calls this game makes that the framework does not implement, or replaces one it gets wrong for this game. `patch_loaded_image` is for per-game fixes with no better home. Both may be null, and a profile that needs neither is the goal.
 
 Two more are for a port that goes further than the PSP did, and both are null until a game has earned them:
