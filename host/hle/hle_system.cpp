@@ -35,6 +35,7 @@ void register_utils(HleRegistrar &hle) {
     // The guest flushes the instruction cache after copying code into an overlay
     // slot, which is the profile's cue to re-check which overlay is loaded.
     const auto flush_icache = [](Runtime &rt, AllegrexContext &ctx) {
+        forget_unmatched_overlays();
         revalidate_overlays(rt);
         kernel().finish(ctx, 0u);
     };
