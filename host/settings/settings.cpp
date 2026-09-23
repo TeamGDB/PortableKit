@@ -132,6 +132,12 @@ std::string format_trigger_profile(std::uint32_t profile) {
     return profile == 0u || profile > profiles.size() ? std::string("standard") : std::string(profiles[profile - 1u].key);
 }
 const Names<NameEntry> kNameEntries{{{NameEntry::Keyboard, "keyboard"}, {NameEntry::Fixed, "fixed"}}};
+const Names<FrameRate> kFrameRates{{{FrameRate::Fps30, "30"},
+                                    {FrameRate::Fps45, "45"},
+                                    {FrameRate::Fps60, "60"},
+                                    {FrameRate::Fps90, "90"},
+                                    {FrameRate::Fps120, "120"},
+                                    {FrameRate::Display, "display"}}};
 
 // Written by earlier versions: 1 typed the name into the window, which the
 // on-screen keyboard now covers.
@@ -189,6 +195,12 @@ const std::vector<Field> &fields() {
          [](Settings &s, const std::string &t) { return parse_bool(t, s.unthrottled); },
          [](const Settings &s) { return std::string(s.unthrottled ? "1" : "0"); },
          [](Settings &s, const char *t) { s.unthrottled = variable_present(t); }},
+        {"video.frame_rate", "FRAME_RATE",
+         [](Settings &s, const std::string &t) { return kFrameRates.parse(t, s.frame_rate); },
+         [](const Settings &s) { return kFrameRates.format(s.frame_rate); },
+         [](Settings &s, const char *t) {
+             if (!kFrameRates.parse(t, s.frame_rate)) s.frame_rate = FrameRate::Fps30;
+         }},
         {"video.performance", "PERF",
          [](Settings &s, const std::string &t) { return kPerfDisplays.parse(t, s.perf); },
          [](const Settings &s) { return kPerfDisplays.format(s.perf); },
