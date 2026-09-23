@@ -736,6 +736,26 @@ bool execute_simple(Runtime &rt, AllegrexContext &ctx, const DecodedInstruction 
         ctx.write_vfpu_vector_with_destination_prefix(result, vfpu_vd(d.word), length);
         break;
     }
+    case OpcodeKind::Vbfy1: {
+        // VBFY1 is a butterfly over neighbouring lanes: (a, b) becomes
+        // (a + b, a - b), for a pair or for both halves of a quad. A single
+        // or triple has no defined result.
+        const std::uint32_t length = vfpu_length(d.word);
+        if (length != 2u && length != 4u) {
+            ctx.pc = pc;
+            rt.unsupported(pc, d.word, "vbfy1 with single/triple source");
+            return false;
+        }
+        float source[4]{};
+        float result[4]{};
+        ctx.read_vfpu_vector_with_source_prefix(source, vfpu_vs(d.word), length, 0u);
+        for (std::uint32_t lane = 0u; lane < length; lane += 2u) {
+            result[lane] = source[lane] + source[lane + 1u];
+            result[lane + 1u] = source[lane] - source[lane + 1u];
+        }
+        ctx.write_vfpu_vector_with_destination_prefix(result, vfpu_vd(d.word), length);
+        break;
+    }
     case OpcodeKind::Vsocp: {
         // VSOCP widens each lane x into the saturated pair (1 - x, x), so a
         // triple or quad source has no defined destination on hardware.

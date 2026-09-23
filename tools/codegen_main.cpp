@@ -614,6 +614,27 @@ std::string emit_regular(const psprecomp::DecodedInstruction &d, std::uint32_t p
             << "      ctx.write_vfpu_vector_with_destination_prefix(vfpu_d, " << destination << "u, " << length << "u); }\n";
         break;
     }
+    case psprecomp::OpcodeKind::Vbfy1: {
+        // VBFY1: (a, b) -> (a + b, a - b) over neighbouring lanes, for a pair
+        // or both halves of a quad. Single and triple are undefined.
+        const std::uint32_t size_code = ((d.word >> 7u) & 1u) | (((d.word >> 15u) & 1u) << 1u);
+        const std::uint32_t length = size_code + 1u;
+        const std::uint32_t destination = d.word & 0x7Fu;
+        const std::uint32_t source = (d.word >> 8u) & 0x7Fu;
+        if (length != 2u && length != 4u) {
+            out << "    rt.unsupported(" << psprecomp::hex32(pc) << "u, " << psprecomp::hex32(d.word)
+                << "u, \"vbfy1 with single/triple source\"); return;\n";
+            break;
+        }
+        out << "    { float vfpu_s[4]{}, vfpu_d[4]{};\n"
+            << "      ctx.read_vfpu_vector_with_source_prefix(vfpu_s, " << source << "u, " << length << "u, 0u);\n"
+            << "      for (std::uint32_t i = 0; i < " << length << "u; i += 2u) {\n"
+            << "        vfpu_d[i] = vfpu_s[i] + vfpu_s[i + 1u];\n"
+            << "        vfpu_d[i + 1u] = vfpu_s[i] - vfpu_s[i + 1u];\n"
+            << "      }\n"
+            << "      ctx.write_vfpu_vector_with_destination_prefix(vfpu_d, " << destination << "u, " << length << "u); }\n";
+        break;
+    }
     case psprecomp::OpcodeKind::Vsocp: {
         // VSOCP widens each source lane x into the saturated pair (1 - x, x):
         // single -> pair, pair -> quad. Larger inputs are undefined on hardware.

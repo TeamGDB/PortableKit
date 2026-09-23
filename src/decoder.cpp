@@ -348,6 +348,9 @@ DecodedInstruction decode_allegrex(std::uint32_t word) {
         } else if (group == 2u && operation == 5u) {
             d.kind = OpcodeKind::Vsocp;
             d.mnemonic = "vsocp";
+        } else if (group == 2u && operation == 2u) {
+            d.kind = OpcodeKind::Vbfy1;
+            d.mnemonic = "vbfy1";
         } else if (group == 2u && operation == 10u) {
             d.kind = OpcodeKind::Vsgn;
             d.mnemonic = "vsgn";

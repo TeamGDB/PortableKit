@@ -1195,6 +1195,9 @@ int main() {
         const auto vsocp = psprecomp::decode_allegrex(0xD0456041u);
         require(vsocp.kind == psprecomp::OpcodeKind::Vsocp && vsocp.mnemonic == "vsocp",
                 "VSOCP classification failed");
+        const auto vbfy1 = psprecomp::decode_allegrex(0xD0428080u);
+        require(vbfy1.kind == psprecomp::OpcodeKind::Vbfy1 && vbfy1.mnemonic == "vbfy1",
+                "VBFY1.Q classification failed");
         const auto vsgn = psprecomp::decode_allegrex(0xD04A0020u);
         require(vsgn.kind == psprecomp::OpcodeKind::Vsgn && vsgn.mnemonic == "vsgn",
                 "VSGN classification failed");
