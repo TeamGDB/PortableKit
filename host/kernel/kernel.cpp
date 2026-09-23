@@ -815,6 +815,12 @@ const MemoryBlock *Kernel::find_block(SceUID uid) const {
     return found != blocks_.end() ? &found->second : nullptr;
 }
 
+std::uint32_t Kernel::largest_free_memory() const noexcept {
+    std::uint32_t largest = 0u;
+    for (const FreeRange &range : free_ranges_) largest = std::max(largest, range.size);
+    return largest;
+}
+
 std::uint32_t Kernel::free_memory() const noexcept {
     std::uint32_t total = 0u;
     for (const FreeRange &range : free_ranges_) total += range.size;

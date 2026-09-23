@@ -316,6 +316,8 @@ public:
     std::int32_t free_block(SceUID uid);
     [[nodiscard]] const MemoryBlock *find_block(SceUID uid) const;
     [[nodiscard]] std::uint32_t free_memory() const noexcept;
+    // The largest block allocate_block could hand out right now.
+    [[nodiscard]] std::uint32_t largest_free_memory() const noexcept;
 
     // Interrupts ----------------------------------------------------------
     std::map<std::uint32_t, std::map<std::uint32_t, SubInterruptHandler>> sub_interrupts;
