@@ -242,7 +242,8 @@ function(portablekit_add_game target)
         ${renderer_sources}
         $<TARGET_OBJECTS:${target}_generated>)
     if(PORTABLEKIT_ANDROID_APP)
-        add_library(${target} SHARED ${program_sources} "${PORTABLEKIT_ROOT}/host/platform/android_app.cpp")
+        add_library(${target} SHARED ${program_sources} "${PORTABLEKIT_ROOT}/host/platform/android_app.cpp"
+            "${PORTABLEKIT_ROOT}/host/platform/android_jni.cpp")
         target_compile_definitions(${target} PRIVATE PORTABLEKIT_ANDROID_APP=1)
         set_target_properties(${target} PROPERTIES
             OUTPUT_NAME main
