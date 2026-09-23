@@ -2014,7 +2014,8 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
                                 state.clut_address,
                                 state.clut_format,
                                 state.swizzled};
-    static const bool no_lookup_cache = portablekit::env("NO_LOOKUP_CACHE") != nullptr;
+    static const bool no_lookup_env = portablekit::env("NO_LOOKUP_CACHE") != nullptr;
+    const bool no_lookup_cache = no_lookup_env || perf::alternate_off(perf::NewPath::Lookup);
     ListTexture *memo = nullptr;
     if (!no_lookup_cache && last_texture != nullptr && input == last_texture_input) {
         memo = last_texture;
@@ -2429,7 +2430,8 @@ VkDescriptorSet VulkanRenderer::Impl::framebuffer_descriptor(Target &target, boo
 }
 
 VkPipeline VulkanRenderer::Impl::pipeline_for(const PipelineKey &key) {
-    static const bool no_lookup_cache = portablekit::env("NO_LOOKUP_CACHE") != nullptr;
+    static const bool no_lookup_env = portablekit::env("NO_LOOKUP_CACHE") != nullptr;
+    const bool no_lookup_cache = no_lookup_env || perf::alternate_off(perf::NewPath::Lookup);
     if (!no_lookup_cache && last_pipeline != VK_NULL_HANDLE && key == last_pipeline_key) return last_pipeline;
     const auto found = pipelines.find(key);
     if (found != pipelines.end()) {
@@ -3259,7 +3261,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     // keep the expansion too.
     static const bool legacy_vertices = portablekit::env("NO_DIRECT_VERTICES") != nullptr;
     static const bool check_direct = portablekit::env("CHECK_DIRECT_VERTICES") != nullptr;
-    const bool direct = !legacy_vertices && !call.through &&
+    const bool direct = !legacy_vertices && !perf::alternate_off(perf::NewPath::Direct) && !call.through &&
                         (call.primitive == PrimitiveType::Triangles ||
                          call.primitive == PrimitiveType::TriangleStrip ||
                          call.primitive == PrimitiveType::TriangleFan) &&
