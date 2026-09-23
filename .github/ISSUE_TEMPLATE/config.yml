@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: A problem while playing Yakumo
+    url: https://github.com/TeamGDB/Yakumo/issues
+    about: Report it to the port first; it moves here if the cause is in the framework.
+  - name: A problem while playing Purun
+    url: https://github.com/TeamGDB/Purun/issues
+    about: Report it to the port first; it moves here if the cause is in the framework.
+  - name: A problem while playing Tenkawa
+    url: https://github.com/TeamGDB/Tenkawa/issues
+    about: Report it to the port first; it moves here if the cause is in the framework.
