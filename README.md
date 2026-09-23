@@ -29,7 +29,7 @@ A game is a **profile** on top of all of this: its identity, what it needs from 
 | --- | --- | --- |
 | [Yakumo](https://github.com/TeamGDB/Yakumo) | *Monster Hunter Portable 3rd HD Ver.* | Playable, with releases. The framework was extracted from it; Yakumo itself still carries its own copy and has not been switched over yet ([#2](https://github.com/TeamGDB/PortableKit/issues/2)) |
 | [Purun](https://github.com/TeamGDB/Purun) | *LocoRoco 2* | The first level plays through, saves and continues; tested on macOS only |
-| [Tenkawa](https://github.com/TeamGDB/Tenkawa) | *Dragon Ball Z: Tenkaichi Tag Team* | Boots and runs its frame loop; draws nothing yet |
+| [Tenkawa](https://github.com/TeamGDB/Tenkawa) | *Dragon Ball Z: Tenkaichi Tag Team* | Not playable: reaches its title screen under the interpreter; the recompiled build does not draw yet ([#20](https://github.com/TeamGDB/PortableKit/issues/20)) |
 
 A port is its own repository: a file of constants, a short `CMakeLists.txt` and this one as a submodule. If a port needs more than that, the framework is missing a seam.
 
