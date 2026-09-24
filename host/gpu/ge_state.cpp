@@ -982,6 +982,9 @@ void GeState::draw_primitive(const GuestMemory &memory, std::uint32_t data) {
     call.index_address = index_type != 0u ? index_address_ : 0u;
     call.primitive_count = count;
 
+    // <prefix>_TRACE_RENDER: from here to the decoded vertices is "decode".
+    const bool split = perf::split_enabled();
+    const std::uint64_t split_start = split ? perf::split_ticks() : 0u;
     std::uint32_t vertex_count = count;
     std::uint32_t first_vertex = 0u;
     if (index_type != 0u && index_address_ != 0u) {
@@ -1034,6 +1037,7 @@ void GeState::draw_primitive(const GuestMemory &memory, std::uint32_t data) {
     if (!memory.contains(first_address, static_cast<std::size_t>(probe) * vertex_count)) return;
     const std::uint32_t stride =
         decode_vertices(memory, first_address, vertex_type_, vertex_count, call.vertices, bone_matrices_.data());
+    if (split) perf::add_split(perf::Split::Decode, perf::split_ticks() - split_start);
     if (stride == 0u || call.vertices.empty()) return;
     // A prim leaves VADDR/IADDR alone but advances the pointer it consumed, so
     // a run of prims can share one setup. An indexed prim consumes indices, not
