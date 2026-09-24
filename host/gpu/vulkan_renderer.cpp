@@ -5388,10 +5388,14 @@ void VulkanRenderer::upload_frame(std::uint32_t display_address, const std::uint
 
 bool VulkanRenderer::gpu_decode() const {
     if (!impl_ || !impl_->ready || !impl_->gpu_decode_available) return false;
-    // Off switches, and the paths and traces that need decoded vertices.
+    // Off unless <prefix>_GPU_DECODE=1 asks for it: on the Steam Deck (radv)
+    // the raw vertex path hung the GPU (ring gfx timeout) at the character
+    // select screen, and the CPU decode did not. Also off for the paths and
+    // traces that need decoded vertices.
     static const bool off = [] {
+        if (portablekit::env("CHECK_GPU_DECODE") != nullptr) return false;
         const char *text = portablekit::env("GPU_DECODE");
-        return text != nullptr && std::strcmp(text, "0") == 0;
+        return text == nullptr || std::strcmp(text, "1") != 0;
     }();
     static const bool needs_vertices =
         portablekit::env("NO_DIRECT_VERTICES") != nullptr || portablekit::env("CHECK_DIRECT_VERTICES") != nullptr ||
