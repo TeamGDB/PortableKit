@@ -176,6 +176,8 @@ function(portablekit_add_game target)
             set(shader_inc "${CMAKE_CURRENT_BINARY_DIR}/generated_shaders/ge_shaders.inc")
             set(shaders
                 "kGeVertexShader=${PORTABLEKIT_ROOT}/host/gpu/shaders/ge.vert"
+                "kGeRawVertexShader=GE_RAW_VERTICES@${PORTABLEKIT_ROOT}/host/gpu/shaders/ge.vert"
+                "kGeCheckVertexShader=GE_RAW_VERTICES,GE_CHECK_DECODE@${PORTABLEKIT_ROOT}/host/gpu/shaders/ge.vert"
                 "kGeFragmentShader=${PORTABLEKIT_ROOT}/host/gpu/shaders/ge.frag")
             if(ANDROID)
                 # Pre-rotation of the finished frame for a display turned sideways.
@@ -184,7 +186,8 @@ function(portablekit_add_game target)
                     "kRotateFragmentShader=${PORTABLEKIT_ROOT}/host/gpu/shaders/rotate.frag")
             endif()
             set(shader_sources ${shaders})
-            list(TRANSFORM shader_sources REPLACE "^[A-Za-z]+=" "")
+            list(TRANSFORM shader_sources REPLACE "^[A-Za-z]+=([A-Z_,]+@)?" "")
+            list(REMOVE_DUPLICATES shader_sources)
             add_custom_command(
                 OUTPUT "${shader_inc}"
                 COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/generated_shaders"
