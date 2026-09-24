@@ -248,12 +248,14 @@ if(PSPRECOMP_BUILD_TESTS)
 endif()
 
 # Texture pack import: finding a pack in the layouts packs come in, the
-# checks made before copying, and the copy, swap and backup. No game data.
+# checks made before copying, and the copy, swap and backup; and the PSP's DXT
+# block layout. No game data.
 if(PSPRECOMP_BUILD_TESTS)
     add_executable(portablekit_texture_pack_tests
         "${PORTABLEKIT_ROOT}/tests/texture_pack_tests.cpp"
         "${PORTABLEKIT_ROOT}/tests/test_profile.cpp"
         "${PORTABLEKIT_ROOT}/host/profile.cpp"
+        "${PORTABLEKIT_ROOT}/host/gpu/texture_decode.cpp"
         "${PORTABLEKIT_ROOT}/host/gpu/texture_pack.cpp"
         "${PORTABLEKIT_ROOT}/host/gpu/texture_pack_import.cpp")
     target_include_directories(portablekit_texture_pack_tests PRIVATE
