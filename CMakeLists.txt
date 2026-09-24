@@ -298,6 +298,16 @@ if(PSPRECOMP_BUILD_TESTS)
     add_test(NAME portablekit_input_tests COMMAND portablekit_input_tests)
 endif()
 
+# Fast loading's decision: when a load runs ahead of real time.
+if(PSPRECOMP_BUILD_TESTS)
+    add_executable(portablekit_fast_loading_tests
+        "${PORTABLEKIT_ROOT}/tests/fast_loading_tests.cpp"
+        "${PORTABLEKIT_ROOT}/host/kernel/load_detector.cpp")
+    target_include_directories(portablekit_fast_loading_tests PRIVATE "${PORTABLEKIT_ROOT}/host")
+    set_target_properties(portablekit_fast_loading_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME portablekit_fast_loading_tests COMMAND portablekit_fast_loading_tests)
+endif()
+
 # The system layer belongs to a game's target, so nothing above compiles
 # host/main.cpp or most of host/. That let two compile errors through until a
 # second game was built. This target builds the whole backend-independent

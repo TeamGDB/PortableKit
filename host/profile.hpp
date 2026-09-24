@@ -206,6 +206,15 @@ struct GameProfile {
     // is on another scale gives its own. Null: the defaults.
     const gpu::interpolation::CutThresholds *interpolation_thresholds = nullptr;
 
+    // --- Loading -------------------------------------------------------------
+    // Fast loading (kernel/fast_loading.hpp) lets emulated time run ahead
+    // while the game reads the disc in silence, with no button held, no
+    // movie, no menu and no ad hoc play. For what only a game can tell apart
+    // from a load, such as a scene that reads the disc silently while the
+    // player watches: false keeps real time now. Called at every vblank on
+    // the emulation thread. Null: the framework's own guards decide alone.
+    bool (*fast_loading_allowed)() = nullptr;
+
     // --- Text ----------------------------------------------------------------
     // Where the game caches the glyphs it has drawn. Null: a font changed while
     // the game runs applies to text the game has not drawn yet.
