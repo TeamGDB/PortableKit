@@ -271,7 +271,14 @@ bool Layer::handle_event(const SDL_Event &event) {
         ImGui_ImplSDL3_ProcessEvent(&event);
         return false;
     case SDL_EVENT_DROP_FILE:
+#if defined(PORTABLEKIT_ANDROID_APP)
+        // Android has no dropping: this is a document another app asked
+        // the game to open, and SDL passes only the path part of its content://
+        // URI, which names no file. Nothing can be read from it.
+        if (event.drop.data != nullptr) std::cout << "[ui] ignored a document opened with the game: " << event.drop.data << "\n";
+#else
         if (event.drop.data != nullptr) dropped_ = install::path_from_utf8(event.drop.data);
+#endif
         return true;
     default: break;
     }

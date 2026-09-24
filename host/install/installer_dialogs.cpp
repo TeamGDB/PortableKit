@@ -15,6 +15,10 @@
 #if defined(PORTABLEKIT_HAS_SDL)
 #include <SDL3/SDL.h>
 
+#if defined(PORTABLEKIT_ANDROID_APP)
+#include "platform/android_jni.hpp"
+#endif
+
 #include <atomic>
 #include <mutex>
 #include <vector>
@@ -56,6 +60,17 @@ int ask(SDL_MessageBoxFlags kind, const char *title, const std::string &message,
 class DialogUi final : public InstallerUi {
 public:
     bool introduce(const std::filesystem::path &data_dir) override {
+#if defined(PORTABLEKIT_ANDROID_APP)
+        // The setup screens could not be shown (the game's window or its
+        // renderer failed), so these dialogs stand in for them.
+        (void)data_dir;
+        const std::string text = std::string(portablekit::game().project_name) + " needs your own copy of " +
+                                 portablekit::game().game_title + " (" + portablekit::game().disc_id_display +
+                                 ") as a disc image (.iso).\n\n"
+                                 "Choose the image next, in Android's file picker. " +
+                                 portablekit::game().project_name +
+                                 " copies it into its own storage, checks it and prepares the game from it.";
+#else
         std::string text = std::string(portablekit::game().project_name) + " needs your own copy of " + portablekit::game().game_title + " (" + portablekit::game().disc_id_display +
                            ") as a disc image (.iso).\n\n"
                            "Choose the image next. " + std::string(portablekit::game().project_name) + " checks it, prepares the game's executable from it and "
@@ -66,12 +81,26 @@ public:
 #if defined(__linux__)
         text += "\n\nOn a Steam Deck, the file dialog may need Desktop Mode the first time.";
 #endif
+#endif
         return ask(SDL_MESSAGEBOX_INFORMATION, kTitle, text,
                    {{1, "Choose image...", SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT},
                     {0, "Quit", SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT}}) == 1;
     }
 
     std::optional<std::filesystem::path> choose_image() override {
+#if defined(PORTABLEKIT_ANDROID_APP)
+        // Android's picker gives a content:// document, not a file;
+        // run_installer() copies it into the data folder before checking it.
+        const std::optional<std::string> uri = android::pick_document();
+        if (!uri) return std::nullopt;
+        std::cout << "[setup] picked " << *uri << std::endl;
+        ask(SDL_MESSAGEBOX_INFORMATION, kTitle,
+            std::string(portablekit::game().project_name) +
+                " copies the disc image into its own storage now. This takes a minute or two, and nothing moves "
+                "on the screen until it is done.",
+            {{0, "OK", SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT | SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT}});
+        return path_from_utf8(*uri);
+#endif
         struct Pick {
             std::mutex mutex;
             std::atomic<bool> done{false};
@@ -106,6 +135,14 @@ public:
 
     std::optional<ImageStorage> choose_storage(const std::filesystem::path &image, const ImageInfo &info,
                                                const std::filesystem::path &data_dir) override {
+#if defined(PORTABLEKIT_ANDROID_APP)
+        // Already copied into the data folder; an app cannot keep reading a
+        // file elsewhere.
+        (void)image;
+        (void)info;
+        (void)data_dir;
+        return ImageStorage::Copy;
+#endif
         const std::uint64_t tenths = (info.size_bytes + 50'000'000u) / 100'000'000u;
         const std::string size = std::to_string(tenths / 10u) + "." + std::to_string(tenths % 10u) + " GB";
         const std::string text = "The image is " + std::string(portablekit::game().game_title) + " (" + portablekit::game().disc_id_display +
