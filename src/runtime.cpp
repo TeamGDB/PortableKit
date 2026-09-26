@@ -212,7 +212,18 @@ bool Runtime::run_interpreter_fallback(AllegrexContext &ctx) {
     if (!interpreter_fallback_enabled()) return false;
     // Each entry is bounded, so a long interpreted stretch still returns to the
     // dispatcher often enough for the starvation hook to preempt the thread.
-    return interpret_allegrex(*this, ctx) != InterpreterExit::Unreachable;
+    const std::uint32_t entry = ctx.pc;
+    try {
+        return interpret_allegrex(*this, ctx) != InterpreterExit::Unreachable;
+    } catch (const Error &e) {
+        // Name the guest code, as a fault in generated code is named.
+        std::ostringstream message;
+        message << e.what() << " while interpreting from " << hex32(entry) << " guest_pc=" << hex32(ctx.pc)
+                << " (a0=" << hex32(ctx.gpr[4]) << ", a1=" << hex32(ctx.gpr[5]) << ", sp=" << hex32(ctx.gpr[29])
+                << ", ra=" << hex32(ctx.gpr[31]) << ")";
+        append_gpr_dump(message, ctx);
+        throw Error(message.str());
+    }
 }
 
 bool Runtime::account_dispatch_work(AllegrexContext &ctx, bool allow_preemption) {
