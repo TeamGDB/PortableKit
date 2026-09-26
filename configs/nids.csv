@@ -13,6 +13,17 @@ IoFileMgrForUser,0x779103A0,sceIoRename
 IoFileMgrForUser,0x810C4BC3,sceIoClose
 IoFileMgrForUser,0xACE946E8,sceIoGetstat
 IoFileMgrForUser,0xB293727F,sceIoChangeAsyncPriority
+IoFileMgrForUser,0x3251EA56,sceIoPollAsync
+IoFileMgrForUser,0xE23EEC33,sceIoWaitAsync
+IoFileMgrForUser,0x35DBD746,sceIoWaitAsyncCB
+IoFileMgrForUser,0xCB05F8D6,sceIoGetAsyncStat
+IoFileMgrForUser,0xA12A0514,sceIoSetAsyncCallback
+IoFileMgrForUser,0xFF5940B6,sceIoCloseAsync
+IoFileMgrForUser,0x89AA9906,sceIoOpenAsync
+IoFileMgrForUser,0xA0B5A7C2,sceIoReadAsync
+IoFileMgrForUser,0x0FACAB19,sceIoWriteAsync
+IoFileMgrForUser,0x71B19E77,sceIoLseekAsync
+IoFileMgrForUser,0x1B385D8F,sceIoLseek32Async
 IoFileMgrForUser,0xB29DDF9C,sceIoDopen
 IoFileMgrForUser,0xE3EB004C,sceIoDread
 IoFileMgrForUser,0xEB092469,sceIoDclose
