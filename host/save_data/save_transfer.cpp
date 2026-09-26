@@ -1,5 +1,6 @@
 #include "../profile.hpp"
 #include "save_data/save_transfer.hpp"
+#include "crypto_keys.hpp"
 
 #include "save_data/param_sfo.hpp"
 #include "save_data/savedata_crypto.hpp"
@@ -238,6 +239,11 @@ SaveCheck check_save_folder(const fs::path &folder, const std::optional<Block> &
     if (!mode) {
         check.problem = std::string("The save is protected in a way ") + portablekit::game().project_name +
                         " does not know.";
+        return check;
+    }
+    if (!savedata_keys_available()) {
+        check.problem = "The save is encrypted, as a PSP writes it. Importing it needs the console's keys: add a "
+                        "keys file.";
         return check;
     }
     const auto params_offset = sfo->data_offset("SAVEDATA_PARAMS");

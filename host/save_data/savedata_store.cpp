@@ -1,6 +1,7 @@
 #include "save_data/savedata_store.hpp"
 
 #include "save_data/param_sfo.hpp"
+#include "crypto_keys.hpp"
 #include "save_data/savedata_crypto.hpp"
 
 #include <algorithm>
@@ -103,6 +104,10 @@ LoadResult load_save(const std::filesystem::path &memory_stick, const SaveFiles 
         const auto mode = mode_from_flags(flags);
         if (!mode) {
             result.reason = "unknown SAVEDATA_PARAMS flags " + std::to_string(flags);
+            return result;
+        }
+        if (!savedata_keys_available()) {
+            result.reason = "the save is encrypted, and reading it needs the console's keys (add a keys file)";
             return result;
         }
         const Block *key = files.key ? &*files.key : nullptr;

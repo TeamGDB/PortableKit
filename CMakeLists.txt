@@ -196,6 +196,7 @@ if(PSPRECOMP_BUILD_TESTS)
         "${PORTABLEKIT_ROOT}/host/save_data/aes128.cpp"
         "${PORTABLEKIT_ROOT}/host/save_data/param_sfo.cpp"
         "${PORTABLEKIT_ROOT}/host/save_data/savedata_crypto.cpp"
+        "${PORTABLEKIT_ROOT}/host/crypto_keys_builtin.cpp"
         "${PORTABLEKIT_ROOT}/host/save_data/savedata_store.cpp"
         "${PORTABLEKIT_ROOT}/host/save_data/save_transfer.cpp"
         "${PORTABLEKIT_ROOT}/third_party/tiny_aes/aes.c")
@@ -330,6 +331,7 @@ if(PSPRECOMP_BUILD_TESTS)
         "${PORTABLEKIT_ROOT}/host/main.cpp"
         "${PORTABLEKIT_ROOT}/host/generated_stub.cpp"
         "${PORTABLEKIT_ROOT}/tests/test_profile.cpp"
+        "${PORTABLEKIT_ROOT}/host/crypto_keys_builtin.cpp"
         "${_check_nids}")
     foreach(_source IN LISTS PORTABLEKIT_HOST_SOURCES)
         list(APPEND _check_sources "${PORTABLEKIT_ROOT}/${_source}")

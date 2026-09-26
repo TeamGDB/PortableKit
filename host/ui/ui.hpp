@@ -24,6 +24,11 @@ bool attach(gpu::VulkanRenderer &renderer);
 // overlay, and the menu when it is open over the running game).
 void draw_over_game();
 
+// A line of its own over the running game, for a program around the port (the
+// desktop app shows its compile progress with it). `visible` is asked before
+// every game frame; `draw` then builds it inside that frame with ImGui.
+void set_status_overlay(bool (*visible)(), void (*draw)());
+
 // After a game frame's window events: whether the player asked for the menu
 // (Esc, or L3+R3 on a gamepad).
 [[nodiscard]] bool menu_requested();
