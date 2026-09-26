@@ -28,9 +28,12 @@
 # that later builds install over earlier ones and keep the player's data;
 # without it a throwaway key is made in the build directory.
 #
-# The app needs Android 11 (API 30): the native code uses
-# pthread_cond_clockwait, and every 64-bit device from Android 10 has Vulkan
-# 1.1 anyway.
+# The app needs Android 10 (API 29), where every 64-bit device has Vulkan
+# 1.1: build the native code for android-29 (ANDROID_PLATFORM), or it may
+# import libc functions Android 10 lacks (libc++ waits with
+# pthread_cond_clockwait from android-30 on). Newer Android features are
+# looked up at run time. After packing, every function a packed library
+# imports is checked against Android 10's system libraries.
 # The overlay limit packs only the first N overlay libraries, to keep a test
 # APK small; without it every one is packed.
 set -euo pipefail
@@ -55,7 +58,7 @@ mkdir -p "$work/classes" "$work/dex" "$work/lib/arm64-v8a"
 echo "compiling SDL's Java activity and the app's own"
 javac -nowarn --release 11 -classpath "$android_jar" -d "$work/classes" \
     $(find "$sdl_dir/android-project/app/src/main/java" "$here/java" -name '*.java') 2> "$work/javac.log"
-min_sdk=30
+min_sdk=29
 "$build_tools/d8" --release --min-api "$min_sdk" --lib "$android_jar" --output "$work/dex" \
     $(find "$work/classes" -name '*.class')
 
@@ -95,6 +98,24 @@ if [[ -n "$overlay_limit" ]]; then overlays=("${overlays[@]:0:$overlay_limit}");
 cp "${overlays[@]}" "$lib/"
 strip="$(ls -d "$ANDROID_NDK"/toolchains/llvm/prebuilt/*/bin/llvm-strip | head -1)"
 "$strip" --strip-unneeded "$lib"/*.so
+# Every function a packed library imports must be in Android $min_sdk's system
+# libraries or in another packed one; a missing one stops the app loading
+# there. Weak imports may be missing: their callers check them first.
+llvm="$(dirname "$strip")"
+stubs="$llvm/../sysroot/usr/lib/aarch64-linux-android/$min_sdk"
+{
+    for system in libc libm libdl liblog libandroid libvulkan libOpenSLES libGLESv1_CM libGLESv2 libEGL; do
+        "$llvm/llvm-nm" -D --defined-only "$stubs/$system.so"
+    done
+    "$llvm/llvm-nm" -D --defined-only "$lib"/*.so
+} 2> /dev/null | awk 'NF >= 3 { sub(/@.*/, "", $3); print $3 }' | sort -u > "$work/exports.txt"
+missing="$("$llvm/llvm-nm" -D --undefined-only "$lib"/*.so | awk '$1 == "U" { sub(/@.*/, "", $2); print $2 }' |
+    sort -u | comm -23 - "$work/exports.txt")"
+if [[ -n "$missing" ]]; then
+    echo "error: the libraries import what Android $min_sdk lacks:" $missing >&2
+    exit 1
+fi
+echo "every import is in Android $min_sdk"
 # extractNativeLibs is on, so the libraries may be compressed: the package
 # manager unpacks them at install time.
 (cd "$work" && cp dex/classes.dex . && zip -q unsigned.apk classes.dex && zip -q -r -9 unsigned.apk lib)
