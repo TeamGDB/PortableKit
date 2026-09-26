@@ -66,9 +66,12 @@ int main() {
           "the program stays, everything else becomes @file");
     check(command_line_length(short_command) < 1000u, "and the command line is short");
 
-    std::ifstream in(file, std::ios::binary);
     std::stringstream text;
-    text << in.rdbuf();
+    {
+        // Closed before the file is removed: Windows does not remove an open file.
+        std::ifstream in(file, std::ios::binary);
+        text << in.rdbuf();
+    }
     const auto read = read_gnu(text.str());
     check(read.size() == command.size() - 1u, "the file holds every other argument");
     bool same = read.size() == command.size() - 1u;
@@ -81,7 +84,8 @@ int main() {
     check(same, "and reads back as the same arguments, with forward slashes");
     check(text.str().find('\\') == std::string::npos || text.str().find("\\\"") != std::string::npos,
           "no backslash is left but the quote escapes");
-    fs::remove(file);
+    std::error_code ignored;
+    fs::remove(file, ignored);
 
     const auto unchanged = with_response_file({"clang++"}, 1u, file);
     check(unchanged.size() == 1u && !fs::exists(file), "a command with nothing to move is left alone");
