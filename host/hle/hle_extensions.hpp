@@ -41,6 +41,9 @@ struct HleExtensionBinding {
     std::string name;   // as the module or the NID table names it; hex NID otherwise
     std::string module;
     bool overrides{};   // replaced the program's own implementation
+    // A chained override: what it passes calls on to, the program's own
+    // ("the built-in") or an earlier module's title; empty for any other.
+    std::string wraps;
 };
 
 // A function an extension module added that the program does not run, and why.
@@ -74,6 +77,8 @@ struct HleExtensionReport {
 struct HleExtensionTarget {
     std::function<bool(const std::string &library, std::uint32_t nid)> implemented;
     std::function<void(const std::string &library, std::uint32_t nid, hle_extension::Handler handler)> bind;
+    // The handler bound now, or an empty one; what a chained override wraps.
+    std::function<hle_extension::Handler(const std::string &library, std::uint32_t nid)> current;
 };
 
 // Calls each module's entry and binds what it added, in this order of
@@ -82,8 +87,10 @@ struct HleExtensionTarget {
 //     otherwise the program's own stays and the function is reported skipped.
 //   - Mode::Override binds whether or not the program implements it, and
 //     counts as an override only where it does.
-//   - Between modules, and within one, the first to add a function keeps it;
-//     a later addition is reported skipped.
+//   - A chained override (Registry::override_chained) wraps whatever is
+//     bound, the program's own or an earlier module's, and always binds.
+//   - Otherwise, between modules and within one, the first to add a
+//     function keeps it; a later addition is reported skipped.
 // Names the NID table does not know are added to it, so logs show them.
 // Throws psprecomp::Error for a function without a handler or library.
 [[nodiscard]] HleExtensionReport apply_hle_extensions(psprecomp::Runtime &runtime,

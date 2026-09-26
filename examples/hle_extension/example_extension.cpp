@@ -1,4 +1,5 @@
-// An example HLE extension module: one function filled in, one overridden.
+// An example HLE extension module: one function filled in, one overridden and
+// one wrapped (a chained override that passes every call on).
 // Both behave as PortableKit already does, so building it into a program
 // changes nothing a game can see; it shows the mechanism and is what
 // tests/hle_extension_tests.cpp checks it with.
@@ -20,9 +21,19 @@ void writeback_data_cache(ext::Runtime &, ext::AllegrexContext &ctx) {
     ext::finish(ctx, 0u);
 }
 
+// sceKernelDcacheWritebackInvalidateAll: says once that it saw a call, then passes it
+// to the implementation it wraps, unchanged.
+void watch_writeback_invalidate(ext::Runtime &rt, ext::AllegrexContext &ctx, const ext::Handler &previous) {
+    ext::log_once("example-dcache-invalidate",
+                  "[example] sceKernelDcacheWritebackInvalidateAll passed on by the example extension");
+    previous(rt, ctx);
+}
+
 } // namespace
 
 PORTABLEKIT_HLE_EXTENSION(example) {
     registry.add("sceHttp", 0x87797BDDu, "sceHttpsLoadDefaultCert", load_default_cert);
     registry.override_builtin("UtilsForUser", 0x79D1C3FAu, "sceKernelDcacheWritebackAll", writeback_data_cache);
+    registry.override_chained("UtilsForUser", 0xB435DEC5u, "sceKernelDcacheWritebackInvalidateAll",
+                              watch_writeback_invalidate);
 }

@@ -9,6 +9,7 @@
 
 #include <cstdio>
 #include <functional>
+#include <map>
 #include <set>
 #include <sstream>
 #include <string>
@@ -40,13 +41,14 @@ constexpr std::uint32_t kUntouched = 0xDEADu;
 // A program's own HLE, as far as the extension layer can see it.
 struct Program {
     psprecomp::Runtime runtime;
-    std::set<std::pair<std::string, std::uint32_t>> bound;
+    std::map<std::pair<std::string, std::uint32_t>, ext::Handler> bound;
 
     void builtin(const std::string &library, std::uint32_t nid, std::uint32_t result) {
-        runtime.register_hle(library, nid, [result](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
-            ctx.set_gpr(2, result);
-        });
-        bound.insert({library, nid});
+        bind(library, nid, [result](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2, result); });
+    }
+    void bind(const std::string &library, std::uint32_t nid, ext::Handler handler) {
+        bound[{library, nid}] = handler;
+        runtime.register_hle(library, nid, std::move(handler));
     }
     portablekit::HleExtensionTarget target() {
         return {
@@ -54,19 +56,50 @@ struct Program {
                 return bound.contains({library, nid});
             },
             .bind = [this](const std::string &library, std::uint32_t nid, ext::Handler handler) {
-                runtime.register_hle(library, nid, std::move(handler));
-                bound.insert({library, nid});
+                bind(library, nid, std::move(handler));
+            },
+            .current = [this](const std::string &library, std::uint32_t nid) {
+                const auto found = bound.find({library, nid});
+                return found != bound.end() ? found->second : ext::Handler{};
             },
         };
     }
-    // v0 after the game calls library::nid; kUntouched when nothing set it.
-    std::uint32_t call(const std::string &library, std::uint32_t nid) {
+    // v0 after the game calls library::nid with a0; kUntouched when nothing set it.
+    std::uint32_t call(const std::string &library, std::uint32_t nid, std::uint32_t a0 = 0u) {
         psprecomp::AllegrexContext ctx{};
         ctx.set_gpr(2, kUntouched);
+        ctx.set_gpr(4, a0);
         runtime.invoke_import(library, nid, ctx);
         return ctx.gpr[2];
     }
 };
+
+// Chained overrides of one function, each handling a0 == its own action and
+// passing everything else on unchanged, as a module taking over one action of
+// a dialog would.
+constexpr std::uint32_t kDialog = 0x100u;
+ext::Chained handles(std::uint32_t action, std::uint32_t result) {
+    return [action, result](ext::Runtime &rt, ext::AllegrexContext &ctx, const ext::Handler &previous) {
+        if (ext::arg(ctx, 0) != action) return previous(rt, ctx);
+        ext::finish(ctx, result);
+    };
+}
+void first_chain(ext::Registry &registry) { registry.override_chained("TestDialog", kDialog, "start", handles(1u, 0xA1u)); }
+void second_chain(ext::Registry &registry) { registry.override_chained("TestDialog", kDialog, "start", handles(2u, 0xB2u)); }
+void passes_all(ext::Registry &registry) {
+    registry.override_chained("TestDialog", kDialog, "start",
+                              [](ext::Runtime &rt, ext::AllegrexContext &ctx, const ext::Handler &previous) {
+                                  previous(rt, ctx);
+                              });
+}
+void plain_override(ext::Registry &registry) {
+    registry.override_builtin("TestDialog", kDialog, "start",
+                              [](ext::Runtime &, ext::AllegrexContext &ctx) { ext::finish(ctx, 0xC3u); });
+}
+constexpr HleExtensionModule kFirstChain{"first", "first", "", "MIT", &first_chain};
+constexpr HleExtensionModule kSecondChain{"second_chain", "second chain", "", "MIT", &second_chain};
+constexpr HleExtensionModule kPassesAll{"passes", "passes", "", "MIT", &passes_all};
+constexpr HleExtensionModule kPlainOverride{"plain", "plain", "", "MIT", &plain_override};
 
 constexpr HleExtensionModule kExample{"example", "Example HLE extension", "1.0", "MIT",
                                       &portablekit_hle_extension_example};
@@ -97,20 +130,22 @@ int main() {
         check(program.call("sceHttp", kLoadDefaultCert) == 0u, "a function the program lacks is filled in");
         check(program.call("UtilsForUser", kDcacheWritebackAll) == 0u,
               "a function the module marks as an override replaces the built-in");
-        check(report.active.size() == 2u && report.skipped.empty(), "both of the example's functions are active");
+        check(report.active.size() == 3u && report.skipped.empty(), "all three of the example's functions are active");
+        check(program.call("UtilsForUser", 0xB435DEC5u) == 0u,
+              "the example's chained function, with nothing behind it, answers as a stub would");
         const auto *fill = report.find("sceHttp", kLoadDefaultCert);
         const auto *over = report.find("UtilsForUser", kDcacheWritebackAll);
         check(fill != nullptr && !fill->overrides && fill->module == "Example HLE extension",
               "the fill-in is reported as the example's and not as an override");
         check(over != nullptr && over->overrides, "the override is reported as one");
-        check(report.modules.size() == 1u && report.modules[0].functions == 2u && report.modules[0].overrides == 1u,
-              "the module's summary counts two functions, one override");
+        check(report.modules.size() == 1u && report.modules[0].functions == 3u && report.modules[0].overrides == 1u,
+              "the module's summary counts three functions, one override");
         check(program.runtime.nids().resolve("sceHttp", kLoadDefaultCert) == "sceHttpsLoadDefaultCert",
               "the module's names reach the NID table");
 
         std::ostringstream summary;
         portablekit::print_hle_extension_summary(summary, report);
-        check(summary.str().find("HLE extensions: 2 functions (1 overriding built-ins) from Example HLE extension") !=
+        check(summary.str().find("HLE extensions: 3 functions (1 overriding built-ins) from Example HLE extension") !=
                   std::string::npos,
               "the startup line names the module and counts its overrides");
         check(summary.str().find("UtilsForUser::sceKernelDcacheWritebackAll is Example HLE extension's, "
@@ -226,6 +261,56 @@ int main() {
             refused = true;
         }
         check(refused, "a ninth argument is refused");
+    }
+
+    // Chained overrides: the implementation replaced stays reachable.
+    {
+        Program program;
+        program.builtin("TestDialog", kDialog, kBuiltinResult);
+        const HleExtensionModule modules[] = {kPassesAll};
+        const auto report = portablekit::apply_hle_extensions(program.runtime, modules, program.target());
+        check(program.call("TestDialog", kDialog, 1u) == kBuiltinResult &&
+                  program.call("TestDialog", kDialog, 7u) == kBuiltinResult,
+              "a chained override that passes every call on leaves the built-in's answers");
+        const auto *binding = report.find("TestDialog", kDialog);
+        check(binding != nullptr && binding->overrides && binding->wraps == "the built-in",
+              "it is reported as wrapping the built-in");
+    }
+    {
+        Program program;
+        program.builtin("TestDialog", kDialog, kBuiltinResult);
+        const HleExtensionModule modules[] = {kFirstChain};
+        (void)portablekit::apply_hle_extensions(program.runtime, modules, program.target());
+        check(program.call("TestDialog", kDialog, 1u) == 0xA1u, "a chained override handles its own action");
+        check(program.call("TestDialog", kDialog, 2u) == kBuiltinResult,
+              "and passes another action to the built-in unchanged");
+    }
+    {
+        Program program;
+        program.builtin("TestDialog", kDialog, kBuiltinResult);
+        const HleExtensionModule modules[] = {kFirstChain, kSecondChain, kPlainOverride};
+        const auto report = portablekit::apply_hle_extensions(program.runtime, modules, program.target());
+        check(program.call("TestDialog", kDialog, 2u) == 0xB2u, "across two modules, the later one answers first");
+        check(program.call("TestDialog", kDialog, 1u) == 0xA1u, "the earlier module answers what the later passes on");
+        check(program.call("TestDialog", kDialog, 3u) == kBuiltinResult, "and the built-in answers the rest");
+        const auto *outer = report.find("TestDialog", kDialog);
+        check(outer != nullptr && outer->module == "second chain" && outer->wraps == "first",
+              "the outer binding names the module it wraps");
+        check(report.skipped.size() == 1u && report.skipped[0].module == "plain",
+              "a plain override after a chain is not used: the first to add a function keeps it");
+        std::ostringstream summary;
+        portablekit::print_hle_extension_summary(summary, report);
+        check(summary.str().find("TestDialog::start is second chain's, passing what it does not handle to first") !=
+                  std::string::npos,
+              "the startup log says what each chained override passes calls to");
+    }
+    {
+        Program program;
+        const HleExtensionModule modules[] = {kFirstChain};
+        const auto report = portablekit::apply_hle_extensions(program.runtime, modules, program.target());
+        check(program.call("TestDialog", kDialog, 1u) == 0xA1u && program.call("TestDialog", kDialog, 5u) == 0u,
+              "with nothing behind it, a call passed on returns 0 as a logging stub would");
+        check(!report.active.empty() && !report.active[0].overrides, "and it is not counted as an override");
     }
 
     if (g_failures != 0) std::printf("%d failed\n", g_failures);
