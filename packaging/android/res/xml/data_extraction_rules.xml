@@ -5,13 +5,11 @@
     <cloud-backup>
         <include domain="file" path="ms0/PSP/SAVEDATA/" />
         <include domain="file" path="settings.ini" />
-        <exclude domain="file" path="ms0/PSP/SAVEDATA/ULJM05800DAT/" />
         <exclude domain="file" path="ms0/PSP/SAVEDATA/.backup/" />
     </cloud-backup>
     <device-transfer>
         <include domain="file" path="ms0/PSP/SAVEDATA/" />
         <include domain="file" path="settings.ini" />
-        <exclude domain="file" path="ms0/PSP/SAVEDATA/ULJM05800DAT/" />
         <exclude domain="file" path="ms0/PSP/SAVEDATA/.backup/" />
     </device-transfer>
 </data-extraction-rules>

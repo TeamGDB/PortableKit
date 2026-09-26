@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
-# Packs an APK of Yakumo for arm64-v8a without Gradle, from a build
-# configured with the NDK toolchain and -DMHP3RD_ANDROID_APP=ON. It carries
-# no game data: the player's disc image is installed on the device.
-# scripts/release_android.sh uses it for releases; on its own it makes test
-# builds.
+# Packs an APK of a PortableKit game for arm64-v8a without Gradle, from a
+# build configured with the NDK toolchain and -DPORTABLEKIT_ANDROID_APP=ON. It
+# carries no game data: the player's disc image is installed on the device.
 #
 #   build_apk.sh <build dir> <SDL3 source dir> <libSDL3.so> <output.apk> [overlay limit]
+#
+# What makes the APK the game's own comes from the game's repository:
+#   APP_ID    the application id, such as io.github.teamgdb.yakumo (required)
+#   GAME_RES  a resource directory laid over packaging/android/res: at least
+#             values/strings.xml with app_name, and the launcher icons
+#             (mipmap-*/ic_launcher*.png and values/ic_launcher_background.xml;
+#             make_icons.sh makes them from an SVG). Required.
+#   NOTICES   the third-party notices to carry in the APK's assets (optional)
+#   GAME_REPO the checkout `git describe` names the version after (default:
+#             the one GAME_RES is in)
 #
 # FONT_DIR may name a directory holding NotoSansCJKjp-Regular.otf and
 # NotoSansCJK-LICENSE.txt, the fallback font and licence a Linux release
@@ -33,6 +41,8 @@ sdl_lib="$3"
 output="$4"
 overlay_limit="${5:-}"
 here="$(cd "$(dirname "$0")" && pwd)"
+app_id="${APP_ID:?set APP_ID to the application id of the game}"
+game_res="$(cd "${GAME_RES:?set GAME_RES to the Android resources of the game}" && pwd)"
 
 sdk="${ANDROID_HOME:?set ANDROID_HOME to the Android SDK}"
 build_tools="$(ls -d "$sdk"/build-tools/* | sort -V | tail -1)"
@@ -53,7 +63,7 @@ echo "linking resources"
 # The licences of what the APK carries: the third-party notices, SDL's and
 # FFmpeg's (with where its source is), and the font's when it is packed.
 mkdir -p "$work/assets/licenses"
-cp "$here/../THIRD_PARTY_NOTICES.md" "$work/assets/licenses/"
+if [[ -n "${NOTICES:-}" ]]; then cp "$NOTICES" "$work/assets/licenses/"; fi
 cp "$sdl_dir/LICENSE.txt" "$work/assets/licenses/SDL3-LICENSE.txt"
 cp "$build_dir"/bin/lib/FFmpeg-COPYING.LGPLv2.1.txt "$build_dir"/bin/lib/FFmpeg-SOURCE.txt "$work/assets/licenses/"
 if [[ -n "${FONT_DIR:-}" ]]; then
@@ -63,16 +73,17 @@ if [[ -n "${FONT_DIR:-}" ]]; then
 fi
 assets=(-A "$work/assets")
 "$build_tools/aapt2" compile --dir "$here/res" -o "$work/res.zip"
+"$build_tools/aapt2" compile --dir "$game_res" -o "$work/game-res.zip"
 # The version: `git describe` of the checkout, and the number of commits as
 # the code Android compares, so a later build is always an update
 # (VERSION_NAME and VERSION_CODE override them).
-repo="$(cd "$here/../../../.." && pwd)"
+repo="${GAME_REPO:-$(git -C "$game_res" rev-parse --show-toplevel 2>/dev/null || echo "$game_res")}"
 version_name="${VERSION_NAME:-$(git -C "$repo" describe --tags --always --dirty 2>/dev/null || echo 0.0)}"
 version_code="${VERSION_CODE:-$(git -C "$repo" rev-list --count HEAD 2>/dev/null || echo 1)}"
 "$build_tools/aapt2" link -I "$android_jar" --manifest "$here/AndroidManifest.xml" \
     --min-sdk-version "$min_sdk" --target-sdk-version 35 --version-name "$version_name" \
     --version-code "$version_code" ${DEBUGGABLE:+--debug-mode} "${assets[@]}" -o "$work/unsigned.apk" \
-    "$work/res.zip"
+    --rename-manifest-package "$app_id" "$work/res.zip" -R "$work/game-res.zip" --auto-add-overlay
 
 echo "adding native libraries"
 lib="$work/lib/arm64-v8a"
@@ -95,7 +106,7 @@ alias="${KEY_ALIAS:-research}"
 if [[ ! -f "$keystore" ]]; then
     [[ -n "${KEYSTORE:-}" ]] && { echo "error: $keystore not found" >&2; exit 1; }
     keytool -genkeypair -keystore "$keystore" -storepass research -keypass research -alias research \
-        -keyalg RSA -keysize 2048 -validity 3650 -dname "CN=Yakumo research build" > /dev/null 2>&1
+        -keyalg RSA -keysize 2048 -validity 3650 -dname "CN=$app_id research build" > /dev/null 2>&1
 fi
 "$build_tools/zipalign" -f -P 16 4 "$work/unsigned.apk" "$work/aligned.apk"
 "$build_tools/apksigner" sign --ks "$keystore" --ks-pass "pass:$password" --key-pass "pass:$password" \

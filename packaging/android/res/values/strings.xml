@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Yakumo</string>
+    <!-- The game gives its own name in its resources (build_apk.sh GAME_RES). -->
+    <string name="app_name">PortableKit</string>
     <style name="AppTheme" parent="android:Theme.NoTitleBar.Fullscreen" />
 </resources>

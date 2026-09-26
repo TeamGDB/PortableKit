@@ -1,6 +1,6 @@
 #pragma once
 
-// What the Android app asks of its Java activity (YakumoActivity) through JNI:
+// What the Android app asks of its Java activity (GameActivity, packaging/android/java) through JNI:
 // the display cutout, and folders the player picks through the system's
 // document picker, read and written as content:// documents. Only in the
 // Android app (PORTABLEKIT_ANDROID_APP); every call runs on the calling thread and

@@ -327,7 +327,7 @@ int restart(char **argv) {
     // An app cannot exec itself; Android starts it again instead.
     (void)argv;
     android::relaunch();
-    std::cerr << "Cannot restart; start Yakumo again to load the imported save\n";
+    std::cerr << "Cannot restart; start " << portablekit::game().project_name << " again to load the imported save\n";
     return 1;
 #endif
     const std::filesystem::path self = executable_path();
@@ -355,7 +355,7 @@ int restart_for_setup(const char *program) {
     (void)program;
     { std::ofstream(user_data_directory() / kSetupMarkerFile) << "setup\n"; }
     android::relaunch();
-    std::cerr << "Start Yakumo again to set up\n";
+    std::cerr << "Start " << portablekit::game().project_name << " again to set up\n";
     return 1;
 #endif
     // The player asked for the setup: a game directory chosen for this run

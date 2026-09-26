@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
-# Makes the Android launcher icons from the project's own emblem
-# (docs/images/emblem.svg): the adaptive icon's foreground, background colour
-# and monochrome layer, and legacy square and round icons, at every density.
-# Needs rsvg-convert and ImageMagick; the PNGs are committed, so a build does
-# not. Run it again after the emblem changes.
+# Makes a game's Android launcher icons from its emblem: the adaptive icon's
+# foreground, background colour and monochrome layer, and legacy square and
+# round icons, at every density.
+#
+#   make_icons.sh <emblem.svg> <game res dir> [background colour, default #130e0b]
+#
+# Needs rsvg-convert and ImageMagick; the game commits the PNGs, so a build
+# does not. Run it again after the emblem changes.
 set -euo pipefail
-here="$(cd "$(dirname "$0")" && pwd)"
-emblem="$here/../../../../docs/images/emblem.svg"
-res="$here/res"
+emblem="${1:?usage: make_icons.sh <emblem.svg> <res dir> [background]}"
+res="${2:?usage: make_icons.sh <emblem.svg> <res dir> [background]}"
+background="${3:-#130e0b}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 rsvg-convert -w 1024 -h 1024 "$emblem" -o "$work/emblem.png"
-# The background: the dark brown behind the setup screens.
-background="#130e0b"
 
 for pair in mdpi:1 hdpi:1.5 xhdpi:2 xxhdpi:3 xxxhdpi:4; do
     density="${pair%%:*}"

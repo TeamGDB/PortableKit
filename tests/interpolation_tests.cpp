@@ -3,7 +3,7 @@
 // present and what each present shows, and how the frame rate steps down and
 // back up. Needs no game data and no GPU.
 //
-//   mhp3rd_interpolation_tests
+//   portablekit_interpolation_tests
 #include "gpu/frame_interpolation.hpp"
 #include "gpu/frame_pacing.hpp"
 
