@@ -807,6 +807,13 @@ void sas_render(Runtime &rt, std::uint32_t core, std::uint32_t output, bool mix,
     }
 }
 
+// <prefix>_TRACE_SAS: voices set, keyed on and off, and each change of the
+// end flags the game polls.
+bool trace_sas() {
+    static const bool enabled = portablekit::env("TRACE_SAS") != nullptr;
+    return enabled;
+}
+
 void register_audio(HleRegistrar &hle) {
     audio::AudioSink::instance().initialize();
 
@@ -921,6 +928,9 @@ void register_audio(HleRegistrar &hle) {
         kernel().finish(ctx, 0u);
     });
     hle.add("sceSasCore", "__sceSasSetVoice", [](Runtime &, AllegrexContext &ctx) {
+        if (trace_sas())
+            std::cerr << "[sas] voice " << arg(ctx, 1) << " vag=" << psprecomp::hex32(arg(ctx, 2)) << " size=" << arg(ctx, 3)
+                      << " loop=" << arg(ctx, 4) << "\n";
         audio::sas_core(arg(ctx, 0)).set_voice(arg(ctx, 1), arg(ctx, 2), arg(ctx, 3), arg(ctx, 4) != 0u);
         kernel().finish(ctx, 0u);
     });
@@ -951,10 +961,12 @@ void register_audio(HleRegistrar &hle) {
         kernel().finish(ctx, 0u);
     });
     hle.add("sceSasCore", "__sceSasSetKeyOn", [](Runtime &, AllegrexContext &ctx) {
+        if (trace_sas()) std::cerr << "[sas] key on " << arg(ctx, 1) << "\n";
         audio::sas_core(arg(ctx, 0)).key_on(arg(ctx, 1));
         kernel().finish(ctx, 0u);
     });
     hle.add("sceSasCore", "__sceSasSetKeyOff", [](Runtime &, AllegrexContext &ctx) {
+        if (trace_sas()) std::cerr << "[sas] key off " << arg(ctx, 1) << "\n";
         audio::sas_core(arg(ctx, 0)).key_off(arg(ctx, 1));
         kernel().finish(ctx, 0u);
     });
@@ -1021,7 +1033,11 @@ void register_audio(HleRegistrar &hle) {
         kernel().finish(ctx, audio::sas_core(arg(ctx, 0)).output_mode());
     });
     hle.add("sceSasCore", "__sceSasGetEndFlag", [](Runtime &, AllegrexContext &ctx) {
-        kernel().finish(ctx, audio::sas_core(arg(ctx, 0)).end_flag());
+        const std::uint32_t flags = audio::sas_core(arg(ctx, 0)).end_flag();
+        static std::uint32_t last = 0u;
+        if (trace_sas() && flags != last) std::cerr << "[sas] end flags " << psprecomp::hex32(flags) << "\n";
+        last = flags;
+        kernel().finish(ctx, flags);
     });
     hle.add("sceSasCore", "__sceSasCore", [](Runtime &rt, AllegrexContext &ctx) {
         sas_render(rt, arg(ctx, 0), arg(ctx, 1), false, 0u, 0u);
