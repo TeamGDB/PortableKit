@@ -26,4 +26,8 @@ void revalidate_overlays(psprecomp::Runtime &runtime);
 using CodeMissHook = bool (*)(psprecomp::Runtime &, psprecomp::AllegrexContext &, std::uint32_t pc);
 void set_code_miss_hook(CodeMissHook hook);
 
+// The guest loaded code: a slot whose image matched no corpus is searched
+// again at the next call into it.
+void forget_unmatched_overlays();
+
 } // namespace portablekit

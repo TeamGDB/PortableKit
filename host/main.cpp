@@ -52,7 +52,7 @@ constexpr EmbeddedNid kEmbeddedNids[] = {
 #include "nid_table.inc"
 };
 
-#if defined(__linux__)
+#if defined(__linux__) && !defined(PORTABLEKIT_ANDROID_APP)
 // Chained AOT calls nest native frames deeply and need the 64 MiB stack the
 // other platforms get from their linker. ELF has no such option: the main
 // thread's stack is sized by RLIMIT_STACK when the program starts, so raise the
@@ -312,15 +312,20 @@ int run_adhoc_server(int argc, char **argv) {
 
 } // namespace
 
+#if defined(PORTABLEKIT_ANDROID_APP)
+// android_app.cpp owns the entry point SDL calls and runs this on a thread
+// with the stack the game needs; restarting the process to get one is not an
+// option inside an app.
+int portablekit_main(int argc, char **argv) {
+#elif defined(PORTABLEKIT_HOST_MAIN_NAME)
 // A program that wraps the port (the desktop app in apps/portablekit) compiles
 // this file with PORTABLEKIT_HOST_MAIN_NAME set, so it can choose the game and
 // prepare its files before this runs it.
-#if defined(PORTABLEKIT_HOST_MAIN_NAME)
 int PORTABLEKIT_HOST_MAIN_NAME(int argc, char **argv) {
 #else
 int main(int argc, char **argv) {
 #endif
-#if defined(__linux__)
+#if defined(__linux__) && !defined(PORTABLEKIT_ANDROID_APP)
     ensure_main_stack(argv);
 #endif
     try {
@@ -337,6 +342,15 @@ int main(int argc, char **argv) {
             return 2;
         }
         if (options.install_image) return install_from_command_line(options);
+#if defined(PORTABLEKIT_ANDROID_APP)
+        {
+            // "Set up game data again" from the menu, left for this start.
+            std::error_code ec;
+            const std::filesystem::path marker =
+                portablekit::install::user_data_directory() / portablekit::install::kSetupMarkerFile;
+            if (std::filesystem::remove(marker, ec)) options.install = true;
+        }
+#endif
 
         const std::optional<GameFiles> files = locate_game(options);
         if (!files) return 1;

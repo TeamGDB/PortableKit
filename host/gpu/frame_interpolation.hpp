@@ -29,8 +29,17 @@ struct DrawSummary {
     std::uint32_t count{};
     PrimitiveType primitive{};
     std::uint32_t target{};  // framebuffer address drawn into
+    // Filled by summarize() while the draw's matrices are at hand, so that
+    // matching a frame need not read them again: the identity's hash, and
+    // the translation column of view times world. `prepared` says they are
+    // there; a summary made otherwise has them computed when matched.
+    bool prepared{};
+    std::uint64_t key_hash{};
+    std::array<float, 3> eye_translation{};
     // Transformed through a perspective projection, and not a clear.
     bool perspective{};
+    // Transformed (not through mode), and not a clear, whatever the projection.
+    bool transformed{};
     // A perspective draw into the framebuffer the game showed. Only these are
     // blended; 2D and interface draws, orthographic ones, clears and
     // render-to-texture passes are shown as the frame drew them.
@@ -45,7 +54,10 @@ struct DrawSummary {
 // is decided once the frame's displayed framebuffer is known.
 DrawSummary summarize(const DrawCall &call);
 // Marks the perspective draws into `displayed` eligible.
-void mark_eligible(std::vector<DrawSummary> &draws, std::uint32_t displayed) noexcept;
+// Marks the draws a frame may be blended by: transformed through a
+// perspective projection into the displayed target, and with `orthographic`
+// (CutThresholds::orthographic) the orthographic ones too.
+void mark_eligible(std::vector<DrawSummary> &draws, std::uint32_t displayed, bool orthographic = false) noexcept;
 
 // True for a projection without perspective division.
 [[nodiscard]] bool is_orthographic(const Matrix &projection) noexcept;
@@ -112,6 +124,10 @@ struct CutThresholds {
     // pair up in drawing order, and that order can change. 0 turns the
     // guard off (<prefix>_INTERPOLATION_NO_MOTION_GUARD).
     float max_own_motion{120.0f};
+    // Blend draws with an orthographic projection too. A 2D game drawn with
+    // transformed vertices (Purun) has nothing else to blend; off, only
+    // perspective draws are, which keeps a 3D game's 2D interface as it is.
+    bool orthographic{false};
 };
 
 class Matcher {
@@ -145,6 +161,14 @@ private:
         std::int32_t cursor{-1};
     };
     static Key key_of(const DrawSummary &draw) noexcept;
+
+public:
+    // The identity's hash and eye-space translation of a draw, as summarize()
+    // stores them.
+    static std::uint64_t hash_of(const DrawSummary &draw) noexcept;
+    static std::array<float, 3> eye_translation_of(const DrawSummary &draw) noexcept;
+
+private:
 
     std::vector<Slot> slots_;
     std::vector<std::int32_t> next_;  // for each newer draw, the next with its key

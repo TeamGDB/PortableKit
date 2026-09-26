@@ -4,6 +4,8 @@
 // mixing themselves live under gpu/ and audio/.
 #include "../profile.hpp"
 #include "hle_common.hpp"
+#include "kernel/fast_loading.hpp"
+#include "kernel/load_trace.hpp"
 
 #include "overlays.hpp"
 
@@ -28,13 +30,47 @@
 #include <cmath>
 #include <cstring>
 #include <array>
+#include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
+#include <utility>
 #include <vector>
 
 namespace portablekit {
 namespace {
+
+// <prefix>_TRACE_PACING=N prints the calls that pace a game's frames -- the
+// flip, the vblank waits, the controller reads and the vcount -- with the
+// emulated time, the vblank count, how far into the vblank period the call
+// came and the calling thread, N lines of them (3000 when N is not a
+// number), from vblank <prefix>_TRACE_PACING_FROM on (0 by default). It is
+// what a question like "how many vblanks does this game's frame take, and
+// which call waits them" is answered with.
+void trace_pacing(const char *call, std::int64_t value = -1) {
+    static const long limit = [] {
+        const char *text = portablekit::env("TRACE_PACING");
+        if (text == nullptr) return 0L;
+        const long n = std::strtol(text, nullptr, 10);
+        return n > 1 ? n : 3000L;
+    }();
+    static const std::uint64_t from = [] {
+        const char *text = portablekit::env("TRACE_PACING_FROM");
+        return text != nullptr ? std::strtoull(text, nullptr, 10) : 0ull;
+    }();
+    static long lines = 0;
+    if (lines >= limit || kernel().vblank_count() < from) return;
+    ++lines;
+    const std::uint64_t now = kernel().now_us();
+    const Thread *thread = kernel().current_thread();
+    std::printf("[pacing] %12.3f ms v%-7llu +%5llu us %-20s %s", static_cast<double>(now) / 1000.0,
+                static_cast<unsigned long long>(kernel().vblank_count()),
+                static_cast<unsigned long long>(now - kernel().last_vblank_us()),
+                thread != nullptr ? thread->name.c_str() : "?", call);
+    if (value >= 0) std::printf(" %lld", static_cast<long long>(value));
+    std::printf("\n");
+    if (lines == limit) std::fflush(stdout);
+}
 
 constexpr std::uint32_t kEdramBase = 0x04000000u;
 constexpr std::uint32_t kEdramSize = 0x00200000u;
@@ -153,6 +189,7 @@ void run_ge_list(Runtime &rt, std::uint32_t id) {
         gpu::VulkanRenderer &renderer = *media().renderer;
         const psprecomp::GuestMemory &memory = rt.memory();
         renderer.begin_display_list();
+        media().ge.set_raw_vertices(renderer.gpu_decode(), renderer.check_gpu_decode());
         media().ge.set_draw_sink([&renderer, &memory](const gpu::DrawCall &call) { renderer.submit(call, memory); });
     }
 #endif
@@ -160,6 +197,7 @@ void run_ge_list(Runtime &rt, std::uint32_t id) {
 
     bool finished = false;
     try {
+        const perf::SplitScope split(perf::Split::Lists);
         list.pc = media().ge.execute(rt.memory(), list.pc, list.stall, finished);
     } catch (const psprecomp::Error &error) {
         // A malformed list must not take the whole run down: drop it and carry on.
@@ -177,9 +215,17 @@ void run_ge_list(Runtime &rt, std::uint32_t id) {
 // layer. Added after the flip, so whoever drives the camera takes it in the
 // update this frame leads to.
 void feed_mouse(gpu::VulkanRenderer &renderer) {
+    const settings::Settings &s = settings::current();
+    // A drag on the touch screen: Touch camera speed degrees for the screen's
+    // height, slowed while aiming as the mouse is.
+    const gpu::MouseMotion drag = renderer.take_touch_motion();
+    if (drag.x != 0.0f || drag.y != 0.0f) {
+        const float scale = camera::game_camera_degrees_per_second() / std::max(s.camera_speed, 1.0f);
+        const float degrees = s.touch_camera_speed * scale;
+        camera::add_motion(camera::Source::Touch, drag.x * degrees, drag.y * degrees);
+    }
     const gpu::MouseMotion motion = renderer.take_mouse_motion();
     if (motion.x == 0.0f && motion.y == 0.0f) return;
-    const settings::Settings &s = settings::current();
     // While a bow or a bowgun aims, Aim speed's share of Camera speed, as
     // for the stick.
     const float scale = camera::game_camera_degrees_per_second() / std::max(s.camera_speed, 1.0f);
@@ -193,18 +239,19 @@ void feed_mouse(gpu::VulkanRenderer &renderer) {
 }
 #endif
 
-// The emulated time of the vblank the frame being flipped started from. The
-// game starts a frame every other vblank, when its vblank handler has counted
-// two since the last one; the flip comes when the frame's code has run, and
-// on a slower machine that is often after the vblank between, so the latest
-// vblank is not the frame's own. Frames are kept on a grid of two vblanks
-// from the one before: the latest start on that grid not after the latest
-// vblank. A flip that comes before a whole step, or two steps late, starts
-// the grid again at its latest vblank.
+// The emulated time of the vblank the frame being flipped started from. A
+// game at 30 frames a second starts a frame every other vblank, when its
+// vblank handler has counted two since the last one; the flip comes when the
+// frame's code has run, and on a slower machine that is often after the
+// vblank between, so the latest vblank is not the frame's own. Frames are
+// kept on a grid of the game's frame (GameProfile::frame_vblanks) from the
+// one before: the latest start on that grid not after the latest vblank. A
+// flip that comes before a whole step, or two steps late, starts the grid
+// again at its latest vblank.
 std::uint64_t frame_start_us(std::uint64_t latest_vblank_us) {
     static std::uint64_t previous = 0u;
     static bool known = false;
-    constexpr std::uint64_t kStep = 2u * kVBlankPeriodUs;
+    static const std::uint64_t kStep = std::max<std::uint64_t>(portablekit::game().frame_vblanks, 1u) * kVBlankPeriodUs;
     std::uint64_t start = latest_vblank_us;
     if (known && latest_vblank_us >= previous + kStep && latest_vblank_us < previous + 3u * kStep)
         start = previous + kStep * ((latest_vblank_us - previous) / kStep);
@@ -214,6 +261,7 @@ std::uint64_t frame_start_us(std::uint64_t latest_vblank_us) {
 }
 
 void present_frame(Runtime &rt) {
+    load_trace::note_flip();
     // Overlays are swapped between frames; re-check before drawing the next one.
     revalidate_overlays(rt);
 #if defined(PORTABLEKIT_HAS_RENDERER)
@@ -239,6 +287,8 @@ void present_frame(Runtime &rt) {
     }
     ui::draw_over_game();
     renderer.write_back_frame(rt.memory());
+    // A load running fast flips far more often than the display refreshes.
+    renderer.set_fast_forward(fast_loading::active());
     // The real time the frame stands for, which frame interpolation spaces
     // its presents by: that of the vblank the game's frame started from.
     const bool presented = renderer.present(address, kernel().real_time_of(frame_start_us(kernel().last_vblank_us())));
@@ -337,6 +387,7 @@ CtrlSample sample_ctrl() {
         if (!at_flip) media().renderer->sample_pad();
         const gpu::PadState pad = media().renderer->pad();
         sample.buttons = pad.buttons;
+        fast_loading::note_buttons(sample.buttons != 0u);
         sample.analog_x = pad.analog_x;
         sample.analog_y = pad.analog_y;
         sample.right_x = pad.right_x;
@@ -445,6 +496,42 @@ std::uint32_t read_latch(psprecomp::GuestMemory &memory, std::uint32_t address) 
     return samples;
 }
 
+bool ctrl_reads_wait() {
+    static const bool value = portablekit::env("CTRL_READ_WAITS") != nullptr;
+    return value;
+}
+
+// Samples the pad has taken since the game last read the buffer: one a
+// vblank, at most the 64 the PSP's ring holds.
+std::uint32_t &ctrl_unread() {
+    static std::uint32_t unread = 0u;
+    return unread;
+}
+
+// Set while a read waits for the next sample: that sample is the read's.
+bool &ctrl_read_waiting() {
+    static bool waiting = false;
+    return waiting;
+}
+
+// Takes up to `count` of the samples not read yet, and returns how many.
+// Counting starts at the first read, as sampling does on the PSP once a game
+// asks for it; until then a read waits for the next vblank.
+std::uint32_t take_ctrl_samples(std::uint32_t count) {
+    static bool counting = false;
+    if (!counting) {
+        counting = true;
+        kernel().add_vblank_hook([] {
+            if (std::exchange(ctrl_read_waiting(), false)) return;
+            ctrl_unread() = std::min<std::uint32_t>(ctrl_unread() + 1u, 64u);
+        });
+    }
+    if (ctrl_reads_wait()) return 0u;
+    const std::uint32_t taken = std::min(ctrl_unread(), count);
+    ctrl_unread() = 0u;
+    return taken;
+}
+
 void register_display_ctrl(HleRegistrar &hle) {
     hle.add("sceDisplay", "sceDisplaySetMode", [](Runtime &, AllegrexContext &ctx) {
         media().display.mode = arg(ctx, 0);
@@ -457,6 +544,7 @@ void register_display_ctrl(HleRegistrar &hle) {
         media().display.framebuffer = arg(ctx, 0);
         media().display.buffer_width = arg(ctx, 1);
         media().display.pixel_format = arg(ctx, 2);
+        trace_pacing("sceDisplaySetFrameBuf");
         present_frame(rt);
         kernel().finish(ctx, 0u);
     });
@@ -479,10 +567,24 @@ void register_display_ctrl(HleRegistrar &hle) {
             std::cout << "[pad] sceCtrlSetSamplingMode " << media().ctrl_mode << "\n";
         kernel().finish(ctx, previous);
     });
-    // Reading the controller buffer blocks until the next sample (vblank).
+    // Reading the controller buffer returns the samples taken since the last
+    // read, and waits for the next one only when there are none. The PSP
+    // samples the pad once a vblank into a ring the read drains, so a game
+    // that reads once a frame, after a vblank has passed, is not held up by
+    // it: Purun's main loop reads it straight after the flip, and waiting
+    // there cost it a vblank a frame. <prefix>_CTRL_READ_WAITS=1 always
+    // waits for the next vblank, as the framework did before.
     hle.add("sceCtrl", "sceCtrlReadBufferPositive", [](Runtime &rt, AllegrexContext &ctx) {
         const std::uint32_t count = std::clamp<std::uint32_t>(arg(ctx, 1), 1u, 64u);
+        const std::uint32_t unread = take_ctrl_samples(count);
+        trace_pacing("sceCtrlReadBufferPositive", unread);
+        if (unread != 0u) {
+            write_ctrl_buffer(rt.memory(), arg(ctx, 0), unread, sample_ctrl());
+            kernel().finish(ctx, unread);
+            return;
+        }
         write_ctrl_buffer(rt.memory(), arg(ctx, 0), count, sample_ctrl());
+        ctrl_read_waiting() = true;
         WaitState wait{};
         wait.type = WaitType::VBlank;
         kernel().block(ctx, wait, count);
@@ -496,20 +598,35 @@ void register_display_ctrl(HleRegistrar &hle) {
     hle.add("sceCtrl", "sceCtrlPeekLatch", [](Runtime &rt, AllegrexContext &ctx) {
         kernel().finish(ctx, read_latch(rt.memory(), arg(ctx, 0)));
     });
-    // Reading the latch waits for the next sample, like reading the buffer.
+    // Reading the latch returns the edges gathered since the last read and
+    // starts gathering again; unlike reading the buffer it never waits.
+    // Waiting here cost Purun, which reads the latch once a frame after the
+    // buffer, a second vblank a frame (20 frames a second where its loop
+    // allows 60). <prefix>_CTRL_READ_WAITS=1 waits for the next vblank, as
+    // the framework did before.
     hle.add("sceCtrl", "sceCtrlReadLatch", [](Runtime &rt, AllegrexContext &ctx) {
         const std::uint32_t samples = read_latch(rt.memory(), arg(ctx, 0));
+        trace_pacing("sceCtrlReadLatch", samples);
+        if (!ctrl_reads_wait()) {
+            kernel().finish(ctx, samples);
+            return;
+        }
         WaitState wait{};
         wait.type = WaitType::VBlank;
         kernel().block(ctx, wait, std::max(samples, 1u));
     });
 }
 
+// How long the display's vertical blank lasts at the start of each 16.683 ms
+// period: 14 of its 286 lines.
+constexpr std::uint64_t kVBlankDurationUs = kVBlankPeriodUs * 14u / 286u;
+
 // Waiting for the display to start its vertical blank, which is how a game
 // paces its frame loop. Without these the loop spins: a stub returns at once,
 // the game draws again, and nothing else ever gets the processor.
 void register_vblank_waits(HleRegistrar &hle) {
     const auto wait_for_vblank = [](Runtime &, AllegrexContext &ctx) {
+        trace_pacing("sceDisplayWaitVblankStart");
         WaitState wait{};
         wait.type = WaitType::VBlank;
         kernel().block(ctx, wait, 0u);
@@ -530,7 +647,25 @@ void register_vblank_waits(HleRegistrar &hle) {
         wait.type = WaitType::VBlank;
         kernel().block(ctx, wait, 0u);
     });
+    // sceDisplayWaitVblank returns at once while the display is in its
+    // vertical blank, and otherwise waits for the next one to start: unlike
+    // sceDisplayWaitVblankStart, a call made just after the vblank began does
+    // not lose a whole frame. Purun's sound thread sleeps on it, and its main
+    // loop calls it straight after the flip. <prefix>_VBLANK_WAIT_RETURNS=1
+    // returns at once every time, as the logging stub did.
+    hle.add("sceDisplay", "sceDisplayWaitVblank", [](Runtime &, AllegrexContext &ctx) {
+        trace_pacing("sceDisplayWaitVblank");
+        static const bool returns = portablekit::env("VBLANK_WAIT_RETURNS") != nullptr;
+        if (returns || kernel().now_us() - kernel().last_vblank_us() < kVBlankDurationUs) {
+            kernel().finish(ctx, 1u);
+            return;
+        }
+        WaitState wait{};
+        wait.type = WaitType::VBlank;
+        kernel().block(ctx, wait, 0u);
+    });
     hle.add("sceDisplay", "sceDisplayGetVcount", [](Runtime &, AllegrexContext &ctx) {
+        trace_pacing("sceDisplayGetVcount", static_cast<std::int64_t>(kernel().vblank_count()));
         kernel().finish(ctx, static_cast<std::uint32_t>(kernel().vblank_count()));
     });
 }
@@ -619,7 +754,21 @@ void audio_output(Runtime &rt, AllegrexContext &ctx) {
                                                 : static_cast<std::int16_t>(source[(index + 1u) * 2u] |
                                                                             (source[(index + 1u) * 2u + 1u] << 8));
             }
-            audio::AudioSink::instance().mix(state.cursor, staging.data(), frames, left, right);
+            // How loud the buffer is after the channel's volume, worked out
+            // as the sink mixes it (0x8000 is full volume): 0 means the sink
+            // would add nothing but zeros.
+            const std::int32_t gains[2] = {static_cast<std::int32_t>(std::min<std::uint32_t>(left, 0x8000u)),
+                                           static_cast<std::int32_t>(std::min<std::uint32_t>(right, 0x8000u))};
+            int peak = 0;
+            for (std::size_t i = 0; i < frames * 2u; ++i)
+                peak = std::max(peak, std::abs((static_cast<std::int32_t>(staging[i]) * gains[i & 1u]) >> 15));
+            load_trace::note_audio_peak(peak);
+            // While a load runs faster than real time its silence is dropped:
+            // played, it would pile up faster than the device plays it. The
+            // channel's cursor stays where it was and catches up with the
+            // device when sound comes back.
+            if (!fast_loading::note_audio(peak))
+                audio::AudioSink::instance().mix(state.cursor, staging.data(), frames, left, right);
         } else {
             log_once("audio-buffer", "[audio] output buffer is not a single mapped range; dropping it");
         }

@@ -9,10 +9,15 @@ layout(location = 0) out vec4 out_color;
 
 layout(set = 0, binding = 0) uniform sampler2D guest_texture;
 
+// False for pipelines of draws without an alpha test (texture_params.w 0):
+// the discard below is then compiled out, so tiled GPUs keep their early
+// depth test and hidden surface removal for them.
+layout(constant_id = 0) const bool kAlphaTest = true;
+
 layout(push_constant) uniform Push {
     mat4 transform;
     vec4 viewport;
-    vec4 texture_params; // x: texture enabled, y: texture function, z: alpha ref, w: alpha func
+    vec4 texture_params; // x: texture enabled (+2 clamp u, +4 clamp v), y: texture function, z: alpha ref, w: alpha func
     vec4 uv_transform;
     vec4 view_z;
 } push;
@@ -27,7 +32,17 @@ layout(set = 1, binding = 0) uniform Environment {
 void main() {
     vec4 color = frag_color;
     if (push.texture_params.x > 0.5) {
-        vec4 texel = texture(guest_texture, clamp(frag_texcoord, frag_uv_rect.xy, frag_uv_rect.zw));
+        vec2 uv = clamp(frag_texcoord, frag_uv_rect.xy, frag_uv_rect.zw);
+        // The GE's clamp wrap mode, per axis (texture_params.x bits 1 and 2):
+        // the sampler repeats, so the coordinate stays between the centres of
+        // the edge texels, which is what clamping to the edge samples.
+        int flags = int(push.texture_params.x + 0.5);
+        if ((flags & 6) != 0) {
+            vec2 half_texel = 0.5 / vec2(textureSize(guest_texture, 0));
+            if ((flags & 2) != 0) uv.x = clamp(uv.x, half_texel.x, 1.0 - half_texel.x);
+            if ((flags & 4) != 0) uv.y = clamp(uv.y, half_texel.y, 1.0 - half_texel.y);
+        }
+        vec4 texel = texture(guest_texture, uv);
         int function = int(push.texture_params.y + 0.5);
         if (function == 0) {          // modulate
             color *= texel;
@@ -46,6 +61,10 @@ void main() {
     if ((int(push.viewport.w + 0.5) & 1) != 0) color.rgb = mix(lighting.fog_color.rgb, color.rgb, clamp(frag_fog, 0.0, 1.0));
 
     // PSP alpha test, evaluated per fragment.
+    if (!kAlphaTest) {
+        out_color = color;
+        return;
+    }
     int alpha_function = int(push.texture_params.w + 0.5);
     float reference = push.texture_params.z / 255.0;
     float alpha = color.a;

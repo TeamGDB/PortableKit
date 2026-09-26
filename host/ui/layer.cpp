@@ -83,6 +83,18 @@ void load_fonts() {
         if (exists(candidate)) text_font = candidate;
     }
     ImFont *font = text_font != nullptr ? io.Fonts->AddFontFromFileTTF(text_font) : nullptr;
+#if defined(__ANDROID__)
+    // Android's own faces are variable fonts; the Japanese font the app
+    // carries has Latin too, and the symbols the menu uses (… ○ ×).
+    if (font == nullptr)
+        for (const std::filesystem::path &bundled : bundled_fonts()) {
+            font = io.Fonts->AddFontFromFileTTF(install::path_to_utf8(bundled).c_str());
+            if (font != nullptr) {
+                std::cout << "[ui] text in " << install::path_to_utf8(bundled.filename()) << "\n";
+                return;
+            }
+        }
+#endif
     if (font == nullptr) {
         io.Fonts->AddFontDefaultVector();
         std::cout << "[ui] no system font found; using Dear ImGui's own\n";
@@ -219,7 +231,12 @@ bool Layer::handle_event(const SDL_Event &event) {
         break;
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP:
-        if (event.key.key == SDLK_ESCAPE) {
+        // Android's Back is Esc: it opens and closes the menu.
+        if (event.key.key == SDLK_ESCAPE
+#if defined(__ANDROID__)
+            || event.key.key == SDLK_AC_BACK
+#endif
+        ) {
             if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat) escape_pending_ = now;
             return true;
         }
@@ -246,8 +263,22 @@ bool Layer::handle_event(const SDL_Event &event) {
     case SDL_EVENT_GAMEPAD_AXIS_MOTION:
         if (std::abs(static_cast<int>(event.gaxis.value)) > 16000) device_ = InputDevice::Gamepad;
         break;
+    case SDL_EVENT_GAMEPAD_ADDED:
+    case SDL_EVENT_GAMEPAD_REMOVED:
+        // ImGui refreshes its list of pads only when it sees one of these. A
+        // pad that connects while the game runs (one woken over Bluetooth)
+        // would otherwise never reach the menu, though the game reads it.
+        ImGui_ImplSDL3_ProcessEvent(&event);
+        return false;
     case SDL_EVENT_DROP_FILE:
+#if defined(PORTABLEKIT_ANDROID_APP)
+        // Android has no dropping: this is a document another app asked
+        // the game to open, and SDL passes only the path part of its content://
+        // URI, which names no file. Nothing can be read from it.
+        if (event.drop.data != nullptr) std::cout << "[ui] ignored a document opened with the game: " << event.drop.data << "\n";
+#else
         if (event.drop.data != nullptr) dropped_ = install::path_from_utf8(event.drop.data);
+#endif
         return true;
     default: break;
     }

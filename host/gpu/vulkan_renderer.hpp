@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "input/touch_controls.hpp"
 #include "settings/settings.hpp"
 
 union SDL_Event;
@@ -38,6 +39,10 @@ struct PadState {
 // only these reach the game, so a person moving the real pointer over the
 // window does not disturb a scripted run.
 inline constexpr std::uint32_t kScriptedMouse = 0xFFFFFF00u;
+
+// How often a load running faster than real time shows a picture: about 30
+// times a second, which a display never makes wait (set_fast_forward).
+inline constexpr std::chrono::milliseconds kFastForwardPresentInterval{33};
 
 // Relative mouse motion, in counts, while the pointer is captured for the game.
 struct MouseMotion {
@@ -92,6 +97,15 @@ public:
     // The mouse's motion gathered by the pumps since the last call. Only
     // motion made while the pointer was captured for the game counts.
     [[nodiscard]] MouseMotion take_mouse_motion() noexcept;
+    // The on-screen touch controls: shown once the screen is touched while the
+    // game runs, hidden again by a gamepad, the keyboard or a real mouse.
+    [[nodiscard]] bool touch_controls_visible() const noexcept;
+    [[nodiscard]] const input::touch::Controls &touch_controls() const;
+    // A camera drag on the touch screen since the last take, as a fraction of
+    // the screen's height.
+    [[nodiscard]] MouseMotion take_touch_motion() noexcept;
+    // The on-screen menu button was tapped since the last take.
+    [[nodiscard]] bool take_touch_menu() noexcept;
     // The pointer is captured for the game: hidden, and its motion and
     // buttons go to the game. That is while the mouse setting is on, the game
     // has input, no interface screen is up and the window has focus.
@@ -103,6 +117,12 @@ public:
     // Call before walking each display list. Guest memory cannot change while a
     // list is walked, so texture contents are hashed once per list, not per draw.
     void begin_display_list();
+    // GPU vertex decode (<prefix>_GPU_DECODE): whether the display list about
+    // to run should hand transformed triangle draws over undecoded
+    // (GeState::set_raw_vertices), and whether it should also decode them
+    // for <prefix>_CHECK_GPU_DECODE.
+    [[nodiscard]] bool gpu_decode() const;
+    [[nodiscard]] bool check_gpu_decode() const;
     void submit(const DrawCall &call, const GuestMemory &memory);
     // Writes the framebuffer shown a frame or two ago back to guest VRAM, in
     // the guest's pixel format at 480x272, so game code that copies a frame
@@ -132,6 +152,12 @@ public:
     void present_until(std::chrono::steady_clock::time_point wake);
     // Drops the presents scheduled, as the game pauses.
     void pause_interpolation();
+    // A load running faster than real time (kernel/fast_loading.hpp) flips
+    // several times per refresh of the display. While it does, a flip reaches
+    // the window only if the one before it was shown at least
+    // kFastForwardPresentInterval ago; the others are drawn and not shown, and
+    // frame interpolation waits until it is over.
+    void set_fast_forward(bool on);
     void set_frame_rate(settings::FrameRate rate);
     // On, the frame rate steps down by itself rather than slow the game.
     void set_frame_rate_auto(bool automatic);

@@ -195,6 +195,10 @@ const std::vector<Field> &fields() {
          [](Settings &s, const std::string &t) { return parse_bool(t, s.unthrottled); },
          [](const Settings &s) { return std::string(s.unthrottled ? "1" : "0"); },
          [](Settings &s, const char *t) { s.unthrottled = variable_present(t); }},
+        {"video.fast_loading", "FAST_LOADING",
+         [](Settings &s, const std::string &t) { return parse_bool(t, s.fast_loading); },
+         [](const Settings &s) { return std::string(s.fast_loading ? "1" : "0"); },
+         [](Settings &s, const char *t) { s.fast_loading = variable_flag(t); }},
         {"video.frame_rate", "FRAME_RATE",
          [](Settings &s, const std::string &t) { return kFrameRates.parse(t, s.frame_rate); },
          [](const Settings &s) { return kFrameRates.format(s.frame_rate); },
@@ -283,6 +287,21 @@ const std::vector<Field> &fields() {
          [](Settings &s, const char *t) {
              s.mouse_sensitivity = variable_float(t, 0.10f, kMinMouseSensitivity, kMaxMouseSensitivity);
          }},
+        BOOL_FIELD("input.touch_controls", touch_controls),
+        BOOL_FIELD("input.touch_dpad", touch_dpad),
+        {"input.touch_opacity", nullptr,
+         [](Settings &s, const std::string &t) {
+             return parse_float(t, kMinTouchOpacity, kMaxTouchOpacity, s.touch_opacity);
+         },
+         [](const Settings &s) { return format_float(s.touch_opacity); }, nullptr},
+        {"input.touch_size", nullptr,
+         [](Settings &s, const std::string &t) { return parse_float(t, kMinTouchSize, kMaxTouchSize, s.touch_size); },
+         [](const Settings &s) { return format_float(s.touch_size); }, nullptr},
+        {"input.touch_camera_speed", nullptr,
+         [](Settings &s, const std::string &t) {
+             return parse_float(t, kMinTouchCameraSpeed, kMaxTouchCameraSpeed, s.touch_camera_speed);
+         },
+         [](const Settings &s) { return format_float(s.touch_camera_speed); }, nullptr},
         BOOL_FIELD("input.invert_mouse_x", invert_mouse_x),
         BOOL_FIELD("input.invert_mouse_y", invert_mouse_y),
         {"input.name_entry", "OSK_MODE",
@@ -402,6 +421,7 @@ State &state() {
 
 void load(State &s) {
     s.loaded = true;
+    s.values = defaults();
     try {
         s.data_dir = install::user_data_directory();
         s.file = install::read_settings_file(s.data_dir);
@@ -439,8 +459,18 @@ std::string game_default_name() {
     return name != nullptr ? name : "";
 }
 
+Settings defaults_for(Platform platform) {
+    Settings values{};
+    if (platform == Platform::Android) {
+        values.aspect = Aspect::Fill;
+        values.fullscreen = true;
+        values.mouse = false;
+    }
+    return values;
+}
+
 const Settings &defaults() {
-    static const Settings value{};
+    static const Settings value = defaults_for(kPlatform);
     return value;
 }
 

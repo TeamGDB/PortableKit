@@ -232,6 +232,20 @@ struct GameProfile {
     // defaults were measured on Monster Hunter Portable 3rd. A game whose world
     // is on another scale gives its own. Null: the defaults.
     const gpu::interpolation::CutThresholds *interpolation_thresholds = nullptr;
+    // The game's own frame, in vblanks of the PSP's display: 2 for a game
+    // that makes 30 frames a second (Yakumo), 1 for one that makes 60
+    // (Purun). Frame interpolation presents between frames of this length,
+    // and the Frame rate setting offers only rates above the game's own.
+    std::uint32_t frame_vblanks = 2;
+
+    // --- Loading -------------------------------------------------------------
+    // Fast loading (kernel/fast_loading.hpp) lets emulated time run ahead
+    // while the game reads the disc in silence, with no button held, no
+    // movie, no menu and no ad hoc play. For what only a game can tell apart
+    // from a load, such as a scene that reads the disc silently while the
+    // player watches: false keeps real time now. Called at every vblank on
+    // the emulation thread. Null: the framework's own guards decide alone.
+    bool (*fast_loading_allowed)() = nullptr;
 
     // --- The console's settings the game reads ----------------------------
     // What sceUtilityGetSystemParamInt and sceImposeGetLanguageMode report: the

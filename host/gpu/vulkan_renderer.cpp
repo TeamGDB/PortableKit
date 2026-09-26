@@ -17,6 +17,10 @@
 #include "input/bindings.hpp"
 #include "settings/settings.hpp"
 
+#if defined(PORTABLEKIT_ANDROID_APP)
+#include "platform/android_jni.hpp"
+#endif
+
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 #include <vulkan/vulkan.h>
@@ -24,7 +28,12 @@
 #include "backends/imgui_impl_vulkan.h"
 #include "imgui.h"
 
+#include <atomic>
 #include <algorithm>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <bit>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -60,7 +69,11 @@ constexpr std::uint32_t kSettleFrames = 12u;
 // a fade, a backdrop or a copy of the picture, which spreads with the 3D view
 // instead of keeping the interface's proportions.
 constexpr float kScreenWideDraw = 470.0f;
-constexpr VkDeviceSize kVertexBufferBytes = 16u * 1024u * 1024u;
+// Room for one frame's vertices. With frame interpolation a frame cannot reuse
+// its region part way through, so all of it must fit: measured at 16.1 MiB in
+// the busiest areas found (Flooded Forest area 3, Tundra area 2), where 16 MiB
+// left the interface, drawn last, and parts of the ground out. Twice that.
+constexpr VkDeviceSize kVertexBufferBytes = 32u * 1024u * 1024u;
 // Index lists of merged draws (see submit()), kept apart from the vertices so
 // that the draws of one group have consecutive indices.
 constexpr VkDeviceSize kIndexBufferBytes = 4u * 1024u * 1024u;
@@ -75,6 +88,15 @@ constexpr std::uint32_t kFrameRegions = 3u;
 constexpr VkDeviceSize kPresentScratchBytes = 6u * 1024u * 1024u;
 constexpr VkDeviceSize kVertexBufferTotal = kFrameRegions * kVertexBufferBytes + 2u * kPresentScratchBytes;
 constexpr VkDeviceSize kIndexBufferTotal = kFrameRegions * kIndexBufferBytes;
+
+// Says, once in a while, that a frame's geometry did not fit and some of its
+// draws were left out, instead of dropping them silently.
+void report_frame_space_full(const char *what) {
+    static std::uint64_t count = 0;
+    if (count++ % 600u == 0u)
+        std::cout << "[render] a frame ran out of " << what << " space; the draws past it are not drawn (" << count
+                  << " so far)\n" << std::flush;
+}
 constexpr std::size_t kMaxCachedTextures = 1024u;
 // Descriptor sets for sampling render targets as textures: two per target
 // (with its alpha, and with alpha forced to one for 5650 textures).
@@ -90,7 +112,7 @@ constexpr std::uint32_t kGpuTimerSegments = 16u;
 struct PushConstants {
     std::array<float, 16> transform{};
     std::array<float, 4> viewport{};        // x,y: target size; z: through flag; w: 1 fog + 2 lighting
-    std::array<float, 4> texture_params{};  // x: enabled, y: function, z: alpha ref, w: alpha func
+    std::array<float, 4> texture_params{};  // x: enabled + 2 clamp u + 4 clamp v, y: function, z: alpha ref, w: alpha func
     std::array<float, 4> uv_transform{1.0f, 1.0f, 0.0f, 0.0f};
     std::array<float, 4> view_z{};          // row of view * world that gives view-space z, for fog
 };
@@ -200,6 +222,26 @@ struct ObjectBlock {
 
 static_assert(sizeof(ObjectBlock) == 144u, "ObjectBlock must match the std140 layout in ge.vert");
 
+// GPU vertex decode (<prefix>_GPU_DECODE): what the raw vertex shader needs to
+// decode and skin a draw's own bytes; the layout matches the Raw block in
+// ge.vert. Only the bones the vertex type weights are written.
+constexpr std::uint32_t kRawNoField = 0xFFu;
+struct RawBlock {
+    std::array<std::uint32_t, 4> format{};  // stride, vertex type, packed field offsets, position offset
+    std::array<std::uint32_t, 4> extra{};   // colour of a vertex without one, check slot
+    std::array<float, 8u * 16u> bones{};    // four vec4 rows per bone
+};
+static_assert(sizeof(RawBlock) == 544u, "RawBlock must match the std140 layout in ge.vert");
+// A draw <prefix>_CHECK_GPU_DECODE compares.
+struct CheckDraw {
+    std::uint32_t slot{};   // in the check buffer, in vec4s
+    std::uint32_t first{};  // into FrameSlot::check_expected
+    std::uint32_t count{};
+    std::uint32_t vertex_type{};
+};
+constexpr std::size_t kRawHeaderBytes = 32u;
+constexpr std::size_t kRawBoneBytes = 64u;
+
 // A GE colour register (0x00BBGGRR) as 0..1 floats, with an explicit alpha.
 std::array<float, 4> unpack_color(std::uint32_t color, float alpha = 1.0f) {
     return {static_cast<float>(color & 0xFFu) / 255.0f, static_cast<float>((color >> 8u) & 0xFFu) / 255.0f,
@@ -219,6 +261,12 @@ struct PipelineKey {
     bool cull_clockwise{};
     std::uint32_t color_mask{VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
                              VK_COLOR_COMPONENT_A_BIT};
+    // The fragment shader's alpha test (kAlphaTest in ge.frag). Draws without
+    // one get a pipeline whose shader cannot discard.
+    bool alpha_test{true};
+    // The raw vertex shader, which decodes the guest's vertex bytes, and its
+    // check build (<prefix>_CHECK_GPU_DECODE).
+    bool raw{};
 
     auto operator<=>(const PipelineKey &) const = default;
 };
@@ -460,6 +508,86 @@ void read_gamepad(SDL_Gamepad *device, PadState &pad, int &analog_x, int &analog
     analog_y += static_cast<int>(nub_y) - 0x80;
 }
 
+// Background texture decoding (<prefix>_SYNC_TEXTURE_DECODE turns it off): a
+// texture first drawn while a frame is recorded is copied out of guest
+// memory, decoded on these threads while the frame goes on, and uploaded
+// ahead of the frame's commands when the frame is submitted.
+struct DecodeJob {
+    TextureSnapshot snapshot;
+    std::vector<std::uint32_t> pixels;
+    bool ok{};
+    std::atomic<bool> done{};
+};
+
+class DecodePool {
+public:
+    explicit DecodePool(std::uint32_t threads) {
+        for (std::uint32_t i = 0; i < threads; ++i) workers_.emplace_back([this] { work(); });
+    }
+    ~DecodePool() {
+        {
+            std::lock_guard<std::mutex> guard(lock_);
+            stopping_ = true;
+        }
+        wake_.notify_all();
+        for (std::thread &worker : workers_) worker.join();
+    }
+    DecodePool(const DecodePool &) = delete;
+    DecodePool &operator=(const DecodePool &) = delete;
+
+    void submit(std::shared_ptr<DecodeJob> job) {
+        {
+            std::lock_guard<std::mutex> guard(lock_);
+            queue_.push_back(std::move(job));
+        }
+        wake_.notify_one();
+    }
+    // Waits for `job`, decoding jobs still queued on this thread meanwhile.
+    void wait(DecodeJob &job) {
+        std::unique_lock<std::mutex> guard(lock_);
+        while (!job.done.load(std::memory_order_acquire)) {
+            if (!queue_.empty()) {
+                std::shared_ptr<DecodeJob> next = std::move(queue_.front());
+                queue_.pop_front();
+                guard.unlock();
+                run(*next);
+                guard.lock();
+                continue;
+            }
+            finished_.wait(guard);
+        }
+    }
+
+private:
+    void run(DecodeJob &job) {
+        job.ok = decode_snapshot(job.snapshot, job.pixels);
+        {
+            std::lock_guard<std::mutex> guard(lock_);
+            job.done.store(true, std::memory_order_release);
+        }
+        finished_.notify_all();
+    }
+    void work() {
+        std::unique_lock<std::mutex> guard(lock_);
+        for (;;) {
+            wake_.wait(guard, [this] { return stopping_ || !queue_.empty(); });
+            if (stopping_) return;
+            std::shared_ptr<DecodeJob> job = std::move(queue_.front());
+            queue_.pop_front();
+            guard.unlock();
+            run(*job);
+            guard.lock();
+        }
+    }
+
+    std::mutex lock_;
+    std::condition_variable wake_;
+    std::condition_variable finished_;
+    std::deque<std::shared_ptr<DecodeJob>> queue_;
+    std::vector<std::thread> workers_;
+    bool stopping_{};
+};
+
 } // namespace
 
 struct VulkanRenderer::Impl {
@@ -488,6 +616,59 @@ struct VulkanRenderer::Impl {
     VkSwapchainKHR swapchain{};
     VkFormat swapchain_format{VK_FORMAT_B8G8R8A8_UNORM};
     VkExtent2D swapchain_extent{};
+    // The depth buffer's format: 32-bit float where the device can render to
+    // it, which desktop GPUs all can; phones may offer only 24- or 16-bit.
+    VkFormat depth_format{VK_FORMAT_D32_SFLOAT};
+    [[nodiscard]] VkImageAspectFlags depth_aspect() const {
+        return depth_format == VK_FORMAT_D24_UNORM_S8_UINT || depth_format == VK_FORMAT_D32_SFLOAT_S8_UINT
+                   ? VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT
+                   : VK_IMAGE_ASPECT_DEPTH_BIT;
+    }
+    void choose_depth_format() {
+        const VkFormat candidates[] = {VK_FORMAT_D32_SFLOAT, VK_FORMAT_D24_UNORM_S8_UINT,
+                                       VK_FORMAT_X8_D24_UNORM_PACK32, VK_FORMAT_D16_UNORM,
+                                       VK_FORMAT_D32_SFLOAT_S8_UINT};
+        for (const VkFormat format : candidates) {
+            VkFormatProperties properties{};
+            vkGetPhysicalDeviceFormatProperties(physical_device, format, &properties);
+            if ((properties.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0u) {
+                depth_format = format;
+                if (format != VK_FORMAT_D32_SFLOAT)
+                    std::cout << "[render] no 32-bit float depth buffer; using format " << static_cast<int>(format)
+                              << "\n";
+                return;
+            }
+        }
+    }
+    // The part of the window the game and the overlay may use, in pixels:
+    // the whole window, except on Android, where a display cutout or a
+    // system bar can take an edge (SDL's safe area).
+    VkRect2D content_rect{};
+    void update_content_rect() {
+        content_rect = {{0, 0}, swapchain_extent};
+#if defined(PORTABLEKIT_ANDROID_APP)
+        // Only the display cutout: SDL's safe area also counts the gesture
+        // areas of the hidden system bars, which would shrink the picture for
+        // nothing.
+        int window_width = 0;
+        int window_height = 0;
+        if (window == nullptr || !SDL_GetWindowSizeInPixels(window, &window_width, &window_height) ||
+            window_width <= 0 || window_height <= 0)
+            return;
+        const android::Insets cutout = android::cutout_insets();
+        const double x_scale = static_cast<double>(swapchain_extent.width) / window_width;
+        const double y_scale = static_cast<double>(swapchain_extent.height) / window_height;
+        const auto left = static_cast<std::int32_t>(std::lround(cutout.left * x_scale));
+        const auto top = static_cast<std::int32_t>(std::lround(cutout.top * y_scale));
+        const auto right = static_cast<std::int32_t>(swapchain_extent.width) -
+                           static_cast<std::int32_t>(std::lround(cutout.right * x_scale));
+        const auto bottom = static_cast<std::int32_t>(swapchain_extent.height) -
+                            static_cast<std::int32_t>(std::lround(cutout.bottom * y_scale));
+        if (right - left < 16 || bottom - top < 16) return;
+        content_rect = {{left, top},
+                        {static_cast<std::uint32_t>(right - left), static_cast<std::uint32_t>(bottom - top)}};
+#endif
+    }
     std::vector<VkImage> swapchain_images;
     VkCommandPool command_pool{};
     VkCommandBuffer command_buffer{};
@@ -500,43 +681,77 @@ struct VulkanRenderer::Impl {
     double gpu_timer_ns_per_tick{};
     std::uint64_t gpu_timer_mask{};
     std::uint32_t gpu_timer_used{};     // queries written into this frame so far
-    std::uint32_t gpu_timer_pending{};  // queries of the submitted frame, read at the next begin_frame
     bool gpu_timer_open{};
+    // Each frame slot (see FrameSlot) has its own range of the pool.
+    [[nodiscard]] std::uint32_t gpu_timer_base() const { return slot * 2u * kGpuTimerSegments; }
     void begin_gpu_segment(VkCommandBuffer commands) {
         if (gpu_timer == VK_NULL_HANDLE || gpu_timer_open || gpu_timer_used + 2u > 2u * kGpuTimerSegments) return;
-        vkCmdWriteTimestamp(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, gpu_timer, gpu_timer_used);
+        vkCmdWriteTimestamp(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, gpu_timer, gpu_timer_base() + gpu_timer_used);
         gpu_timer_open = true;
     }
     void end_gpu_segment(VkCommandBuffer commands) {
         if (!gpu_timer_open) return;
-        vkCmdWriteTimestamp(commands, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, gpu_timer, gpu_timer_used + 1u);
+        vkCmdWriteTimestamp(commands, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, gpu_timer,
+                            gpu_timer_base() + gpu_timer_used + 1u);
         gpu_timer_used += 2u;
         gpu_timer_open = false;
     }
     // After the fence of the frame that wrote them: adds that frame's GPU time.
-    void collect_gpu_time() {
-        if (gpu_timer == VK_NULL_HANDLE || gpu_timer_pending == 0u) return;
-        std::array<std::uint64_t, 4u * kGpuTimerSegments> results{};
-        const std::uint32_t count = gpu_timer_pending;
-        gpu_timer_pending = 0u;
-        const VkResult read = vkGetQueryPoolResults(
-            device, gpu_timer, 0u, count, static_cast<std::size_t>(count) * 2u * sizeof(std::uint64_t),
-            results.data(), 2u * sizeof(std::uint64_t),
-            VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
-        if (read != VK_SUCCESS && read != VK_NOT_READY) return;
-        std::uint64_t ticks = 0u;
-        bool any = false;
-        for (std::uint32_t pair = 0; pair + 1u < count; pair += 2u) {
-            const std::uint64_t *begin = &results[pair * 2u];
-            const std::uint64_t *end = &results[(pair + 1u) * 2u];
-            if (begin[1] == 0u || end[1] == 0u) continue;  // not available
-            ticks += (end[0] - begin[0]) & gpu_timer_mask;
-            any = true;
-        }
-        if (any) perf::add_gpu_time(static_cast<double>(ticks) * gpu_timer_ns_per_tick / 1.0e6);
+    void collect_gpu_time(std::uint32_t from);
+    // Signalled by the presentation engine for each swapchain image a frame
+    // or a present between flips acquires, one per command buffer that
+    // presents (see acquire_semaphore()); and signalled by a submission for
+    // the present of the image it drew, one per swapchain image, as a
+    // present may still be waiting for its own when the next one is made.
+    std::array<VkSemaphore, 4> image_available{};
+    std::vector<VkSemaphore> render_finished;
+
+    // <prefix>_GPU_BREADCRUMBS (VK_AMD_buffer_marker): each marked point of
+    // every command buffer writes its number twice into a host-visible
+    // buffer, once when the GPU reaches it and once when everything before it
+    // has finished. After a GPU hang (VK_ERROR_DEVICE_LOST) the log names the
+    // last point finished and the last one reached: the work that hung lies
+    // between them.
+    struct Breadcrumbs {
+        bool available{};
+        VkBuffer buffer{};
+        VkDeviceMemory memory{};
+        volatile std::uint32_t *mapped{};
+        PFN_vkCmdWriteBufferMarkerAMD write{};
+        std::uint32_t next{};
+        std::array<std::string, 1024> labels;  // by marker number, modulo the size
+    } breadcrumbs;
+    void breadcrumb(VkCommandBuffer commands, const std::string &label) {
+        Breadcrumbs &b = breadcrumbs;
+        if (b.write == nullptr) return;
+        const std::uint32_t id = ++b.next;
+        b.labels[id % b.labels.size()] = label + " (frame " + std::to_string(frames) + ")";
+        b.write(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, b.buffer, 0u, id);
+        b.write(commands, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, b.buffer, 4u, id);
     }
-    VkSemaphore image_available{};
-    VkSemaphore render_finished{};
+    // Reports a lost device, with the breadcrumbs when they are on, and ends
+    // the process: nothing more can be drawn.
+    [[noreturn]] void device_lost(const char *where) {
+        std::cout << "[render] the GPU stopped responding (VK_ERROR_DEVICE_LOST) in " << where << "\n";
+        Breadcrumbs &b = breadcrumbs;
+        if (b.mapped != nullptr) {
+            const std::uint32_t reached = b.mapped[0];
+            const std::uint32_t finished = b.mapped[1];
+            std::cout << "[render] breadcrumbs: last finished " << finished << " "
+                      << b.labels[finished % b.labels.size()] << "; last reached " << reached << " "
+                      << b.labels[reached % b.labels.size()] << "; last recorded " << b.next << "\n";
+            const std::uint32_t first = finished > 8u ? finished - 8u : 1u;
+            for (std::uint32_t id = first; id <= std::min(b.next, finished + 24u); ++id)
+                std::cout << "[render]   " << id << (id <= finished ? " done " : id <= reached ? " busy " : " queued ")
+                          << b.labels[id % b.labels.size()] << "\n";
+        }
+        std::cout << std::flush;
+        std::_Exit(3);
+    }
+    void wait_fence(VkFence fence, const char *where) {
+        const VkResult result = vkWaitForFences(device, 1u, &fence, VK_TRUE, UINT64_MAX);
+        if (result == VK_ERROR_DEVICE_LOST) device_lost(where);
+    }
     VkPresentModeKHR present_mode{VK_PRESENT_MODE_FIFO_KHR};
     VkSurfaceFormatKHR surface_format{VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR};
     VkImageUsageFlags swapchain_usage{};
@@ -546,6 +761,9 @@ struct VulkanRenderer::Impl {
     // Set by a resize, a present mode change or an out-of-date swapchain;
     // the swapchain is rebuilt before the next acquire.
     bool swapchain_dirty{};
+    // Set when the swapchain may no longer suit the surface (a suboptimal
+    // present, a turned display); see check_swapchain().
+    bool swapchain_check{};
 
     // Display settings.
     settings::PresentMode requested_present{settings::PresentMode::Fifo};
@@ -566,6 +784,40 @@ struct VulkanRenderer::Impl {
     // image, after the game frame and the performance overlay.
     VkRenderPass ui_render_pass{};
     std::vector<VkFramebuffer> ui_framebuffers;
+#if defined(__ANDROID__)
+    // Pre-rotation for a display turned sideways. The swapchain's images are
+    // in the panel's orientation (swapchain_image_extent) and carry the
+    // surface's transform; everything is drawn upright at swapchain_extent
+    // into one of these per swapchain image, and a last pass turns it into
+    // the swapchain image. The compositor then has nothing left to rotate.
+    struct UprightImage {
+        VkImage image{};
+        VkDeviceMemory memory{};
+        VkImageView view{};
+        VkDescriptorSet set{};
+        VkFramebuffer rotate_framebuffer{};
+    };
+    std::vector<UprightImage> upright_images;
+    VkExtent2D swapchain_image_extent{};
+    std::int32_t swapchain_quarter_turns{};
+    // The surface transform the swapchain was made for.
+    VkSurfaceTransformFlagBitsKHR swapchain_transform{VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR};
+    std::uint32_t swapchain_builds{};
+    VkRenderPass rotate_render_pass{};
+    VkDescriptorSetLayout rotate_set_layout{};
+    VkDescriptorPool rotate_pool{};
+    VkPipelineLayout rotate_layout{};
+    VkPipeline rotate_pipeline{};
+    VkSampler rotate_sampler{};
+    VkShaderModule rotate_vertex{};
+    VkShaderModule rotate_fragment{};
+    [[nodiscard]] bool prerotated() const { return !upright_images.empty(); }
+    bool create_rotation_pipeline(std::string &error);
+    bool create_upright_images(std::string &error);
+    void destroy_upright_images();
+    void destroy_rotation_pipeline();
+    void record_rotation(VkCommandBuffer commands, std::uint32_t image_index, VkImageLayout layout);
+#endif
     bool ui_ready{};
     ImDrawData *ui_draw_data{};
     std::function<bool(const SDL_Event &)> event_hook;
@@ -579,6 +831,92 @@ struct VulkanRenderer::Impl {
     bool mouse_captured{};
     std::uint32_t mouse_buttons{};  // bit n: SDL mouse button n held
     MouseMotion mouse_motion{};
+    // Touch screen: the on-screen controls, in window coordinates.
+    input::touch::Controls touch;
+    bool touch_visible{};
+    bool real_mouse_seen{};
+    MouseMotion touch_motion{};
+    struct TouchLayoutKey {
+        int width{};
+        int height{};
+        VkRect2D content{};
+        float size{};
+        bool dpad{};
+    } touch_layout_key{};
+    void update_touch_layout() {
+        int width = 0;
+        int height = 0;
+        if (window == nullptr || !SDL_GetWindowSize(window, &width, &height) || width <= 0 || height <= 0) return;
+        const float size = settings::current().touch_size;
+        const bool dpad = settings::current().touch_dpad;
+        const TouchLayoutKey key{width, height, content_rect, size, dpad};
+        if (key.width == touch_layout_key.width && key.height == touch_layout_key.height &&
+            key.size == touch_layout_key.size && key.dpad == touch_layout_key.dpad &&
+            key.content.offset.x == touch_layout_key.content.offset.x &&
+            key.content.offset.y == touch_layout_key.content.offset.y &&
+            key.content.extent.width == touch_layout_key.content.extent.width &&
+            key.content.extent.height == touch_layout_key.content.extent.height)
+            return;
+        touch_layout_key = key;
+        // The content area (clear of a cutout) in window coordinates, plus a
+        // small margin from the rounded corners.
+        input::touch::Insets insets;
+        if (swapchain_extent.width != 0u && swapchain_extent.height != 0u) {
+            const float x_scale = static_cast<float>(width) / static_cast<float>(swapchain_extent.width);
+            const float y_scale = static_cast<float>(height) / static_cast<float>(swapchain_extent.height);
+            insets.left = static_cast<float>(content_rect.offset.x) * x_scale;
+            insets.top = static_cast<float>(content_rect.offset.y) * y_scale;
+            insets.right = static_cast<float>(swapchain_extent.width - content_rect.offset.x -
+                                              content_rect.extent.width) * x_scale;
+            insets.bottom = static_cast<float>(swapchain_extent.height - content_rect.offset.y -
+                                               content_rect.extent.height) * y_scale;
+        }
+        const float margin = static_cast<float>(std::min(width, height)) * 0.02f;
+        insets.left += margin;
+        insets.top += margin;
+        insets.right += margin;
+        insets.bottom += margin;
+        touch.set_layout(
+            input::touch::make_layout(static_cast<float>(width), static_cast<float>(height), insets, size, dpad));
+    }
+    void handle_touch(const SDL_Event &event) {
+        const bool finger = event.type == SDL_EVENT_FINGER_DOWN || event.type == SDL_EVENT_FINGER_MOTION ||
+                            event.type == SDL_EVENT_FINGER_UP || event.type == SDL_EVENT_FINGER_CANCELED;
+        if (!finger) {
+            // A gamepad, the keyboard or a real mouse takes over: hide.
+            const bool other = event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || event.type == SDL_EVENT_KEY_DOWN ||
+                               (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && event.button.which != SDL_TOUCH_MOUSEID) ||
+                               (event.type == SDL_EVENT_GAMEPAD_AXIS_MOTION &&
+                                std::abs(static_cast<int>(event.gaxis.value)) > 16000);
+            if (other && touch_visible) {
+                touch_visible = false;
+                touch.release_all();
+            }
+            return;
+        }
+        if (!settings::current().touch_controls || !game_input) {
+            touch.release_all();
+            return;
+        }
+        int width = 0;
+        int height = 0;
+        if (!SDL_GetWindowSize(window, &width, &height)) return;
+        update_touch_layout();
+        const input::touch::Point at{event.tfinger.x * static_cast<float>(width),
+                                     event.tfinger.y * static_cast<float>(height)};
+        const std::uint64_t id = event.tfinger.fingerID;
+        if (event.type == SDL_EVENT_FINGER_DOWN) {
+            touch_visible = true;
+            touch.finger_down(id, at);
+        } else if (event.type == SDL_EVENT_FINGER_MOTION) {
+            touch.finger_move(id, at);
+        } else {
+            touch.finger_up(id);
+        }
+        const input::touch::Point drag = touch.take_camera_drag();
+        touch_motion.x += drag.x / static_cast<float>(height);
+        touch_motion.y += drag.y / static_cast<float>(height);
+    }
     std::array<bool, input::kKeyPositions> scripted_keys{};
 
     // Captures the pointer for the game when everything allows it and frees
@@ -589,8 +927,12 @@ struct VulkanRenderer::Impl {
     void sample_pad(bool focused);
     void update_pointer(bool focused) {
         const bool minimized = (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED) != 0u;
-        const bool wanted = settings::current().mouse && game_input && !pointer_free && !minimized &&
-                            (focused || scripted_input);
+        bool wanted = settings::current().mouse && game_input && !pointer_free && !minimized &&
+                      (focused || scripted_input);
+#if defined(__ANDROID__)
+        // A phone has no mouse to capture until one is actually used.
+        wanted = wanted && real_mouse_seen;
+#endif
         if (wanted == mouse_captured) return;
         mouse_captured = wanted;
         // A scripted run never takes the real pointer from the person at the machine.
@@ -617,9 +959,14 @@ struct VulkanRenderer::Impl {
     VkImage overlay_image{};
     VkDeviceMemory overlay_memory{};
     VkImageView overlay_view{};
-    VkBuffer overlay_staging{};
-    VkDeviceMemory overlay_staging_memory{};
-    void *overlay_mapped{};
+    // One staging buffer per command buffer that can draw the overlay: the
+    // frame slots' and the two presents between flips' (command_index()).
+    struct Staging {
+        VkBuffer buffer{};
+        VkDeviceMemory memory{};
+        void *mapped{};
+    };
+    std::array<Staging, 4> overlay_staging{};
     std::vector<std::uint32_t> overlay_pixels;
 
     // Frames the game writes to memory without the GE (upload_frame): copied
@@ -629,9 +976,6 @@ struct VulkanRenderer::Impl {
     VkDeviceMemory upload_memory{};
     VkImageView upload_view{};
     VkExtent2D upload_extent{};
-    VkBuffer upload_staging{};
-    VkDeviceMemory upload_staging_memory{};
-    void *upload_mapped{};
     void destroy_upload();
     bool create_upload(std::uint32_t width, std::uint32_t height, std::string &error);
 
@@ -677,9 +1021,6 @@ struct VulkanRenderer::Impl {
     VkImage writeback_image{};
     VkDeviceMemory writeback_memory{};
     VkImageView writeback_view{};
-    VkBuffer writeback_buffer{};
-    VkDeviceMemory writeback_buffer_memory{};
-    void *writeback_mapped{};
     // The write-back buffer is read by the CPU every frame. Uncached memory
     // (radv's default host-visible type) makes that copy take ~3 ms on a
     // Steam Deck, so a HOST_CACHED type is preferred, and a non-coherent one
@@ -687,10 +1028,10 @@ struct VulkanRenderer::Impl {
     // first host-visible coherent type, as before.
     bool writeback_cached{};
     bool writeback_coherent{true};
-    void invalidate_writeback() {
-        if (writeback_coherent || writeback_buffer_memory == VK_NULL_HANDLE) return;
+    void invalidate_writeback(VkDeviceMemory memory) {
+        if (writeback_coherent || memory == VK_NULL_HANDLE) return;
         VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
-        range.memory = writeback_buffer_memory;
+        range.memory = memory;
         range.offset = 0u;
         range.size = VK_WHOLE_SIZE;
         vkInvalidateMappedMemoryRanges(device, 1u, &range);
@@ -700,11 +1041,65 @@ struct VulkanRenderer::Impl {
         std::uint32_t stride{};
         std::uint32_t format{};
     };
-    WritebackFrame writeback_recorded{};  // copied by the frame in flight
-    bool writeback_in_flight{};
     WritebackFrame writeback_ready{};     // pixels waiting in writeback_pixels
     bool writeback_has_pixels{};
     std::vector<std::uint32_t> writeback_pixels;
+
+    // Frames in flight. With two (the default) the CPU records a frame while
+    // the GPU still draws the one before, so their times overlap instead of
+    // adding up; <prefix>_FRAMES_IN_FLIGHT=1 waits for each frame before
+    // recording the next, as before. What the CPU writes for a frame, or
+    // reads back from it, belongs to its slot until the slot's fence says the
+    // frame has finished.
+    static constexpr std::uint32_t kMaxSlots = 2u;
+    struct FrameSlot {
+        VkCommandBuffer commands{};
+        VkFence fence{};
+        VkCommandBuffer uploads{};
+        // Staging ring for texture uploads (stage_upload()).
+        VkBuffer ring{};
+        VkDeviceMemory ring_memory{};
+        void *ring_mapped{};
+        VkDeviceSize ring_size{};
+        std::vector<std::pair<VkBuffer, VkDeviceMemory>> retired_buffers;
+        std::vector<Texture> retired_textures;
+        // The frame written back to guest memory (record_writeback()).
+        Staging writeback{};
+        bool writeback_in_flight{};
+        WritebackFrame writeback_recorded{};
+        // A frame the game wrote itself (upload_frame()).
+        Staging movie{};
+        std::uint32_t gpu_timer_pending{};  // queries the frame wrote, read after its fence
+        std::uint32_t region{kNoRegion};    // of the vertex and index buffers
+        // <prefix>_CHECK_GPU_DECODE: the draws the frame checks and the host's
+        // own decode of their vertices.
+        std::vector<CheckDraw> checks;
+        std::vector<GpuVertex> check_expected;
+        std::vector<std::uint8_t> check_drawn;  // for each: the draw's indices name it, so the shader ran for it
+        std::uint32_t check_used{};         // vertices of the slot's check area handed out
+    };
+    static constexpr std::uint32_t kNoRegion = 0xFFFFFFFFu;
+    std::array<FrameSlot, kMaxSlots> slots{};
+    std::uint32_t slot_count{kMaxSlots};
+    std::uint32_t slot{};
+    // Regions the presents between flips read, by present slot, so a frame
+    // does not write a region one of them may still draw from.
+    std::array<std::uint32_t, 2> present_regions{};
+    std::uint32_t replay_regions{};  // set by replay()
+    // 0 and 1: the frame slots' command buffers; 2 and 3: the presents'.
+    [[nodiscard]] std::uint32_t command_index(VkCommandBuffer commands) const {
+        for (std::uint32_t i = 0; i < kMaxSlots; ++i)
+            if (commands == slots[i].commands) return i;
+        return commands == present_commands[1] ? 3u : 2u;
+    }
+    [[nodiscard]] VkSemaphore acquire_semaphore(VkCommandBuffer commands) const {
+        return image_available[command_index(commands)];
+    }
+    // Takes the pixels a slot's frame wrote back, waiting for it if `wait`.
+    void collect_writeback(std::uint32_t from, bool wait);
+    // After a slot's fence: compares what its raw vertex shader decoded with
+    // the host's decode (<prefix>_CHECK_GPU_DECODE).
+    void compare_gpu_decode(std::uint32_t from);
     bool create_writeback(std::string &error);
     void destroy_writeback();
     void record_writeback(std::uint32_t address);
@@ -719,6 +1114,9 @@ struct VulkanRenderer::Impl {
     // image is used.
     Target held{};
     bool holding{};
+    // A load running fast: presents are thinned out (set_fast_forward).
+    bool fast_forward{};
+    std::chrono::steady_clock::time_point fast_forward_shown{};
     // Per-frame tally, so "no 3D" can be told from "3D drawn somewhere else".
     std::uint32_t frame_through_draws{};
     std::uint32_t frame_transformed_draws{};
@@ -739,9 +1137,40 @@ struct VulkanRenderer::Impl {
     CameraReading reading{};
     bool pass_active{};
     VkRenderPass render_pass{};
+    // The same pass with the colour (bit 0) or depth (bit 1) attachment not
+    // loaded, for a pass whose first draw is a clear that writes all of it:
+    // a tiled GPU then does not read the target from memory first.
+    // <prefix>_NO_CLEAR_LOAD always loads, as before.
+    std::array<VkRenderPass, 4> discard_passes{};
     VkExtent2D target_extent{};
 
     VkShaderModule vertex_shader{};
+    VkShaderModule raw_vertex_shader{};  // GPU vertex decode, or its check build
+    // GPU vertex decode (<prefix>_GPU_DECODE): the renderer asks GeState for
+    // the guest's vertex bytes of transformed triangle draws and the vertex
+    // shader decodes and skins them.
+    bool gpu_decode_available{};
+    bool check_gpu_decode{};  // <prefix>_CHECK_GPU_DECODE
+    std::uint32_t raw_offset{};  // the raw block most recently written this frame
+    RawBlock last_raw{};
+    std::size_t last_raw_bytes{};
+    bool raw_valid{};
+    // <prefix>_CHECK_GPU_DECODE: the shader writes what it decoded to this
+    // buffer (three vec4s a vertex, from each draw's slot), and after the
+    // frame's fence the host compares it with its own decode, kept here.
+    VkBuffer check_buffer{};
+    VkDeviceMemory check_memory{};
+    void *check_mapped{};
+    static constexpr std::uint32_t kCheckVertices = 65536u;  // compared per frame slot
+    struct CheckTally {
+        std::uint64_t draws{};
+        std::uint64_t vertices{};
+        std::uint64_t exact{};
+        std::uint64_t close{};
+        std::uint64_t differed{};
+        double max_error{};
+        std::array<std::array<std::uint64_t, 12>, 2> fields{};  // inexact values by kind (unskinned, skinned) and field
+    } check_tally;
     VkShaderModule fragment_shader{};
     VkPipelineLayout pipeline_layout{};
     VkDescriptorSetLayout descriptor_layout{};
@@ -756,6 +1185,41 @@ struct VulkanRenderer::Impl {
     VkSampler clamp_sampler{};
     VkSampler clamp_sharp_sampler{};
     std::map<PipelineKey, VkPipeline> pipelines;
+    // Pipelines compiled in earlier runs, kept in the data directory
+    // (pipeline_cache.bin) so that a new area does not compile its shaders
+    // again: drivers on phones compile slowly and some keep no cache of their
+    // own. <prefix>_NO_PIPELINE_CACHE creates every pipeline from scratch.
+    VkPipelineCache pipeline_cache{};
+    std::filesystem::path pipeline_cache_path;
+    bool pipeline_cache_dirty{};
+    std::chrono::steady_clock::time_point pipeline_cache_changed{};
+    // Pipelines created since the last report, and how long they took.
+    std::uint32_t pipelines_reported{};
+    std::uint32_t pipelines_new{};
+    double pipeline_new_ms{};
+    void load_pipeline_cache();
+    void save_pipeline_cache();
+    // Pipeline prewarming (<prefix>_NO_PIPELINE_PREWARM turns it off): the keys
+    // of every pipeline a run made are kept in pipeline_keys.bin, and the next
+    // run makes them on a thread of its own from the start, so a new area or
+    // effect finds its pipelines ready instead of compiling them in its
+    // first frame.
+    struct Prewarm {
+        std::thread thread;
+        std::mutex lock;
+        std::map<PipelineKey, VkPipeline> made;  // not yet asked for
+        std::atomic<bool> stop{};
+    };
+    std::unique_ptr<Prewarm> prewarm = std::make_unique<Prewarm>();
+    std::uint32_t pipelines_prewarm_used{};
+    bool pipeline_keys_dirty{};
+    std::filesystem::path pipeline_keys_path;
+    void prewarm_pipelines();
+    void save_pipeline_keys();
+    [[nodiscard]] VkPipeline create_pipeline(const PipelineKey &key) const;
+    // Every few seconds after a pipeline was created: saves the cache and
+    // says how many pipelines the game needed and what they cost.
+    void report_pipelines(bool final);
     // The pipeline of the previous lookup: consecutive draws mostly share it.
     // <prefix>_NO_LOOKUP_CACHE looks every draw up in the map, as before.
     PipelineKey last_pipeline_key{};
@@ -773,6 +1237,9 @@ struct VulkanRenderer::Impl {
     VkDeviceSize vertex_limit{kVertexBufferBytes};
     VkDeviceSize index_limit{kIndexBufferBytes};
     void enter_region(std::uint32_t index) {
+        // How much of its region the frame being left used, for the perf line.
+        perf::note_frame_space(vertex_offset - static_cast<VkDeviceSize>(frame_region) * kVertexBufferBytes,
+                               index_offset - static_cast<VkDeviceSize>(frame_region) * kIndexBufferBytes);
         frame_region = index;
         vertex_offset = static_cast<VkDeviceSize>(index) * kVertexBufferBytes;
         vertex_limit = vertex_offset + kVertexBufferBytes;
@@ -792,14 +1259,17 @@ struct VulkanRenderer::Impl {
     // What the command buffer has bound, so that unchanged state is not bound
     // again; begin_frame() and begin_pass() forget it.
     VkPipeline bound_pipeline{};
-    std::array<std::uint32_t, 2> bound_lighting_offsets{};
+    std::array<std::uint32_t, 3> bound_lighting_offsets{};
     bool lighting_bound{};
 
     // Copies a uniform block into the vertex buffer at the next aligned offset.
     // Returns false, writing nothing, when the buffer is full.
     bool write_uniform(const void *data, std::size_t size, std::uint32_t &offset) {
         const VkDeviceSize at = (vertex_offset + uniform_alignment - 1u) / uniform_alignment * uniform_alignment;
-        if (at + size > vertex_limit) return false;
+        if (at + size > vertex_limit) {
+            report_frame_space_full("vertex");
+            return false;
+        }
         std::memcpy(static_cast<std::uint8_t *>(vertex_mapped) + at, data, size);
         offset = static_cast<std::uint32_t>(at);
         vertex_offset = at + size;
@@ -822,7 +1292,7 @@ struct VulkanRenderer::Impl {
     struct DrawState {
         VkPipeline pipeline{};
         VkDescriptorSet texture{};
-        std::array<std::uint32_t, 2> lighting{};
+        std::array<std::uint32_t, 3> lighting{};  // environment, object, raw block
         VkViewport viewport{};
         VkRect2D scissor{};
         std::array<float, 4> blend{};
@@ -837,6 +1307,8 @@ struct VulkanRenderer::Impl {
         VkDeviceSize index_base{};   // bytes into the index buffer
         std::uint32_t index_count{};
         std::uint32_t draws{};
+        bool raw{};                  // the guest's vertex bytes, decoded on the GPU
+        std::uint32_t stride{};      // of a raw group's vertices
     };
     DrawGroup group{};
     bool group_skinned{};  // the open group is of skinned draws recorded for drawing again
@@ -847,14 +1319,18 @@ struct VulkanRenderer::Impl {
     VkDeviceSize index_offset{};
     void flush_group() {
         if (!group.open) return;
+        const perf::SplitScope split(perf::Split::Record);
         group.open = false;
         vkCmdBindVertexBuffers(command_buffer, 0u, 1u, &vertex_buffer, &group.vertex_base);
         vkCmdBindIndexBuffer(command_buffer, index_buffer, group.index_base, VK_INDEX_TYPE_UINT16);
-        vkCmdDrawIndexed(command_buffer, group.index_count, 1u, 0u, 0, 0u);
+        // A raw group finds its bytes at its first instance (ge.vert).
+        vkCmdDrawIndexed(command_buffer, group.index_count, 1u, 0u, 0,
+                         group.raw ? static_cast<std::uint32_t>(group.vertex_base) : 0u);
         perf::count_recorded_draws(1u);
     }
     // Sets what differs between `state` and what is recorded already.
     void record_state(const DrawState &state) {
+        const perf::SplitScope split(perf::Split::Record);
         if (!state_known || std::memcmp(&state.viewport, &recorded.viewport, sizeof(VkViewport)) != 0)
             vkCmdSetViewport(command_buffer, 0u, 1u, &state.viewport);
         if (!state_known || state.blend != recorded.blend)
@@ -913,6 +1389,8 @@ struct VulkanRenderer::Impl {
         std::uint32_t draws{};
         std::uint32_t object{kNone};  // FrameRecord::objects, for a lit group
         std::uint32_t skinned{kNone}; // FrameRecord::skinned: the vertices of a group of skinned draws
+        bool raw{};                   // drawn from the guest's vertex bytes at vertex_base (first instance)
+        std::uint32_t raw_block{kNone}; // FrameRecord::raws: its format and bones
     };
     struct FrameRecord {
         std::vector<interpolation::DrawSummary> summaries;
@@ -921,6 +1399,8 @@ struct VulkanRenderer::Impl {
         std::vector<GpuVertex> skinned;       // skinned draws' vertices
         std::vector<ObjectBlock> objects;
         std::uint32_t object_offset{kNone};   // where objects.back() lies
+        std::vector<RawBlock> raws;           // raw blocks of raw groups, for blending their bones
+        std::uint32_t raw_offset{kNone};      // where raws.back() lies
         std::uint32_t displayed{};
         std::int64_t moment_us{};
         std::uint64_t texture_clock{};        // texture_clock when the frame began
@@ -932,6 +1412,8 @@ struct VulkanRenderer::Impl {
             groups.clear();
             skinned.clear();
             objects.clear();
+            raws.clear();
+            raw_offset = kNone;
             object_offset = kNone;
             recorded = false;
             valid = false;
@@ -1018,7 +1500,7 @@ struct VulkanRenderer::Impl {
     void finish_interpolated_frame(VkImage source, std::uint32_t displayed, std::int64_t moment_us);
     void record_draw_for_replay(const DrawCall &call, bool lit, std::uint32_t skinned, const DrawState &state,
                                 VkDeviceSize vertex_start, VkBuffer indices, VkDeviceSize index_start,
-                                std::uint32_t count, std::uint32_t vertex_count, bool joined);
+                                std::uint32_t count, std::uint32_t vertex_count, bool joined, bool raw = false);
     // `idle`: the kernel is waiting for real time, so the present costs the
     // game nothing; otherwise it is made while the game's code runs, within
     // a budget per game frame. Returns whether a present was made.
@@ -1090,6 +1572,28 @@ struct VulkanRenderer::Impl {
     void *upload_buffer_mapped{};
     VkDeviceSize upload_buffer_size{};
     VkCommandBuffer upload_commands{};
+    // Texture uploads without waiting (<prefix>_SYNC_UPLOADS waits, as
+    // before). A texture first drawn while a frame is recorded is copied by a
+    // command buffer of its own, submitted with the frame ahead of the
+    // frame's commands, from a staging ring the frame fence frees again. A
+    // texture evicted from the cache is destroyed once the frames that may
+    // still draw it have finished, instead of after a queue idle wait.
+    VkCommandBuffer frame_uploads{};  // the slot's, while its frame is recorded
+    bool frame_uploads_open{};
+    VkDeviceSize upload_ring_used{};
+    std::uint32_t frame_upload_count{};
+    [[nodiscard]] static bool async_uploads() {
+        static const bool sync = portablekit::env("SYNC_UPLOADS") != nullptr;
+        return !sync && !perf::alternate_off(perf::NewPath::Uploads);
+    }
+    // Stages `bytes` of pixels for a copy recorded into frame_uploads; null
+    // when there is no room and no memory.
+    [[nodiscard]] bool stage_upload(const void *pixels, VkDeviceSize bytes, VkBuffer &buffer, VkDeviceSize &offset);
+    // The command buffers a submission of the frame's own commands runs:
+    // the frame's uploads first, when it has any.
+    std::uint32_t frame_batch(VkCommandBuffer commands, std::array<VkCommandBuffer, 2> &batch);
+    // After a slot's fence: its ring is free again and what it retired can go.
+    void release_frame_uploads(std::uint32_t from);
     [[nodiscard]] static bool reuse_buffers() {
         static const bool no_reuse = portablekit::env("NO_BUFFER_REUSE") != nullptr;
         return !no_reuse && !perf::alternate_off(perf::NewPath::Reuse);
@@ -1106,6 +1610,22 @@ struct VulkanRenderer::Impl {
     // Index list of a draw whose decoded vertices go straight into the vertex
     // buffer (see submit()).
     std::vector<std::uint16_t> direct_indices;
+    // Background texture decoding: the pool (made on first use) and the
+    // textures of the frame being recorded whose pixels are still decoding.
+    std::unique_ptr<DecodePool> decode_pool;
+    struct PendingTexture {
+        std::shared_ptr<DecodeJob> job;
+        VkImage image{};
+        std::uint32_t width{};
+        std::uint32_t height{};
+    };
+    std::vector<PendingTexture> pending_textures;
+    [[nodiscard]] static bool background_decode() {
+        static const bool sync = portablekit::env("SYNC_TEXTURE_DECODE") != nullptr;
+        return !sync && !perf::alternate_off(perf::NewPath::TextureDecode);
+    }
+    // Waits for the frame's pending textures and records their uploads.
+    void finish_pending_textures();
     // <prefix>_CHECK_DIRECT_VERTICES: draws compared with the expansion, and
     // those that differed.
     std::uint64_t direct_checked{};
@@ -1135,6 +1655,20 @@ struct VulkanRenderer::Impl {
             std::cout << "[pad] SDL_OpenGamepad failed: " << SDL_GetError() << "\n";
             return;
         }
+#if defined(__ANDROID__)
+        // Android reports a keyboard with arrow keys (the emulator's qwerty2,
+        // many tablets' keyboards) as a D-pad device, and SDL lists it as a
+        // gamepad. It has no sticks; taking it as the pad would leave a real
+        // controller connected later unused. Its keys still reach the game
+        // through the keyboard.
+        if (SDL_GetNumJoystickAxes(SDL_GetGamepadJoystick(device)) <= 0) {
+            const char *skipped = SDL_GetGamepadName(device);
+            std::cout << "[pad] " << (skipped != nullptr ? skipped : "gamepad")
+                      << " has no sticks (a keyboard's D-pad), ignored\n";
+            SDL_CloseGamepad(device);
+            return;
+        }
+#endif
         gamepad = device;
         gamepad_id = id;
         const char *name = SDL_GetGamepadName(device);
@@ -1218,6 +1752,16 @@ struct VulkanRenderer::Impl {
         if (!check(vkAllocateMemory(device, &allocate, nullptr, &memory), "vkAllocateMemory", error)) return false;
         vkBindImageMemory(device, image, memory, 0u);
 
+        // An image only copied to and from (the overlay, the write-back, a
+        // movie frame) has no view: one is not allowed without a usage that
+        // reads or renders through it (VUID-VkImageViewCreateInfo-image-04441).
+        constexpr VkImageUsageFlags kViewed = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
+                                              VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                              VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        if ((usage & kViewed) == 0u) {
+            view = VK_NULL_HANDLE;
+            return true;
+        }
         VkImageViewCreateInfo view_info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
         view_info.image = image;
         view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
@@ -1249,6 +1793,60 @@ struct VulkanRenderer::Impl {
     bool create_swapchain(std::string &error);
     void destroy_swapchain_views();
     void recreate_swapchain();
+#if defined(__ANDROID__)
+    // Android takes the window's surface away while the app is in the
+    // background (the home screen, a system picker) and gives a new one when
+    // it returns: nothing is presented in between, and the Vulkan surface and
+    // swapchain are made again for the new one.
+    // Set from SDL's event watch, which Android calls on its own thread; one
+    // window, so one pair for the process.
+    static inline std::atomic<bool> surface_lost{};
+    static inline std::atomic<bool> surface_returned{};
+    void reset_surface();
+    // The native window the Vulkan surface was made for. A different one
+    // means Android replaced it while this thread was busy (a system picker
+    // blocks it through the whole pause), so no lifecycle event was seen.
+    void *native_window{};
+    void *current_native_window() const {
+        return SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER,
+                                      nullptr);
+    }
+    void check_native_window() {
+        void *now = current_native_window();
+        if (now != nullptr && now != native_window) surface_returned = true;
+    }
+#endif
+    // Marks the swapchain for rebuilding if it no longer suits the surface.
+    // On Android a present is suboptimal while the swapchain's transform
+    // differs from the display's, and some drivers keep saying so after the
+    // swapchain matches; rebuilding on every such present rebuilt it every
+    // frame. So the swapchain is rebuilt only when the display's transform or
+    // the window's size really changed: once per turn of the phone.
+    void check_swapchain() {
+        if (!std::exchange(swapchain_check, false) || swapchain == VK_NULL_HANDLE) return;
+#if defined(__ANDROID__)
+        VkSurfaceCapabilitiesKHR capabilities{};
+        if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, surface, &capabilities) != VK_SUCCESS) return;
+        int width = 0;
+        int height = 0;
+        SDL_GetWindowSizeInPixels(window, &width, &height);
+        if (capabilities.currentTransform != swapchain_transform ||
+            (width > 0 && height > 0 &&
+             (static_cast<std::uint32_t>(width) != swapchain_extent.width ||
+              static_cast<std::uint32_t>(height) != swapchain_extent.height)))
+            swapchain_dirty = true;
+#else
+        swapchain_dirty = true;
+#endif
+    }
+#if defined(__ANDROID__)
+    static bool SDLCALL watch_lifecycle(void *, SDL_Event *event) {
+        if (event->type == SDL_EVENT_WILL_ENTER_BACKGROUND || event->type == SDL_EVENT_DID_ENTER_BACKGROUND)
+            surface_lost = true;
+        if (event->type == SDL_EVENT_DID_ENTER_FOREGROUND && surface_lost) surface_returned = true;
+        return true;
+    }
+#endif
     bool create_ui_framebuffers(std::string &error);
     void record_game_blit(VkCommandBuffer commands, VkImage source, VkImage destination);
     // Target size for the current settings and window.
@@ -1281,7 +1879,9 @@ struct VulkanRenderer::Impl {
     bool create_overlay(std::string &error);
     void record_overlay(VkCommandBuffer commands, VkImage destination);
     void update_display_info();
-    void begin_pass(std::uint32_t address);
+    // `overwritten`: bit 0, the pass's first draw writes every pixel's colour
+    // and alpha; bit 1, every pixel's depth.
+    void begin_pass(std::uint32_t address, std::uint32_t overwritten = 0u);
     void end_pass();
     VkPipeline pipeline_for(const PipelineKey &key);
     Texture &texture_for(const GuestMemory &memory, const DrawCall &call);
@@ -1298,8 +1898,107 @@ struct VulkanRenderer::Impl {
     VkDescriptorSet framebuffer_descriptor(Target &target, bool opaque);
     void snapshot_guest_words(const GuestMemory &memory, std::uint32_t address, Target &target);
     Texture create_texture(std::uint32_t width, std::uint32_t height, const std::uint32_t *pixels);
+    // The image, view and descriptor of a texture, with no pixels yet.
+    Texture create_texture_image(std::uint32_t width, std::uint32_t height);
+    // Copies pixels into a texture's image: ahead of the frame's commands
+    // while one is recorded, else at once (waiting for the queue).
+    void upload_texture(VkImage image, std::uint32_t width, std::uint32_t height, const std::uint32_t *pixels);
     void destroy_texture(Texture &texture);
 };
+
+void VulkanRenderer::Impl::compare_gpu_decode(std::uint32_t from) {
+    FrameSlot &frame = slots[from];
+    if (!check_gpu_decode || check_mapped == nullptr) return;
+    const auto *out = static_cast<const float *>(check_mapped);
+    CheckTally &tally = check_tally;
+    for (const CheckDraw &draw : frame.checks) {
+        ++tally.draws;
+        const bool skinned = ((draw.vertex_type >> 9u) & 3u) != 0u;
+        for (std::uint32_t v = 0; v < draw.count; ++v) {
+            if (frame.check_drawn[draw.first + v] == 0u) continue;
+            const float *got = out + (static_cast<std::size_t>(draw.slot) + v * 3u) * 4u;
+            const GpuVertex &want = frame.check_expected[draw.first + v];
+            const float expected[12]{want.x,  want.y,  want.z,  want.u,
+                                     want.nx, want.ny, want.nz, want.v,
+                                     static_cast<float>(want.color & 0xFFu) / 255.0f,
+                                     static_cast<float>((want.color >> 8u) & 0xFFu) / 255.0f,
+                                     static_cast<float>((want.color >> 16u) & 0xFFu) / 255.0f,
+                                     static_cast<float>(want.color >> 24u) / 255.0f};
+            bool exact = true;
+            double worst = 0.0;
+            for (std::uint32_t i = 0; i < 12u; ++i) {
+                if (got[i] == expected[i]) continue;
+                exact = false;
+                ++tally.fields[skinned ? 1u : 0u][i];
+                // Relative to the size of the vector the value belongs to
+                // (a position's largest component, say), at least 1: a small
+                // coordinate of a large skinned position is the difference
+                // of large terms, and carries their rounding.
+                const std::uint32_t group_first = i < 3u ? 0u : (i >= 4u && i < 7u ? 4u : i);
+                const std::uint32_t group_size = i < 3u || (i >= 4u && i < 7u) ? 3u : 1u;
+                double size = 1.0;
+                for (std::uint32_t k = group_first; k < group_first + group_size; ++k)
+                    size = std::max(size, std::fabs(static_cast<double>(expected[k])));
+                const double error = std::fabs(static_cast<double>(got[i]) - expected[i]) / size;
+                worst = std::max(worst, error);
+            }
+            ++tally.vertices;
+            if (exact) {
+                ++tally.exact;
+            } else if (worst <= (skinned ? 1e-5 : 1e-6)) {
+                ++tally.close;
+                tally.max_error = std::max(tally.max_error, worst);
+            } else {
+                if (++tally.differed <= 20u)
+                    std::cout << "[gpu-decode-check] vertex type 0x" << std::hex << draw.vertex_type << std::dec
+                              << " vertex " << v << " differs by " << worst << ": got (" << got[0] << ", " << got[1]
+                              << ", " << got[2] << ") expected (" << expected[0] << ", " << expected[1] << ", "
+                              << expected[2] << ")\n";
+                tally.max_error = std::max(tally.max_error, worst);
+            }
+        }
+    }
+    frame.checks.clear();
+    frame.check_expected.clear();
+    frame.check_drawn.clear();
+    frame.check_used = 0u;
+    if (tally.draws != 0u && frames % 300u == 0u)
+        std::cout << "[gpu-decode-check] " << tally.draws << " draws, " << tally.vertices << " vertices: "
+                  << tally.exact << " exact, " << tally.close << " within rounding (largest " << tally.max_error
+                  << "), " << tally.differed << " differed" << std::endl;
+    if (tally.draws != 0u && frames % 300u == 0u) {
+        // Inexact values of unskinned and skinned vertices, by field: x y z u
+        // nx ny nz v r g b a.
+        for (std::uint32_t kind = 0; kind < 2u; ++kind) {
+            std::cout << "[gpu-decode-check] inexact " << (kind == 0u ? "unskinned" : "skinned") << ":";
+            for (const std::uint64_t count : tally.fields[kind]) std::cout << " " << count;
+            std::cout << std::endl;
+        }
+    }
+}
+
+void VulkanRenderer::Impl::collect_gpu_time(std::uint32_t from) {
+    FrameSlot &frame = slots[from];
+    if (gpu_timer == VK_NULL_HANDLE || frame.gpu_timer_pending == 0u) return;
+    std::array<std::uint64_t, 4u * kGpuTimerSegments> results{};
+    const std::uint32_t count = frame.gpu_timer_pending;
+    frame.gpu_timer_pending = 0u;
+    const VkResult read = vkGetQueryPoolResults(
+        device, gpu_timer, from * 2u * kGpuTimerSegments, count,
+        static_cast<std::size_t>(count) * 2u * sizeof(std::uint64_t), results.data(), 2u * sizeof(std::uint64_t),
+        VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+    if (read != VK_SUCCESS && read != VK_NOT_READY) return;
+    std::uint64_t ticks = 0u;
+    bool any = false;
+    for (std::uint32_t pair = 0; pair + 1u < count; pair += 2u) {
+        const std::uint64_t *begin = &results[pair * 2u];
+        const std::uint64_t *end = &results[(pair + 1u) * 2u];
+        if (begin[1] == 0u || end[1] == 0u) continue;  // not available
+        ticks += (end[0] - begin[0]) & gpu_timer_mask;
+        any = true;
+    }
+    if (any) perf::add_gpu_time(static_cast<double>(ticks) * gpu_timer_ns_per_tick / 1.0e6);
+}
 
 VulkanRenderer::VulkanRenderer() : impl_(std::make_unique<Impl>()) {}
 VulkanRenderer::~VulkanRenderer() { shutdown(); }
@@ -1325,11 +2024,24 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     impl.trace_interpolation = portablekit::env("TRACE_INTERPOLATION") != nullptr;
     if (const interpolation::CutThresholds *thresholds = portablekit::game().interpolation_thresholds)
         impl.cut_thresholds = *thresholds;
+    pacing::set_game_frame_vblanks(static_cast<int>(portablekit::game().frame_vblanks));
+    impl.present_clock = pacing::PresentClock{};
+    impl.governor = pacing::RateGovernor{};
     if (portablekit::env("INTERPOLATION_NO_MOTION_GUARD") != nullptr) impl.cut_thresholds.max_own_motion = 0.0f;
     impl.frame_rate = player.frame_rate;
     impl.governor.set_automatic(player.frame_rate_auto);
     const std::uint32_t window_scale = std::clamp<std::uint32_t>(player.window_scale, 1u, settings::kMaxWindowScale);
 
+#if defined(__APPLE__)
+    // MoltenVK turns a frame's Vulkan commands into Metal ones when they are
+    // submitted, on the calling thread: 1-2 ms of the game's thread a frame.
+    // Its asynchronous submits do that on a thread of their own, but they
+    // crashed a release build after minutes of play (a freed Objective-C
+    // object retained on MoltenVK's dispatch queue), so they are opt-in:
+    // <prefix>_MOLTENVK_ASYNC_SUBMITS=1, or MoltenVK's own variable set to 0.
+    if (const char *async = portablekit::env("MOLTENVK_ASYNC_SUBMITS"); async != nullptr && *async == '1')
+        setenv("MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS", "0", 0);
+#endif
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         error = std::string("SDL_Init failed: ") + SDL_GetError();
         return false;
@@ -1339,6 +2051,12 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     else impl.scan_gamepads();
     SDL_WindowFlags window_flags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE;
     if (player.fullscreen) window_flags |= SDL_WINDOW_FULLSCREEN;
+#if defined(__ANDROID__)
+    // A phone runs the game full screen with the system bars hidden: shown,
+    // they cover the top and bottom of the picture (Android 15 draws apps
+    // under them). The safe area keeps the picture clear of a camera cutout.
+    window_flags |= SDL_WINDOW_FULLSCREEN;
+#endif
     impl.window = SDL_CreateWindow(config.title.c_str(), static_cast<int>(kPspWidth * window_scale),
                                    static_cast<int>(kPspHeight * window_scale), window_flags);
     if (impl.window == nullptr) {
@@ -1349,7 +2067,17 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     std::uint32_t extension_count = 0u;
     const char *const *sdl_extensions = SDL_Vulkan_GetInstanceExtensions(&extension_count);
     std::vector<const char *> extensions(sdl_extensions, sdl_extensions + extension_count);
-    extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+    // Only a loader that offers portability enumeration may be asked for it:
+    // an instance extension the loader does not list fails vkCreateInstance.
+    std::uint32_t available_count = 0u;
+    vkEnumerateInstanceExtensionProperties(nullptr, &available_count, nullptr);
+    std::vector<VkExtensionProperties> available(available_count);
+    vkEnumerateInstanceExtensionProperties(nullptr, &available_count, available.data());
+    bool portability_enumeration = false;
+    for (const VkExtensionProperties &extension : available)
+        if (std::strcmp(extension.extensionName, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0)
+            portability_enumeration = true;
+    if (portability_enumeration) extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
 
     VkApplicationInfo application{VK_STRUCTURE_TYPE_APPLICATION_INFO};
     application.pApplicationName = portablekit::game().app_name;
@@ -1360,9 +2088,13 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     instance_info.ppEnabledExtensionNames = extensions.data();
     // MoltenVK reports itself as a portability driver and refuses the instance
     // without this flag.
-    instance_info.flags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+    if (portability_enumeration) instance_info.flags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
     if (!check(vkCreateInstance(&instance_info, nullptr, &impl.instance), "vkCreateInstance", error)) return false;
 
+#if defined(__ANDROID__)
+    SDL_AddEventWatch(&Impl::watch_lifecycle, &impl);
+    impl.native_window = impl.current_native_window();
+#endif
     if (!SDL_Vulkan_CreateSurface(impl.window, impl.instance, nullptr, &impl.surface)) {
         error = std::string("SDL_Vulkan_CreateSurface failed: ") + SDL_GetError();
         return false;
@@ -1411,17 +2143,46 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     vkEnumerateDeviceExtensionProperties(impl.physical_device, nullptr, &device_extension_count,
                                          device_extensions.data());
     std::vector<const char *> enabled_device_extensions{VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+    const bool want_breadcrumbs = portablekit::env("GPU_BREADCRUMBS") != nullptr;
     for (const VkExtensionProperties &extension : device_extensions) {
         if (std::strcmp(extension.extensionName, "VK_KHR_portability_subset") == 0)
             enabled_device_extensions.push_back("VK_KHR_portability_subset");
+        if (want_breadcrumbs && std::strcmp(extension.extensionName, VK_AMD_BUFFER_MARKER_EXTENSION_NAME) == 0) {
+            enabled_device_extensions.push_back(VK_AMD_BUFFER_MARKER_EXTENSION_NAME);
+            impl.breadcrumbs.available = true;
+        }
     }
+    if (want_breadcrumbs && !impl.breadcrumbs.available)
+        std::cout << "[render] " << portablekit::env_name("GPU_BREADCRUMBS") << " needs VK_AMD_buffer_marker, which this device lacks\n";
 
     const float priority = 1.0f;
     VkDeviceQueueCreateInfo queue_info{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
     queue_info.queueFamilyIndex = impl.queue_family;
     queue_info.queueCount = 1u;
     queue_info.pQueuePriorities = &priority;
+    // <prefix>_CHECK_GPU_DECODE: the check build of the raw vertex shader
+    // writes what it decoded to a storage buffer.
+    VkPhysicalDeviceFeatures supported_features{};
+    vkGetPhysicalDeviceFeatures(impl.physical_device, &supported_features);
+    VkPhysicalDeviceFeatures enabled_features{};
+    if (portablekit::env("CHECK_GPU_DECODE") != nullptr) {
+        if (supported_features.vertexPipelineStoresAndAtomics == VK_TRUE) {
+            enabled_features.vertexPipelineStoresAndAtomics = VK_TRUE;
+            impl.check_gpu_decode = true;
+        } else {
+            std::cout << "[render] " << portablekit::env_name("CHECK_GPU_DECODE") << " needs vertexPipelineStoresAndAtomics, which this device "
+                         "lacks\n";
+        }
+    }
+    // Out-of-range buffer reads (a vertex, an index, the raw vertex bytes the
+    // vertex shader reads, a uniform) return zeros or stay within the buffer
+    // instead of reading whatever memory follows it, which on some GPUs can
+    // fault or hang. <prefix>_NO_ROBUST_BUFFERS leaves it off, as before.
+    if (supported_features.robustBufferAccess == VK_TRUE && portablekit::env("NO_ROBUST_BUFFERS") == nullptr)
+        enabled_features.robustBufferAccess = VK_TRUE;
+    std::cout << "[render] robust buffer access " << (enabled_features.robustBufferAccess ? "on" : "off") << "\n";
     VkDeviceCreateInfo device_info{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+    device_info.pEnabledFeatures = &enabled_features;
     device_info.queueCreateInfoCount = 1u;
     device_info.pQueueCreateInfos = &queue_info;
     device_info.enabledExtensionCount = static_cast<std::uint32_t>(enabled_device_extensions.size());
@@ -1429,6 +2190,32 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     if (!check(vkCreateDevice(impl.physical_device, &device_info, nullptr, &impl.device), "vkCreateDevice", error))
         return false;
     vkGetDeviceQueue(impl.device, impl.queue_family, 0u, &impl.queue);
+    if (impl.breadcrumbs.available) {
+        Impl::Breadcrumbs &b = impl.breadcrumbs;
+        VkBufferCreateInfo marker_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        marker_info.size = 256u;
+        marker_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        VkMemoryRequirements marker_requirements{};
+        void *mapped = nullptr;
+        if (vkCreateBuffer(impl.device, &marker_info, nullptr, &b.buffer) == VK_SUCCESS) {
+            vkGetBufferMemoryRequirements(impl.device, b.buffer, &marker_requirements);
+            VkMemoryAllocateInfo marker_allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+            marker_allocate.allocationSize = marker_requirements.size;
+            marker_allocate.memoryTypeIndex = impl.find_memory_type(
+                marker_requirements.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            if (vkAllocateMemory(impl.device, &marker_allocate, nullptr, &b.memory) == VK_SUCCESS &&
+                vkBindBufferMemory(impl.device, b.buffer, b.memory, 0u) == VK_SUCCESS &&
+                vkMapMemory(impl.device, b.memory, 0u, 256u, 0u, &mapped) == VK_SUCCESS) {
+                b.mapped = static_cast<volatile std::uint32_t *>(mapped);
+                b.mapped[0] = b.mapped[1] = 0u;
+                b.write = reinterpret_cast<PFN_vkCmdWriteBufferMarkerAMD>(
+                    vkGetDeviceProcAddr(impl.device, "vkCmdWriteBufferMarkerAMD"));
+            }
+        }
+        std::cout << "[render] GPU breadcrumbs " << (b.write != nullptr ? "on" : "unavailable") << "\n";
+    }
+    impl.load_pipeline_cache();
 
     // Swapchain.
     std::uint32_t format_count = 0u;
@@ -1469,7 +2256,8 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     attachments[0].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     attachments[0].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     attachments[1] = attachments[0];
-    attachments[1].format = VK_FORMAT_D32_SFLOAT;
+    impl.choose_depth_format();
+    attachments[1].format = impl.depth_format;
     attachments[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     VkAttachmentReference color_reference{0u, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
@@ -1487,6 +2275,17 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     if (!check(vkCreateRenderPass(impl.device, &render_pass_info, nullptr, &impl.render_pass), "vkCreateRenderPass",
                error))
         return false;
+    if (portablekit::env("NO_CLEAR_LOAD") == nullptr) {
+        for (std::uint32_t variant = 1u; variant < 4u; ++variant) {
+            std::array<VkAttachmentDescription, 2> skipped = attachments;
+            if ((variant & 1u) != 0u) skipped[0].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            if ((variant & 2u) != 0u) skipped[1].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            VkRenderPassCreateInfo variant_info = render_pass_info;
+            variant_info.pAttachments = skipped.data();
+            if (vkCreateRenderPass(impl.device, &variant_info, nullptr, &impl.discard_passes[variant]) != VK_SUCCESS)
+                impl.discard_passes[variant] = VK_NULL_HANDLE;
+        }
+    }
 
     // Shaders, descriptors and pipeline layout.
     const auto create_shader = [&](const std::uint32_t *code, std::size_t size, VkShaderModule &module) {
@@ -1496,6 +2295,11 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
         return check(vkCreateShaderModule(impl.device, &info, nullptr, &module), "vkCreateShaderModule", error);
     };
     if (!create_shader(kGeVertexShader, sizeof(kGeVertexShader), impl.vertex_shader)) return false;
+    if (impl.check_gpu_decode) {
+        if (!create_shader(kGeCheckVertexShader, sizeof(kGeCheckVertexShader), impl.raw_vertex_shader)) return false;
+    } else if (!create_shader(kGeRawVertexShader, sizeof(kGeRawVertexShader), impl.raw_vertex_shader)) {
+        return false;
+    }
     if (!create_shader(kGeFragmentShader, sizeof(kGeFragmentShader), impl.fragment_shader)) return false;
 
     VkDescriptorSetLayoutBinding binding{};
@@ -1512,7 +2316,9 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
 
     // Set 1: the lighting environment and the lit object, windows into the
     // vertex buffer.
-    std::array<VkDescriptorSetLayoutBinding, 2> lighting_bindings{};
+    // Bindings 2 to 4 are GPU vertex decode's: its raw block, the vertex
+    // buffer read as words, and the check output (ge.vert).
+    std::array<VkDescriptorSetLayoutBinding, 5> lighting_bindings{};
     lighting_bindings[0].binding = 0u;
     lighting_bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
     lighting_bindings[0].descriptorCount = 1u;
@@ -1521,6 +2327,13 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     lighting_bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
     lighting_bindings[1].descriptorCount = 1u;
     lighting_bindings[1].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    lighting_bindings[2] = lighting_bindings[1];
+    lighting_bindings[2].binding = 2u;
+    lighting_bindings[3] = lighting_bindings[1];
+    lighting_bindings[3].binding = 3u;
+    lighting_bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    lighting_bindings[4] = lighting_bindings[3];
+    lighting_bindings[4].binding = 4u;
     VkDescriptorSetLayoutCreateInfo lighting_layout_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     lighting_layout_info.bindingCount = static_cast<std::uint32_t>(lighting_bindings.size());
     lighting_layout_info.pBindings = lighting_bindings.data();
@@ -1528,14 +2341,17 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
                "vkCreateDescriptorSetLayout", error))
         return false;
 
-    const std::array<VkDescriptorPoolSize, 2> pool_sizes{
+    // Evicted textures keep their sets until their frame has finished, so
+    // the pool has room for a second cache's worth.
+    const std::array<VkDescriptorPoolSize, 3> pool_sizes{
         VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                             static_cast<std::uint32_t>(kMaxCachedTextures + 1u + kMaxFramebufferTextureSets)},
-        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 2u},
+                             static_cast<std::uint32_t>(2u * kMaxCachedTextures + 1u + kMaxFramebufferTextureSets)},
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 3u},
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2u},
     };
     VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    pool_info.maxSets = static_cast<std::uint32_t>(kMaxCachedTextures + 2u + kMaxFramebufferTextureSets);
+    pool_info.maxSets = static_cast<std::uint32_t>(2u * kMaxCachedTextures + 2u + kMaxFramebufferTextureSets);
     pool_info.poolSizeCount = static_cast<std::uint32_t>(pool_sizes.size());
     pool_info.pPoolSizes = pool_sizes.data();
     if (!check(vkCreateDescriptorPool(impl.device, &pool_info, nullptr, &impl.descriptor_pool),
@@ -1589,12 +2405,22 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     command_info.commandPool = impl.command_pool;
     command_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     command_info.commandBufferCount = 1u;
-    if (!check(vkAllocateCommandBuffers(impl.device, &command_info, &impl.command_buffer), "vkAllocateCommandBuffers",
-               error))
-        return false;
     VkFenceCreateInfo fence_info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-    vkCreateFence(impl.device, &fence_info, nullptr, &impl.frame_fence);
+    if (const char *text = portablekit::env("FRAMES_IN_FLIGHT"); text != nullptr)
+        impl.slot_count = std::clamp<std::uint32_t>(static_cast<std::uint32_t>(std::atoi(text)), 1u, Impl::kMaxSlots);
+    std::cout << "[render] " << impl.slot_count << " frame" << (impl.slot_count == 1u ? "" : "s") << " in flight\n";
+    for (Impl::FrameSlot &frame : impl.slots) {
+        if (!check(vkAllocateCommandBuffers(impl.device, &command_info, &frame.commands), "vkAllocateCommandBuffers",
+                   error) ||
+            !check(vkAllocateCommandBuffers(impl.device, &command_info, &frame.uploads), "vkAllocateCommandBuffers",
+                   error) ||
+            !check(vkCreateFence(impl.device, &fence_info, nullptr, &frame.fence), "vkCreateFence", error))
+            return false;
+    }
+    impl.command_buffer = impl.slots[0].commands;
+    impl.frame_fence = impl.slots[0].fence;
+    impl.frame_uploads = impl.slots[0].uploads;
     // Frame interpolation's presents between flips.
     command_info.commandBufferCount = static_cast<std::uint32_t>(impl.present_commands.size());
     if (!check(vkAllocateCommandBuffers(impl.device, &command_info, impl.present_commands.data()),
@@ -1602,8 +2428,7 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
         return false;
     for (VkFence &fence : impl.present_fences) vkCreateFence(impl.device, &fence_info, nullptr, &fence);
     VkSemaphoreCreateInfo semaphore_info{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
-    vkCreateSemaphore(impl.device, &semaphore_info, nullptr, &impl.image_available);
-    vkCreateSemaphore(impl.device, &semaphore_info, nullptr, &impl.render_finished);
+    for (VkSemaphore &semaphore : impl.image_available) vkCreateSemaphore(impl.device, &semaphore_info, nullptr, &semaphore);
 
     // GPU timestamps, where the queue has them. Without them the perf line
     // reads "gpu n/a" and nothing else changes.
@@ -1621,7 +2446,7 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
         if (why == nullptr) {
             VkQueryPoolCreateInfo query_info{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
             query_info.queryType = VK_QUERY_TYPE_TIMESTAMP;
-            query_info.queryCount = 2u * kGpuTimerSegments;
+            query_info.queryCount = Impl::kMaxSlots * 2u * kGpuTimerSegments;
             if (vkCreateQueryPool(impl.device, &query_info, nullptr, &impl.gpu_timer) != VK_SUCCESS) {
                 impl.gpu_timer = VK_NULL_HANDLE;
                 why = "vkCreateQueryPool failed";
@@ -1645,8 +2470,8 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
 
     VkBufferCreateInfo buffer_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     buffer_info.size = kVertexBufferTotal;
-    buffer_info.usage =
-        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    buffer_info.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
+                        VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
     buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     if (!check(vkCreateBuffer(impl.device, &buffer_info, nullptr, &impl.vertex_buffer), "vkCreateBuffer", error))
         return false;
@@ -1685,20 +2510,48 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
         if (!check(vkAllocateDescriptorSets(impl.device, &lighting_info, &impl.lighting_descriptor),
                    "vkAllocateDescriptorSets", error))
             return false;
-        const std::array<VkDescriptorBufferInfo, 2> lighting_buffers{
+        // The vertex buffer read as words must fit the storage range every
+        // device offers at least (2^27 bytes); GPU vertex decode needs it.
+        impl.gpu_decode_available = kVertexBufferTotal <= device_properties.limits.maxStorageBufferRange;
+        if (impl.check_gpu_decode) {
+            // Two frame slots' worth, each with room past the compared part
+            // for draws beyond it to write into.
+            const VkDeviceSize bytes = 2u * 2u * Impl::kCheckVertices * 3u * 16u;
+            VkBufferCreateInfo check_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+            check_info.size = bytes;
+            check_info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+            VkMemoryRequirements check_requirements{};
+            if (vkCreateBuffer(impl.device, &check_info, nullptr, &impl.check_buffer) == VK_SUCCESS) {
+                vkGetBufferMemoryRequirements(impl.device, impl.check_buffer, &check_requirements);
+                VkMemoryAllocateInfo check_allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+                check_allocate.allocationSize = check_requirements.size;
+                check_allocate.memoryTypeIndex = impl.find_memory_type(
+                    check_requirements.memoryTypeBits,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+                vkAllocateMemory(impl.device, &check_allocate, nullptr, &impl.check_memory);
+                vkBindBufferMemory(impl.device, impl.check_buffer, impl.check_memory, 0u);
+                vkMapMemory(impl.device, impl.check_memory, 0u, bytes, 0u, &impl.check_mapped);
+            }
+        }
+        const std::array<VkDescriptorBufferInfo, 5> lighting_buffers{
             VkDescriptorBufferInfo{impl.vertex_buffer, 0u, sizeof(EnvironmentBlock)},
             VkDescriptorBufferInfo{impl.vertex_buffer, 0u, sizeof(ObjectBlock)},
+            VkDescriptorBufferInfo{impl.vertex_buffer, 0u, sizeof(RawBlock)},
+            VkDescriptorBufferInfo{impl.vertex_buffer, 0u, VK_WHOLE_SIZE},
+            VkDescriptorBufferInfo{impl.check_buffer, 0u, VK_WHOLE_SIZE},
         };
         VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         write.dstSet = impl.lighting_descriptor;
         write.descriptorCount = 1u;
         write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-        std::array<VkWriteDescriptorSet, 2> writes{write, write};
-        for (std::uint32_t i = 0; i < 2u; ++i) {
+        std::array<VkWriteDescriptorSet, 5> writes{write, write, write, write, write};
+        for (std::uint32_t i = 0; i < 5u; ++i) {
             writes[i].dstBinding = i;
             writes[i].pBufferInfo = &lighting_buffers[i];
+            if (i >= 3u) writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         }
-        vkUpdateDescriptorSets(impl.device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0u, nullptr);
+        const std::uint32_t write_count = impl.check_buffer != VK_NULL_HANDLE ? 5u : 4u;
+        vkUpdateDescriptorSets(impl.device, write_count, writes.data(), 0u, nullptr);
     }
 
     const std::uint32_t white = 0xFFFFFFFFu;
@@ -1731,6 +2584,26 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     VkPhysicalDeviceProperties properties{};
     vkGetPhysicalDeviceProperties(impl.physical_device, &properties);
     impl.device_name = properties.deviceName;
+    impl.prewarm_pipelines();
+    // What a player's log needs to tell drivers and memory apart.
+    {
+        VkPhysicalDeviceMemoryProperties memory{};
+        vkGetPhysicalDeviceMemoryProperties(impl.physical_device, &memory);
+        VkMemoryRequirements vertex_requirements{};
+        vkGetBufferMemoryRequirements(impl.device, impl.vertex_buffer, &vertex_requirements);
+        const std::uint32_t vertex_type = impl.find_memory_type(
+            vertex_requirements.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        const VkMemoryPropertyFlags flags = memory.memoryTypes[vertex_type].propertyFlags;
+        std::cout << "[render] Vulkan " << VK_API_VERSION_MAJOR(properties.apiVersion) << "."
+                  << VK_API_VERSION_MINOR(properties.apiVersion) << "." << VK_API_VERSION_PATCH(properties.apiVersion)
+                  << ", driver 0x" << std::hex << properties.driverVersion << ", vendor 0x" << properties.vendorID
+                  << ", device 0x" << properties.deviceID << std::dec << "; vertex buffer "
+                  << (kVertexBufferTotal >> 20u) << " MiB in memory type " << vertex_type << " ("
+                  << ((flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0u ? "device local, " : "")
+                  << ((flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) != 0u ? "cached" : "uncached")
+                  << "); depth format " << static_cast<int>(impl.depth_format) << "\n";
+    }
     std::cout << "Renderer: Vulkan on " << properties.deviceName << ", target " << impl.target_extent.width << "x"
               << impl.target_extent.height << "\n";
     impl.ready = true;
@@ -1748,17 +2621,21 @@ bool VulkanRenderer::Impl::create_overlay(std::string &error) {
     buffer_info.size = bytes;
     buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    if (!check(vkCreateBuffer(device, &buffer_info, nullptr, &overlay_staging), "vkCreateBuffer", error)) return false;
+    for (Staging &staging : overlay_staging) {
+    if (!check(vkCreateBuffer(device, &buffer_info, nullptr, &staging.buffer), "vkCreateBuffer", error)) return false;
     VkMemoryRequirements requirements{};
-    vkGetBufferMemoryRequirements(device, overlay_staging, &requirements);
+    vkGetBufferMemoryRequirements(device, staging.buffer, &requirements);
     VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     allocate.allocationSize = requirements.size;
     allocate.memoryTypeIndex = find_memory_type(
         requirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    if (!check(vkAllocateMemory(device, &allocate, nullptr, &overlay_staging_memory), "vkAllocateMemory", error))
+    if (!check(vkAllocateMemory(device, &allocate, nullptr, &staging.memory), "vkAllocateMemory", error))
         return false;
-    vkBindBufferMemory(device, overlay_staging, overlay_staging_memory, 0u);
-    return check(vkMapMemory(device, overlay_staging_memory, 0u, bytes, 0u, &overlay_mapped), "vkMapMemory", error);
+    vkBindBufferMemory(device, staging.buffer, staging.memory, 0u);
+    if (!check(vkMapMemory(device, staging.memory, 0u, bytes, 0u, &staging.mapped), "vkMapMemory", error))
+        return false;
+    }
+    return true;
 }
 
 // Draws the overlay over the top-left corner of the swapchain image, which is
@@ -1766,19 +2643,21 @@ bool VulkanRenderer::Impl::create_overlay(std::string &error) {
 // staging buffer is free to rewrite: the frame fence has been waited on before
 // any recording of this frame started.
 void VulkanRenderer::Impl::record_overlay(VkCommandBuffer commands, VkImage destination) {
-    const std::uint32_t scale = perf::overlay_scale(swapchain_extent.height);
+    const std::uint32_t scale = perf::overlay_scale(content_rect.extent.height);
     const std::uint32_t inset = 4u * scale;
     const std::uint32_t width = perf::kOverlayWidth * scale;
     const std::uint32_t height = perf::kOverlayHeight * scale;
-    if (inset + width > swapchain_extent.width || inset + height > swapchain_extent.height) return;
+    if (inset + width > content_rect.extent.width || inset + height > content_rect.extent.height) return;
 
     perf::draw_overlay(overlay_pixels.data());
-    std::memcpy(overlay_mapped, overlay_pixels.data(), overlay_pixels.size() * sizeof(std::uint32_t));
+    // Free to rewrite: this command buffer's previous use has finished.
+    const Staging &staging = overlay_staging[command_index(commands)];
+    std::memcpy(staging.mapped, overlay_pixels.data(), overlay_pixels.size() * sizeof(std::uint32_t));
     transition(commands, overlay_image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     VkBufferImageCopy copy{};
     copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u};
     copy.imageExtent = {perf::kOverlayWidth, perf::kOverlayHeight, 1u};
-    vkCmdCopyBufferToImage(commands, overlay_staging, overlay_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u,
+    vkCmdCopyBufferToImage(commands, staging.buffer, overlay_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u,
                            &copy);
     transition(commands, overlay_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -1791,8 +2670,10 @@ void VulkanRenderer::Impl::record_overlay(VkCommandBuffer commands, VkImage dest
     blit.srcOffsets[1] = {static_cast<std::int32_t>(perf::kOverlayWidth),
                           static_cast<std::int32_t>(perf::kOverlayHeight), 1};
     blit.dstSubresource = blit.srcSubresource;
-    blit.dstOffsets[0] = {static_cast<std::int32_t>(inset), static_cast<std::int32_t>(inset), 0};
-    blit.dstOffsets[1] = {static_cast<std::int32_t>(inset + width), static_cast<std::int32_t>(inset + height), 1};
+    const std::int32_t left = content_rect.offset.x + static_cast<std::int32_t>(inset);
+    const std::int32_t top = content_rect.offset.y + static_cast<std::int32_t>(inset);
+    blit.dstOffsets[0] = {left, top, 0};
+    blit.dstOffsets[1] = {left + static_cast<std::int32_t>(width), top + static_cast<std::int32_t>(height), 1};
     vkCmdBlitImage(commands, overlay_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, destination,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &blit, VK_FILTER_NEAREST);
 }
@@ -1832,7 +2713,37 @@ bool VulkanRenderer::Impl::create_swapchain(std::string &error) {
                                    capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
     }
     if (extent.width == 0u || extent.height == 0u) extent = target_extent;
+    const VkSurfaceTransformFlagBitsKHR transform = capabilities.currentTransform;
+    VkExtent2D image_extent = extent;
+#if defined(__ANDROID__)
+    // A display turned sideways reports a quarter or half turn. The frame is
+    // drawn upright at the window's size and turned by a last pass into
+    // images in the panel's orientation (see UprightImage).
+    swapchain_quarter_turns = transform == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR    ? 1
+                              : transform == VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR ? 2
+                              : transform == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR ? 3
+                                                                                     : 0;
+    {
+        int width = 0;
+        int height = 0;
+        SDL_GetWindowSizeInPixels(window, &width, &height);
+        if (width > 0 && height > 0)
+            extent = {static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height)};
+    }
+    image_extent = swapchain_quarter_turns % 2 == 1 ? VkExtent2D{extent.height, extent.width} : extent;
+    swapchain_image_extent = image_extent;
+    swapchain_transform = transform;
+    // Once per start and per turn of the phone; a run of these in a player's
+    // log (or logcat) means the swapchain is rebuilt over and over.
+    ++swapchain_builds;
+    std::cout << "[render] swapchain " << swapchain_builds << " for " << extent.width << "x" << extent.height
+              << ", surface transform 0x" << std::hex << static_cast<unsigned>(transform) << std::dec
+              << " (a quarter turn x" << swapchain_quarter_turns << ")\n";
+    SDL_Log("[render] swapchain %u for %ux%u, surface transform 0x%x", swapchain_builds, extent.width, extent.height,
+            static_cast<unsigned>(transform));
+#endif
     swapchain_extent = extent;
+    update_content_rect();
     present_mode = wanted_present_mode();
 
     std::uint32_t image_count =
@@ -1848,10 +2759,10 @@ bool VulkanRenderer::Impl::create_swapchain(std::string &error) {
     swapchain_info.minImageCount = image_count;
     swapchain_info.imageFormat = swapchain_format;
     swapchain_info.imageColorSpace = surface_format.colorSpace;
-    swapchain_info.imageExtent = swapchain_extent;
+    swapchain_info.imageExtent = image_extent;
     swapchain_info.imageArrayLayers = 1u;
     swapchain_info.imageUsage = swapchain_usage;
-    swapchain_info.preTransform = capabilities.currentTransform;
+    swapchain_info.preTransform = transform;
     swapchain_info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     swapchain_info.presentMode = present_mode;
     swapchain_info.clipped = VK_TRUE;
@@ -1868,6 +2779,14 @@ bool VulkanRenderer::Impl::create_swapchain(std::string &error) {
     vkGetSwapchainImagesKHR(device, swapchain, &count, nullptr);
     swapchain_images.resize(count);
     vkGetSwapchainImagesKHR(device, swapchain, &count, swapchain_images.data());
+    // One semaphore per image, kept across swapchains: an old one may still
+    // be waited on by a present of the swapchain this replaced.
+    while (render_finished.size() < count) {
+        VkSemaphoreCreateInfo semaphore_info{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+        VkSemaphore semaphore{};
+        if (vkCreateSemaphore(device, &semaphore_info, nullptr, &semaphore) != VK_SUCCESS) break;
+        render_finished.push_back(semaphore);
+    }
     for (VkImage image : swapchain_images) {
         VkImageViewCreateInfo view_info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
         view_info.image = image;
@@ -1878,9 +2797,14 @@ bool VulkanRenderer::Impl::create_swapchain(std::string &error) {
         if (!check(vkCreateImageView(device, &view_info, nullptr, &view), "vkCreateImageView", error)) return false;
         swapchain_views.push_back(view);
     }
+#if defined(__ANDROID__)
+    if (swapchain_quarter_turns != 0 && !create_upright_images(error)) return false;
+#endif
     if (ui_render_pass != VK_NULL_HANDLE && !create_ui_framebuffers(error)) return false;
     swapchain_dirty = false;
     update_display_info();
+    std::cout << "[render] swapchain " << image_extent.width << "x" << image_extent.height << ", " << count
+              << " images, " << present_mode_name(present_mode) << "\n";
     return true;
 }
 
@@ -1889,7 +2813,31 @@ void VulkanRenderer::Impl::destroy_swapchain_views() {
     ui_framebuffers.clear();
     for (VkImageView view : swapchain_views) vkDestroyImageView(device, view, nullptr);
     swapchain_views.clear();
+#if defined(__ANDROID__)
+    destroy_upright_images();
+#endif
 }
+
+#if defined(__ANDROID__)
+void VulkanRenderer::Impl::reset_surface() {
+    surface_returned = false;
+    vkDeviceWaitIdle(device);
+    destroy_swapchain_views();
+    if (swapchain != VK_NULL_HANDLE) vkDestroySwapchainKHR(device, swapchain, nullptr);
+    swapchain = VK_NULL_HANDLE;
+    if (surface != VK_NULL_HANDLE) vkDestroySurfaceKHR(instance, surface, nullptr);
+    surface = VK_NULL_HANDLE;
+    if (!SDL_Vulkan_CreateSurface(window, instance, nullptr, &surface)) {
+        std::cout << "[render] cannot make the window's surface again: " << SDL_GetError() << "\n";
+        return;
+    }
+    surface_lost = false;
+    native_window = current_native_window();
+    std::string error;
+    if (!create_swapchain(error)) std::cout << "[render] cannot recreate the swapchain: " << error << "\n";
+    else std::cout << "[render] surface made again after the app returned\n";
+}
+#endif
 
 void VulkanRenderer::Impl::recreate_swapchain() {
     // A minimised window has no area to present to; keep the old swapchain
@@ -1909,8 +2857,232 @@ void VulkanRenderer::Impl::recreate_swapchain() {
     if (ui_ready && swapchain_min_images != previous_min_images) ImGui_ImplVulkan_SetMinImageCount(swapchain_min_images);
 }
 
+#if defined(__ANDROID__)
+// The pass that turns the upright frame into a swapchain image, created the
+// first time a sideways display needs it.
+bool VulkanRenderer::Impl::create_rotation_pipeline(std::string &error) {
+    if (rotate_pipeline != VK_NULL_HANDLE) return true;
+    VkAttachmentDescription attachment{};
+    attachment.format = swapchain_format;
+    attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    attachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    VkAttachmentReference reference{0u, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1u;
+    subpass.pColorAttachments = &reference;
+    VkRenderPassCreateInfo pass_info{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    pass_info.attachmentCount = 1u;
+    pass_info.pAttachments = &attachment;
+    pass_info.subpassCount = 1u;
+    pass_info.pSubpasses = &subpass;
+    if (!check(vkCreateRenderPass(device, &pass_info, nullptr, &rotate_render_pass), "vkCreateRenderPass", error))
+        return false;
+
+    VkSamplerCreateInfo sampler_info{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    sampler_info.magFilter = VK_FILTER_NEAREST;
+    sampler_info.minFilter = VK_FILTER_NEAREST;
+    sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    if (!check(vkCreateSampler(device, &sampler_info, nullptr, &rotate_sampler), "vkCreateSampler", error))
+        return false;
+
+    VkDescriptorSetLayoutBinding binding{};
+    binding.binding = 0u;
+    binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    binding.descriptorCount = 1u;
+    binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutCreateInfo set_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    set_info.bindingCount = 1u;
+    set_info.pBindings = &binding;
+    if (!check(vkCreateDescriptorSetLayout(device, &set_info, nullptr, &rotate_set_layout),
+               "vkCreateDescriptorSetLayout", error))
+        return false;
+    constexpr std::uint32_t kMaxImages = 8u;
+    VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxImages};
+    VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    pool_info.maxSets = kMaxImages;
+    pool_info.poolSizeCount = 1u;
+    pool_info.pPoolSizes = &pool_size;
+    if (!check(vkCreateDescriptorPool(device, &pool_info, nullptr, &rotate_pool), "vkCreateDescriptorPool", error))
+        return false;
+
+    VkPushConstantRange push{VK_SHADER_STAGE_VERTEX_BIT, 0u, sizeof(std::int32_t)};
+    VkPipelineLayoutCreateInfo layout_info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    layout_info.setLayoutCount = 1u;
+    layout_info.pSetLayouts = &rotate_set_layout;
+    layout_info.pushConstantRangeCount = 1u;
+    layout_info.pPushConstantRanges = &push;
+    if (!check(vkCreatePipelineLayout(device, &layout_info, nullptr, &rotate_layout), "vkCreatePipelineLayout", error))
+        return false;
+
+    const auto create_shader = [&](const std::uint32_t *code, std::size_t size, VkShaderModule &module) {
+        VkShaderModuleCreateInfo info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        info.codeSize = size;
+        info.pCode = code;
+        return check(vkCreateShaderModule(device, &info, nullptr, &module), "vkCreateShaderModule", error);
+    };
+    if (!create_shader(kRotateVertexShader, sizeof(kRotateVertexShader), rotate_vertex)) return false;
+    if (!create_shader(kRotateFragmentShader, sizeof(kRotateFragmentShader), rotate_fragment)) return false;
+    std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = rotate_vertex;
+    stages[0].pName = "main";
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = rotate_fragment;
+    stages[1].pName = "main";
+    VkPipelineVertexInputStateCreateInfo vertex_input{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo viewport{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    viewport.viewportCount = 1u;
+    viewport.scissorCount = 1u;
+    VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    raster.polygonMode = VK_POLYGON_MODE_FILL;
+    raster.cullMode = VK_CULL_MODE_NONE;
+    raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    raster.lineWidth = 1.0f;
+    VkPipelineMultisampleStateCreateInfo multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineColorBlendAttachmentState blend_attachment{};
+    blend_attachment.colorWriteMask =
+        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo blend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    blend.attachmentCount = 1u;
+    blend.pAttachments = &blend_attachment;
+    const std::array<VkDynamicState, 2> dynamic_states{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dynamic.dynamicStateCount = static_cast<std::uint32_t>(dynamic_states.size());
+    dynamic.pDynamicStates = dynamic_states.data();
+    VkGraphicsPipelineCreateInfo pipeline_info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    pipeline_info.stageCount = static_cast<std::uint32_t>(stages.size());
+    pipeline_info.pStages = stages.data();
+    pipeline_info.pVertexInputState = &vertex_input;
+    pipeline_info.pInputAssemblyState = &assembly;
+    pipeline_info.pViewportState = &viewport;
+    pipeline_info.pRasterizationState = &raster;
+    pipeline_info.pMultisampleState = &multisample;
+    pipeline_info.pColorBlendState = &blend;
+    pipeline_info.pDynamicState = &dynamic;
+    pipeline_info.layout = rotate_layout;
+    pipeline_info.renderPass = rotate_render_pass;
+    return check(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1u, &pipeline_info, nullptr, &rotate_pipeline),
+                 "vkCreateGraphicsPipelines", error);
+}
+
+bool VulkanRenderer::Impl::create_upright_images(std::string &error) {
+    if (!create_rotation_pipeline(error)) return false;
+    upright_images.resize(swapchain_images.size());
+    for (std::size_t i = 0; i < upright_images.size(); ++i) {
+        UprightImage &upright = upright_images[i];
+        if (!create_image(swapchain_extent.width, swapchain_extent.height, swapchain_format,
+                          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                              VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                          upright.image, upright.memory, upright.view, VK_IMAGE_ASPECT_COLOR_BIT, error))
+            return false;
+        VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        allocate.descriptorPool = rotate_pool;
+        allocate.descriptorSetCount = 1u;
+        allocate.pSetLayouts = &rotate_set_layout;
+        if (!check(vkAllocateDescriptorSets(device, &allocate, &upright.set), "vkAllocateDescriptorSets", error))
+            return false;
+        VkDescriptorImageInfo image_info{rotate_sampler, upright.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet = upright.set;
+        write.descriptorCount = 1u;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.pImageInfo = &image_info;
+        vkUpdateDescriptorSets(device, 1u, &write, 0u, nullptr);
+        VkFramebufferCreateInfo framebuffer_info{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+        framebuffer_info.renderPass = rotate_render_pass;
+        framebuffer_info.attachmentCount = 1u;
+        framebuffer_info.pAttachments = &swapchain_views[i];
+        framebuffer_info.width = swapchain_image_extent.width;
+        framebuffer_info.height = swapchain_image_extent.height;
+        framebuffer_info.layers = 1u;
+        if (!check(vkCreateFramebuffer(device, &framebuffer_info, nullptr, &upright.rotate_framebuffer),
+                   "vkCreateFramebuffer", error))
+            return false;
+    }
+    std::cout << "[render] pre-rotating a quarter turn x" << swapchain_quarter_turns << " into "
+              << swapchain_image_extent.width << "x" << swapchain_image_extent.height << "\n";
+    return true;
+}
+
+void VulkanRenderer::Impl::destroy_upright_images() {
+    for (UprightImage &upright : upright_images) {
+        if (upright.rotate_framebuffer != VK_NULL_HANDLE) vkDestroyFramebuffer(device, upright.rotate_framebuffer, nullptr);
+        if (upright.set != VK_NULL_HANDLE) vkFreeDescriptorSets(device, rotate_pool, 1u, &upright.set);
+        if (upright.view != VK_NULL_HANDLE) vkDestroyImageView(device, upright.view, nullptr);
+        if (upright.image != VK_NULL_HANDLE) vkDestroyImage(device, upright.image, nullptr);
+        if (upright.memory != VK_NULL_HANDLE) vkFreeMemory(device, upright.memory, nullptr);
+    }
+    upright_images.clear();
+}
+
+void VulkanRenderer::Impl::destroy_rotation_pipeline() {
+    destroy_upright_images();
+    if (rotate_pipeline != VK_NULL_HANDLE) vkDestroyPipeline(device, rotate_pipeline, nullptr);
+    if (rotate_layout != VK_NULL_HANDLE) vkDestroyPipelineLayout(device, rotate_layout, nullptr);
+    if (rotate_pool != VK_NULL_HANDLE) vkDestroyDescriptorPool(device, rotate_pool, nullptr);
+    if (rotate_set_layout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device, rotate_set_layout, nullptr);
+    if (rotate_sampler != VK_NULL_HANDLE) vkDestroySampler(device, rotate_sampler, nullptr);
+    if (rotate_vertex != VK_NULL_HANDLE) vkDestroyShaderModule(device, rotate_vertex, nullptr);
+    if (rotate_fragment != VK_NULL_HANDLE) vkDestroyShaderModule(device, rotate_fragment, nullptr);
+    if (rotate_render_pass != VK_NULL_HANDLE) vkDestroyRenderPass(device, rotate_render_pass, nullptr);
+    rotate_pipeline = VK_NULL_HANDLE;
+    rotate_layout = VK_NULL_HANDLE;
+    rotate_pool = VK_NULL_HANDLE;
+    rotate_set_layout = VK_NULL_HANDLE;
+    rotate_sampler = VK_NULL_HANDLE;
+    rotate_vertex = VK_NULL_HANDLE;
+    rotate_fragment = VK_NULL_HANDLE;
+    rotate_render_pass = VK_NULL_HANDLE;
+}
+
+// Turns the finished upright frame into the swapchain image, which the pass
+// leaves ready to present.
+void VulkanRenderer::Impl::record_rotation(VkCommandBuffer commands, std::uint32_t image_index, VkImageLayout layout) {
+    const UprightImage &upright = upright_images[image_index];
+    transition(commands, upright.image, layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    VkRenderPassBeginInfo pass{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    pass.renderPass = rotate_render_pass;
+    pass.framebuffer = upright.rotate_framebuffer;
+    pass.renderArea = {{0, 0}, swapchain_image_extent};
+    vkCmdBeginRenderPass(commands, &pass, VK_SUBPASS_CONTENTS_INLINE);
+    const VkViewport viewport{0.0f, 0.0f, static_cast<float>(swapchain_image_extent.width),
+                              static_cast<float>(swapchain_image_extent.height), 0.0f, 1.0f};
+    const VkRect2D scissor{{0, 0}, swapchain_image_extent};
+    vkCmdSetViewport(commands, 0u, 1u, &viewport);
+    vkCmdSetScissor(commands, 0u, 1u, &scissor);
+    vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, rotate_pipeline);
+    vkCmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, rotate_layout, 0u, 1u, &upright.set, 0u,
+                            nullptr);
+    vkCmdPushConstants(commands, rotate_layout, VK_SHADER_STAGE_VERTEX_BIT, 0u, sizeof(std::int32_t),
+                       &swapchain_quarter_turns);
+    vkCmdDraw(commands, 3u, 1u, 0u, 0u);
+    vkCmdEndRenderPass(commands);
+}
+#endif
+
 bool VulkanRenderer::Impl::create_ui_framebuffers(std::string &error) {
-    for (VkImageView view : swapchain_views) {
+    std::vector<VkImageView> views = swapchain_views;
+#if defined(__ANDROID__)
+    if (prerotated()) {
+        views.clear();
+        for (const UprightImage &upright : upright_images) views.push_back(upright.view);
+    }
+#endif
+    for (VkImageView view : views) {
         VkFramebufferCreateInfo info{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
         info.renderPass = ui_render_pass;
         info.attachmentCount = 1u;
@@ -1930,17 +3102,26 @@ bool VulkanRenderer::Impl::create_ui_framebuffers(std::string &error) {
 // layout: stretched over the whole window, or at the PSP's aspect ratio with
 // black bars. Fill's target already has the window's shape.
 void VulkanRenderer::Impl::record_game_blit(VkCommandBuffer commands, VkImage source, VkImage destination) {
-    const auto width = static_cast<std::int32_t>(swapchain_extent.width);
-    const auto height = static_cast<std::int32_t>(swapchain_extent.height);
-    VkOffset3D low{0, 0, 0};
-    VkOffset3D high{width, height, 1};
-    if (aspect == settings::Aspect::Original) {
-        const double scale = std::min(static_cast<double>(width) / kPspWidth, static_cast<double>(height) / kPspHeight);
-        const auto shown_width = std::clamp(static_cast<std::int32_t>(std::lround(kPspWidth * scale)), 1, width);
-        const auto shown_height = std::clamp(static_cast<std::int32_t>(std::lround(kPspHeight * scale)), 1, height);
-        low = {(width - shown_width) / 2, (height - shown_height) / 2, 0};
+    const auto width = static_cast<std::int32_t>(content_rect.extent.width);
+    const auto height = static_cast<std::int32_t>(content_rect.extent.height);
+    const std::int32_t x0 = content_rect.offset.x;
+    const std::int32_t y0 = content_rect.offset.y;
+    VkOffset3D low{x0, y0, 0};
+    VkOffset3D high{x0 + width, y0 + height, 1};
+    const bool partial = width < static_cast<std::int32_t>(swapchain_extent.width) ||
+                         height < static_cast<std::int32_t>(swapchain_extent.height);
+    if (aspect == settings::Aspect::Original || partial) {
+        std::int32_t shown_width = width;
+        std::int32_t shown_height = height;
+        if (aspect == settings::Aspect::Original) {
+            const double scale =
+                std::min(static_cast<double>(width) / kPspWidth, static_cast<double>(height) / kPspHeight);
+            shown_width = std::clamp(static_cast<std::int32_t>(std::lround(kPspWidth * scale)), 1, width);
+            shown_height = std::clamp(static_cast<std::int32_t>(std::lround(kPspHeight * scale)), 1, height);
+        }
+        low = {x0 + (width - shown_width) / 2, y0 + (height - shown_height) / 2, 0};
         high = {low.x + shown_width, low.y + shown_height, 1};
-        if (shown_width < width || shown_height < height) {
+        if (partial || shown_width < width || shown_height < height) {
             const VkClearColorValue black{{0.0f, 0.0f, 0.0f, 1.0f}};
             const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, 1u};
             vkCmdClearColorImage(commands, destination, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1u, &range);
@@ -1958,6 +3139,7 @@ void VulkanRenderer::Impl::record_game_blit(VkCommandBuffer commands, VkImage so
     blit.dstOffsets[1] = high;
     vkCmdBlitImage(commands, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, destination,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &blit, sharp_screen ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
+    perf::count_target_copy();
 }
 
 // Finishes the frame being recorded: the game frame (or a plain background
@@ -1965,7 +3147,17 @@ void VulkanRenderer::Impl::record_game_blit(VkCommandBuffer commands, VkImage so
 // interface, then submit and present.
 void VulkanRenderer::Impl::submit_and_present(VkCommandBuffer commands, VkFence fence, VkImage source,
                                               bool game_frame, bool main_frame) {
-    if (!acquired_image && (swapchain_dirty || swapchain == VK_NULL_HANDLE)) recreate_swapchain();
+#if defined(__ANDROID__)
+    check_native_window();
+    if (surface_returned) reset_surface();
+    // No window to show it in: the frame is recorded and finished, not shown
+    // (an image acquired before the window went is still given back).
+    if (!surface_lost)
+#endif
+    if (!acquired_image) {
+        check_swapchain();
+        if (swapchain_dirty || swapchain == VK_NULL_HANDLE) recreate_swapchain();
+    }
     ImDrawData *ui = ui_ready ? ui_draw_data : nullptr;
     ui_draw_data = nullptr;
     const bool draw_ui = ui != nullptr && ui->CmdListsCount > 0;
@@ -1976,8 +3168,9 @@ void VulkanRenderer::Impl::submit_and_present(VkCommandBuffer commands, VkFence 
     // window, which may wait for the presentation engine to release an image.
     if (main_frame) {
         end_gpu_segment(commands);
-        gpu_timer_pending = gpu_timer_used;
+        slots[slot].gpu_timer_pending = gpu_timer_used;
     }
+    const VkSemaphore acquire = acquire_semaphore(commands);
 
     std::uint32_t image_index = 0u;
     VkResult acquired = VK_ERROR_OUT_OF_DATE_KHR;
@@ -1985,16 +3178,28 @@ void VulkanRenderer::Impl::submit_and_present(VkCommandBuffer commands, VkFence 
         image_index = *acquired_image;
         acquired = VK_SUCCESS;
         acquired_image.reset();
-    } else if (has_content && swapchain != VK_NULL_HANDLE) {
+    } else if (has_content && swapchain != VK_NULL_HANDLE
+#if defined(__ANDROID__)
+               && !surface_lost
+#endif
+    ) {
         const perf::Clock::time_point acquire_start = perf::Clock::now();
-        acquired = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, image_available, VK_NULL_HANDLE, &image_index);
+        acquired = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, acquire, VK_NULL_HANDLE, &image_index);
         perf::add_wait_time(perf::Clock::now() - acquire_start, perf::Stall::Acquire);
         if (acquired == VK_ERROR_OUT_OF_DATE_KHR) swapchain_dirty = true;
+        if (acquired == VK_SUBOPTIMAL_KHR) swapchain_check = true;
+#if defined(__ANDROID__)
+        if (acquired == VK_ERROR_SURFACE_LOST_KHR) surface_returned = true;
+#endif
     }
     const bool can_present = acquired == VK_SUCCESS || acquired == VK_SUBOPTIMAL_KHR;
     bool capture = false;
+    breadcrumb(commands, main_frame ? "the frame's copy to the window" : "a present's copy to the window");
     if (can_present) {
         VkImage target = swapchain_images[image_index];
+#if defined(__ANDROID__)
+        if (prerotated() && image_index < upright_images.size()) target = upright_images[image_index].image;
+#endif
         transition(commands, target, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         if (source != VK_NULL_HANDLE) {
             transition(commands, source, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -2023,6 +3228,7 @@ void VulkanRenderer::Impl::submit_and_present(VkCommandBuffer commands, VkFence 
             pass.framebuffer = ui_framebuffers[image_index];
             pass.renderArea = {{0, 0}, swapchain_extent};
             vkCmdBeginRenderPass(commands, &pass, VK_SUBPASS_CONTENTS_INLINE);
+            perf::count_render_pass();
             ImGui_ImplVulkan_RenderDrawData(ui, commands);
             vkCmdEndRenderPass(commands);
         }
@@ -2051,37 +3257,46 @@ void VulkanRenderer::Impl::submit_and_present(VkCommandBuffer commands, VkFence 
                 capture = true;
             }
         }
-        transition(commands, target, layout, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+#if defined(__ANDROID__)
+        if (prerotated() && image_index < upright_images.size()) record_rotation(commands, image_index, layout);
+        else
+#endif
+            transition(commands, target, layout, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     }
     vkEndCommandBuffer(commands);
 
     const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    std::array<VkCommandBuffer, 2> batch{};
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    submit.commandBufferCount = 1u;
-    submit.pCommandBuffers = &commands;
+    submit.commandBufferCount = frame_batch(commands, batch);
+    submit.pCommandBuffers = batch.data();
     if (can_present) {
         submit.waitSemaphoreCount = 1u;
-        submit.pWaitSemaphores = &image_available;
+        submit.pWaitSemaphores = &acquire;
         submit.pWaitDstStageMask = &wait_stage;
         submit.signalSemaphoreCount = 1u;
-        submit.pSignalSemaphores = &render_finished;
+        submit.pSignalSemaphores = &render_finished[image_index];
     }
     // MoltenVK waits for the next drawable here rather than in the acquire.
     const perf::Clock::time_point submit_start = perf::Clock::now();
-    vkQueueSubmit(queue, 1u, &submit, fence);
+    if (vkQueueSubmit(queue, 1u, &submit, fence) == VK_ERROR_DEVICE_LOST) device_lost("a frame's submit");
     perf::add_wait_time(perf::Clock::now() - submit_start, perf::Stall::Submit);
 
     if (can_present) {
         VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
         present.waitSemaphoreCount = 1u;
-        present.pWaitSemaphores = &render_finished;
+        present.pWaitSemaphores = &render_finished[image_index];
         present.swapchainCount = 1u;
         present.pSwapchains = &swapchain;
         present.pImageIndices = &image_index;
         const perf::Clock::time_point present_start = perf::Clock::now();
         const VkResult presented = vkQueuePresentKHR(queue, &present);
         perf::add_wait_time(perf::Clock::now() - present_start, perf::Stall::Present);
-        if (presented == VK_ERROR_OUT_OF_DATE_KHR || presented == VK_SUBOPTIMAL_KHR) swapchain_dirty = true;
+        if (presented == VK_ERROR_OUT_OF_DATE_KHR) swapchain_dirty = true;
+        if (presented == VK_SUBOPTIMAL_KHR) swapchain_check = true;
+#if defined(__ANDROID__)
+        if (presented == VK_ERROR_SURFACE_LOST_KHR) surface_returned = true;
+#endif
     }
     if (main_frame) recording = false;
     if (capture) write_capture(fence);
@@ -2089,7 +3304,7 @@ void VulkanRenderer::Impl::submit_and_present(VkCommandBuffer commands, VkFence 
 
 // Writes the image copied by submit_and_present once its frame has finished.
 void VulkanRenderer::Impl::write_capture(VkFence fence) {
-    vkWaitForFences(device, 1u, &fence, VK_TRUE, UINT64_MAX);
+    wait_fence(fence, "a window capture");
     void *mapped = nullptr;
     vkMapMemory(device, capture_memory, 0u, VK_WHOLE_SIZE, 0u, &mapped);
     const bool bgra = swapchain_format == VK_FORMAT_B8G8R8A8_UNORM || swapchain_format == VK_FORMAT_B8G8R8A8_SRGB;
@@ -2166,9 +3381,9 @@ bool VulkanRenderer::Impl::create_target(Target &target, std::string &error) {
                       target.color,
                       target.color_memory, target.color_view, VK_IMAGE_ASPECT_COLOR_BIT, error))
         return false;
-    if (!create_image(target_extent.width, target_extent.height, VK_FORMAT_D32_SFLOAT,
+    if (!create_image(target_extent.width, target_extent.height, depth_format,
                       VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, target.depth, target.depth_memory,
-                      target.depth_view, VK_IMAGE_ASPECT_DEPTH_BIT, error))
+                      target.depth_view, depth_aspect(), error))
         return false;
     const std::array<VkImageView, 2> views{target.color_view, target.depth_view};
     VkFramebufferCreateInfo info{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
@@ -2187,20 +3402,21 @@ void VulkanRenderer::Impl::initialize_layouts(VkCommandBuffer commands, Target &
     if (target.initialized) return;
     transition(commands, target.color, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     transition(commands, target.depth, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-               VK_IMAGE_ASPECT_DEPTH_BIT);
+               depth_aspect());
     target.initialized = true;
 }
 
 void VulkanRenderer::Impl::destroy_upload() {
-    if (upload_mapped != nullptr) vkUnmapMemory(device, upload_staging_memory);
-    vkDestroyBuffer(device, upload_staging, nullptr);
-    vkFreeMemory(device, upload_staging_memory, nullptr);
+    for (FrameSlot &frame : slots) {
+        Staging &movie = frame.movie;
+        if (movie.mapped != nullptr) vkUnmapMemory(device, movie.memory);
+        vkDestroyBuffer(device, movie.buffer, nullptr);
+        vkFreeMemory(device, movie.memory, nullptr);
+        movie = Staging{};
+    }
     vkDestroyImageView(device, upload_view, nullptr);
     vkDestroyImage(device, upload_image, nullptr);
     vkFreeMemory(device, upload_memory, nullptr);
-    upload_mapped = nullptr;
-    upload_staging = VK_NULL_HANDLE;
-    upload_staging_memory = VK_NULL_HANDLE;
     upload_view = VK_NULL_HANDLE;
     upload_image = VK_NULL_HANDLE;
     upload_memory = VK_NULL_HANDLE;
@@ -2218,23 +3434,27 @@ bool VulkanRenderer::Impl::create_upload(std::uint32_t width, std::uint32_t heig
     buffer_info.size = bytes;
     buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    if (!check(vkCreateBuffer(device, &buffer_info, nullptr, &upload_staging), "vkCreateBuffer", error)) return false;
-    VkMemoryRequirements requirements{};
-    vkGetBufferMemoryRequirements(device, upload_staging, &requirements);
-    VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-    allocate.allocationSize = requirements.size;
-    allocate.memoryTypeIndex = find_memory_type(
-        requirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    if (!check(vkAllocateMemory(device, &allocate, nullptr, &upload_staging_memory), "vkAllocateMemory", error))
-        return false;
-    vkBindBufferMemory(device, upload_staging, upload_staging_memory, 0u);
-    if (!check(vkMapMemory(device, upload_staging_memory, 0u, bytes, 0u, &upload_mapped), "vkMapMemory", error))
-        return false;
+    // A staging buffer per frame slot: the frame before may still copy from its own.
+    for (FrameSlot &frame : slots) {
+        Staging &movie = frame.movie;
+        if (!check(vkCreateBuffer(device, &buffer_info, nullptr, &movie.buffer), "vkCreateBuffer", error)) return false;
+        VkMemoryRequirements requirements{};
+        vkGetBufferMemoryRequirements(device, movie.buffer, &requirements);
+        VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        allocate.allocationSize = requirements.size;
+        allocate.memoryTypeIndex = find_memory_type(
+            requirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (!check(vkAllocateMemory(device, &allocate, nullptr, &movie.memory), "vkAllocateMemory", error))
+            return false;
+        vkBindBufferMemory(device, movie.buffer, movie.memory, 0u);
+        if (!check(vkMapMemory(device, movie.memory, 0u, bytes, 0u, &movie.mapped), "vkMapMemory", error))
+            return false;
+    }
     upload_extent = {width, height};
     return true;
 }
 
-void VulkanRenderer::Impl::begin_pass(std::uint32_t address) {
+void VulkanRenderer::Impl::begin_pass(std::uint32_t address, std::uint32_t overwritten) {
     std::string error;
     Target *target = target_for(address, error);
     if (target == nullptr) return;
@@ -2244,14 +3464,22 @@ void VulkanRenderer::Impl::begin_pass(std::uint32_t address) {
         transition(command_buffer, target->color, VK_IMAGE_LAYOUT_UNDEFINED,
                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         transition(command_buffer, target->depth, VK_IMAGE_LAYOUT_UNDEFINED,
-                   VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+                   VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, depth_aspect());
         target->initialized = true;
     }
     VkRenderPassBeginInfo pass{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-    pass.renderPass = render_pass;
+    pass.renderPass = discard_passes[overwritten & 3u] != VK_NULL_HANDLE ? discard_passes[overwritten & 3u] : render_pass;
     pass.framebuffer = target->framebuffer;
     pass.renderArea = {{0, 0}, target_extent};
+    if (breadcrumbs.write != nullptr) {
+        char label[64];
+        std::snprintf(label, sizeof(label), "render pass into 0x%08x%s", address,
+                      (overwritten & 3u) != 0u ? " (cleared)" : "");
+        breadcrumb(command_buffer, label);
+    }
     vkCmdBeginRenderPass(command_buffer, &pass, VK_SUBPASS_CONTENTS_INLINE);
+    perf::count_render_pass();
+    if ((overwritten & 3u) != 0u) perf::count_cleared_pass();
     forget_bindings();
     current_target = address;
     last_drawn_target = address;
@@ -2267,14 +3495,59 @@ void VulkanRenderer::Impl::end_pass() {
 
 VulkanRenderer::Impl::Texture VulkanRenderer::Impl::create_texture(std::uint32_t width, std::uint32_t height,
                                                                    const std::uint32_t *pixels) {
+    Texture texture = create_texture_image(width, height);
+    if (texture.descriptor != VK_NULL_HANDLE && pixels != nullptr) upload_texture(texture.image, width, height, pixels);
+    return texture;
+}
+
+VulkanRenderer::Impl::Texture VulkanRenderer::Impl::create_texture_image(std::uint32_t width, std::uint32_t height) {
     Texture texture{};
     std::string error;
     if (!create_image(width, height, VK_FORMAT_R8G8B8A8_UNORM,
                       VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, texture.image, texture.memory,
                       texture.view, VK_IMAGE_ASPECT_COLOR_BIT, error))
         return texture;
+    VkDescriptorSetAllocateInfo descriptor_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    descriptor_info.descriptorPool = descriptor_pool;
+    descriptor_info.descriptorSetCount = 1u;
+    descriptor_info.pSetLayouts = &descriptor_layout;
+    vkAllocateDescriptorSets(device, &descriptor_info, &texture.descriptor);
+    VkDescriptorImageInfo image_info{texture_sampler(), texture.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = texture.descriptor;
+    write.descriptorCount = 1u;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &image_info;
+    vkUpdateDescriptorSets(device, 1u, &write, 0u, nullptr);
+    texture.last_used = ++texture_clock;
+    return texture;
+}
 
+void VulkanRenderer::Impl::upload_texture(VkImage image, std::uint32_t width, std::uint32_t height,
+                                          const std::uint32_t *pixels) {
     const VkDeviceSize bytes = static_cast<VkDeviceSize>(width) * height * 4u;
+    VkBuffer ring_buffer{};
+    VkDeviceSize ring_offset = 0u;
+    if (recording && async_uploads() && stage_upload(pixels, bytes, ring_buffer, ring_offset)) {
+        if (!frame_uploads_open) {
+            VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+            begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            vkBeginCommandBuffer(frame_uploads, &begin);
+            frame_uploads_open = true;
+        }
+        transition(frame_uploads, image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkBufferImageCopy copy{};
+        copy.bufferOffset = ring_offset;
+        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u};
+        copy.imageExtent = {width, height, 1u};
+        vkCmdCopyBufferToImage(frame_uploads, ring_buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u,
+                               &copy);
+        // The barrier's second scope covers the frame's commands, submitted
+        // after these in the same batch.
+        transition(frame_uploads, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        ++frame_upload_count;
+    } else {
     const bool reuse = reuse_buffers();
     VkBuffer staging{};
     VkDeviceMemory staging_memory{};
@@ -2330,12 +3603,12 @@ VulkanRenderer::Impl::Texture VulkanRenderer::Impl::create_texture(std::uint32_t
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(commands, &begin);
-    transition(commands, texture.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    transition(commands, image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     VkBufferImageCopy copy{};
     copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u};
     copy.imageExtent = {width, height, 1u};
-    vkCmdCopyBufferToImage(commands, staging, texture.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &copy);
-    transition(commands, texture.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+    vkCmdCopyBufferToImage(commands, staging, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &copy);
+    transition(commands, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     vkEndCommandBuffer(commands);
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -2352,20 +3625,110 @@ VulkanRenderer::Impl::Texture VulkanRenderer::Impl::create_texture(std::uint32_t
         vkDestroyBuffer(device, staging, nullptr);
         vkFreeMemory(device, staging_memory, nullptr);
     }
-    VkDescriptorSetAllocateInfo descriptor_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    descriptor_info.descriptorPool = descriptor_pool;
-    descriptor_info.descriptorSetCount = 1u;
-    descriptor_info.pSetLayouts = &descriptor_layout;
-    vkAllocateDescriptorSets(device, &descriptor_info, &texture.descriptor);
-    VkDescriptorImageInfo image_info{texture_sampler(), texture.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    write.dstSet = texture.descriptor;
-    write.descriptorCount = 1u;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    write.pImageInfo = &image_info;
-    vkUpdateDescriptorSets(device, 1u, &write, 0u, nullptr);
-    texture.last_used = ++texture_clock;
-    return texture;
+    }
+}
+
+bool VulkanRenderer::Impl::stage_upload(const void *pixels, VkDeviceSize bytes, VkBuffer &buffer,
+                                        VkDeviceSize &offset) {
+    const auto make = [&](VkDeviceSize size, VkBuffer &made, VkDeviceMemory &memory, void *&mapped) {
+        VkBufferCreateInfo buffer_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        buffer_info.size = size;
+        buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        if (vkCreateBuffer(device, &buffer_info, nullptr, &made) != VK_SUCCESS) return false;
+        VkMemoryRequirements requirements{};
+        vkGetBufferMemoryRequirements(device, made, &requirements);
+        VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        allocate.allocationSize = requirements.size;
+        allocate.memoryTypeIndex = find_memory_type(
+            requirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (vkAllocateMemory(device, &allocate, nullptr, &memory) != VK_SUCCESS ||
+            vkBindBufferMemory(device, made, memory, 0u) != VK_SUCCESS ||
+            vkMapMemory(device, memory, 0u, size, 0u, &mapped) != VK_SUCCESS) {
+            vkDestroyBuffer(device, made, nullptr);
+            vkFreeMemory(device, memory, nullptr);
+            made = VK_NULL_HANDLE;
+            memory = VK_NULL_HANDLE;
+            return false;
+        }
+        return true;
+    };
+    if (frame_uploads == VK_NULL_HANDLE) return false;
+    // 8 MiB covers what a frame uploads when a new area comes into view.
+    constexpr VkDeviceSize kRingBytes = 8u * 1024u * 1024u;
+    FrameSlot &frame = slots[slot];
+    if (frame.ring == VK_NULL_HANDLE) {
+        void *mapped = nullptr;
+        if (!make(kRingBytes, frame.ring, frame.ring_memory, mapped)) return false;
+        frame.ring_mapped = mapped;
+        frame.ring_size = kRingBytes;
+        upload_ring_used = 0u;
+    }
+    const VkDeviceSize at = (upload_ring_used + 15u) & ~VkDeviceSize{15u};
+    if (at + bytes <= frame.ring_size) {
+        std::memcpy(static_cast<std::uint8_t *>(frame.ring_mapped) + at, pixels, static_cast<std::size_t>(bytes));
+        upload_ring_used = at + bytes;
+        buffer = frame.ring;
+        offset = at;
+        return true;
+    }
+    // Past the ring: a buffer of its own, freed with the frame.
+    VkBuffer own{};
+    VkDeviceMemory own_memory{};
+    void *mapped = nullptr;
+    if (!make(bytes, own, own_memory, mapped)) return false;
+    std::memcpy(mapped, pixels, static_cast<std::size_t>(bytes));
+    vkUnmapMemory(device, own_memory);
+    frame.retired_buffers.emplace_back(own, own_memory);
+    buffer = own;
+    offset = 0u;
+    return true;
+}
+
+void VulkanRenderer::Impl::finish_pending_textures() {
+    if (pending_textures.empty()) return;
+    const perf::SplitScope split(perf::Split::Texture);
+    const perf::Clock::time_point wait_start = perf::Clock::now();
+    for (PendingTexture &pending : pending_textures) {
+        decode_pool->wait(*pending.job);
+        if (!pending.job->ok) pending.job->pixels.assign(static_cast<std::size_t>(pending.width) * pending.height, 0u);
+        upload_texture(pending.image, pending.width, pending.height, pending.job->pixels.data());
+    }
+    pending_textures.clear();
+    perf::note_stall(perf::Stall::Decode, perf::Clock::now() - wait_start);
+}
+
+std::uint32_t VulkanRenderer::Impl::frame_batch(VkCommandBuffer commands, std::array<VkCommandBuffer, 2> &batch) {
+    // Textures still decoding are uploaded ahead of the draws that use them.
+    if (commands == command_buffer) finish_pending_textures();
+    std::uint32_t count = 0u;
+    if (commands == command_buffer && frame_uploads_open) {
+        breadcrumb(frame_uploads, "texture uploads (" + std::to_string(frame_upload_count) + ")");
+        vkEndCommandBuffer(frame_uploads);
+        frame_uploads_open = false;
+        batch[count++] = frame_uploads;
+    }
+    batch[count++] = commands;
+    return count;
+}
+
+void VulkanRenderer::Impl::release_frame_uploads(std::uint32_t from) {
+    FrameSlot &frame = slots[from];
+    if (from == slot) {
+        upload_ring_used = 0u;
+        frame_upload_count = 0u;
+    }
+    for (const auto &[buffer, memory] : frame.retired_buffers) {
+        vkDestroyBuffer(device, buffer, nullptr);
+        vkFreeMemory(device, memory, nullptr);
+    }
+    frame.retired_buffers.clear();
+    if (frame.retired_textures.empty()) return;
+    // A present between flips recorded before the eviction may still draw an
+    // evicted texture; its fence says when it has finished.
+    for (VkFence fence : present_fences)
+        if (fence != VK_NULL_HANDLE && vkGetFenceStatus(device, fence) != VK_SUCCESS) return;
+    for (Texture &texture : frame.retired_textures) destroy_texture(texture);
+    frame.retired_textures.clear();
 }
 
 void VulkanRenderer::Impl::destroy_texture(Texture &texture) {
@@ -2440,9 +3803,16 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
         memo->erased = textures_erased;
         return use(found->second);
     }
+    // Decoded in the background when it can be: copied out of guest memory
+    // now, uploaded when the frame is submitted (finish_pending_textures).
+    std::shared_ptr<DecodeJob> job;
+    if (recording && async_uploads() && background_decode() && !dumper) {
+        job = std::make_shared<DecodeJob>();
+        if (!snapshot_texture(memory, state, job->snapshot)) job.reset();
+    }
     std::vector<std::uint32_t> fresh_pixels;
     std::vector<std::uint32_t> &pixels = reuse_buffers() ? decoded_pixels : fresh_pixels;
-    if (!decode_texture(memory, state, pixels) || pixels.empty()) {
+    if (!job && (!decode_texture(memory, state, pixels) || pixels.empty())) {
         // <prefix>_TRACE_WHITE_TEXTURES: each texture that could not be decoded
         // and is drawn white instead, once.
         static const bool trace_white = portablekit::env("TRACE_WHITE_TEXTURES") != nullptr;
@@ -2467,21 +3837,41 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
         dumper->dump(memory, state, max_seen_v, pack ? pack->options() : kDumpOptions, pixels.data());
     }
 
-    if (textures.size() >= kMaxCachedTextures) {
+    // <prefix>_TEXTURE_CACHE_LIMIT keeps fewer textures, to test eviction.
+    static const std::size_t cache_limit = [] {
+        const char *text = portablekit::env("TEXTURE_CACHE_LIMIT");
+        const std::size_t limit = text != nullptr ? std::strtoull(text, nullptr, 10) : 0u;
+        return limit != 0u ? std::min(limit, kMaxCachedTextures) : kMaxCachedTextures;
+    }();
+    if (textures.size() >= cache_limit) {
         auto oldest = textures.begin();
         for (auto it = textures.begin(); it != textures.end(); ++it) {
             if (it->second.last_used < oldest->second.last_used) oldest = it;
         }
-        const perf::Clock::time_point wait_start = perf::Clock::now();
-        vkQueueWaitIdle(queue);
-        perf::add_wait_time(perf::Clock::now() - wait_start, perf::Stall::Evict);
         destroyed_texture_clock = std::max(destroyed_texture_clock, oldest->second.last_used);
-        destroy_texture(oldest->second);
+        if (async_uploads()) {
+            // The frame being recorded may have drawn it already.
+            slots[slot].retired_textures.push_back(oldest->second);
+        } else {
+            const perf::Clock::time_point wait_start = perf::Clock::now();
+            vkQueueWaitIdle(queue);
+            perf::add_wait_time(perf::Clock::now() - wait_start, perf::Stall::Evict);
+            destroy_texture(oldest->second);
+        }
         textures.erase(oldest);
         ++textures_erased;
     }
-    Texture texture = create_texture(state.width, state.height, pixels.data());
+    Texture texture = job ? create_texture_image(state.width, state.height)
+                          : create_texture(state.width, state.height, pixels.data());
     if (texture.descriptor == VK_NULL_HANDLE) return white_texture;
+    if (job) {
+        if (!decode_pool) {
+            const std::uint32_t cores = std::max(1u, std::thread::hardware_concurrency());
+            decode_pool = std::make_unique<DecodePool>(std::clamp(cores / 2u, 1u, 3u));
+        }
+        decode_pool->submit(job);
+        pending_textures.push_back({std::move(job), texture.image, state.width, state.height});
+    }
     texture.max_seen_v = max_seen_v;
     // The pack's hash reads the whole texture, so it is taken here, once per
     // upload, and never on the per-draw path above.
@@ -2493,6 +3883,7 @@ VulkanRenderer::Impl::Texture &VulkanRenderer::Impl::texture_for(const GuestMemo
 }
 
 VkDescriptorSet VulkanRenderer::Impl::texture_descriptor(const GuestMemory &memory, const DrawCall &call) {
+    const perf::SplitScope split(perf::Split::Texture);
     Texture &texture = texture_for(memory, call);
     if (texture.replacement && pack) {
         // Until the image is decoded and on the GPU, the original is drawn.
@@ -2514,6 +3905,10 @@ void VulkanRenderer::Impl::apply_texture_pack() {
     // no pack draws.
     vkDeviceWaitIdle(device);
     replacements.clear();
+    for (FrameSlot &frame : slots) {
+        for (Texture &texture : frame.retired_textures) destroy_texture(texture);
+        frame.retired_textures.clear();
+    }
     for (auto &[key, texture] : textures) destroy_texture(texture);
     textures.clear();
     destroyed_texture_clock = texture_clock;
@@ -2635,10 +4030,13 @@ bool VulkanRenderer::Impl::create_writeback(std::string &error) {
     buffer_info.size = bytes;
     buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    if (!check(vkCreateBuffer(device, &buffer_info, nullptr, &writeback_buffer), "vkCreateBuffer", error))
+    // A buffer per frame slot; the image is only used on the GPU.
+    for (FrameSlot &frame : slots) {
+    Staging &writeback = frame.writeback;
+    if (!check(vkCreateBuffer(device, &buffer_info, nullptr, &writeback.buffer), "vkCreateBuffer", error))
         return false;
     VkMemoryRequirements requirements{};
-    vkGetBufferMemoryRequirements(device, writeback_buffer, &requirements);
+    vkGetBufferMemoryRequirements(device, writeback.buffer, &requirements);
     VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     allocate.allocationSize = requirements.size;
     allocate.memoryTypeIndex = find_memory_type(
@@ -2667,31 +4065,52 @@ bool VulkanRenderer::Impl::create_writeback(std::string &error) {
                 (memory_properties.memoryTypes[chosen].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0u;
         }
     }
-    std::cout << "[render] frame write-back in memory type " << allocate.memoryTypeIndex
-              << (writeback_cached ? " (host cached" : " (host uncached")
-              << (writeback_coherent ? ", coherent)" : ", not coherent)") << "\n";
-    if (!check(vkAllocateMemory(device, &allocate, nullptr, &writeback_buffer_memory), "vkAllocateMemory", error))
+    if (&frame == &slots[0])
+        std::cout << "[render] frame write-back in memory type " << allocate.memoryTypeIndex
+                  << (writeback_cached ? " (host cached" : " (host uncached")
+                  << (writeback_coherent ? ", coherent)" : ", not coherent)") << "\n";
+    if (!check(vkAllocateMemory(device, &allocate, nullptr, &writeback.memory), "vkAllocateMemory", error))
         return false;
-    vkBindBufferMemory(device, writeback_buffer, writeback_buffer_memory, 0u);
-    return check(vkMapMemory(device, writeback_buffer_memory, 0u, bytes, 0u, &writeback_mapped), "vkMapMemory",
-                 error);
+    vkBindBufferMemory(device, writeback.buffer, writeback.memory, 0u);
+    if (!check(vkMapMemory(device, writeback.memory, 0u, bytes, 0u, &writeback.mapped), "vkMapMemory", error))
+        return false;
+    }
+    return true;
 }
 
 void VulkanRenderer::Impl::destroy_writeback() {
-    if (writeback_mapped != nullptr) vkUnmapMemory(device, writeback_buffer_memory);
-    vkDestroyBuffer(device, writeback_buffer, nullptr);
-    vkFreeMemory(device, writeback_buffer_memory, nullptr);
+    for (FrameSlot &frame : slots) {
+        if (frame.writeback.mapped != nullptr) vkUnmapMemory(device, frame.writeback.memory);
+        vkDestroyBuffer(device, frame.writeback.buffer, nullptr);
+        vkFreeMemory(device, frame.writeback.memory, nullptr);
+        frame.writeback = Staging{};
+        frame.writeback_in_flight = false;
+    }
     vkDestroyImageView(device, writeback_view, nullptr);
     vkDestroyImage(device, writeback_image, nullptr);
     vkFreeMemory(device, writeback_memory, nullptr);
-    writeback_mapped = nullptr;
-    writeback_buffer = VK_NULL_HANDLE;
-    writeback_buffer_memory = VK_NULL_HANDLE;
     writeback_view = VK_NULL_HANDLE;
     writeback_image = VK_NULL_HANDLE;
     writeback_memory = VK_NULL_HANDLE;
-    writeback_in_flight = false;
     writeback_has_pixels = false;
+}
+
+void VulkanRenderer::Impl::collect_writeback(std::uint32_t from, bool wait) {
+    FrameSlot &frame = slots[from];
+    if (!frame.writeback_in_flight) return;
+    if (wait) {
+        const perf::Clock::time_point wait_start = perf::Clock::now();
+        wait_fence(frame.fence, "the write-back of a frame");
+        perf::add_wait_time(perf::Clock::now() - wait_start, perf::Stall::Fence);
+    }
+    const perf::Clock::time_point copy_start = perf::Clock::now();
+    writeback_pixels.resize(static_cast<std::size_t>(kPspWidth) * kPspHeight);
+    invalidate_writeback(frame.writeback.memory);
+    std::memcpy(writeback_pixels.data(), frame.writeback.mapped, writeback_pixels.size() * 4u);
+    writeback_ready = frame.writeback_recorded;
+    writeback_has_pixels = true;
+    frame.writeback_in_flight = false;
+    perf::note_stall(perf::Stall::Copy, perf::Clock::now() - copy_start);
 }
 
 // Records the copy of the displayed target that write_back_frame() stores in
@@ -2721,13 +4140,15 @@ void VulkanRenderer::Impl::record_writeback(std::uint32_t address) {
     blit.dstOffsets[1] = {static_cast<std::int32_t>(kPspWidth), static_cast<std::int32_t>(kPspHeight), 1};
     vkCmdBlitImage(command_buffer, target.color, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, writeback_image,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &blit, VK_FILTER_LINEAR);
+    perf::count_target_copy();
     transition(command_buffer, writeback_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     VkBufferImageCopy copy{};
     copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u};
     copy.imageExtent = {kPspWidth, kPspHeight, 1u};
-    vkCmdCopyImageToBuffer(command_buffer, writeback_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, writeback_buffer,
-                           1u, &copy);
+    FrameSlot &frame = slots[slot];
+    vkCmdCopyImageToBuffer(command_buffer, writeback_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           frame.writeback.buffer, 1u, &copy);
     if (writeback_cached) {
         // Make the copy visible to the host reads after the fence.
         VkBufferMemoryBarrier to_host{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
@@ -2735,7 +4156,7 @@ void VulkanRenderer::Impl::record_writeback(std::uint32_t address) {
         to_host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
         to_host.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         to_host.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        to_host.buffer = writeback_buffer;
+        to_host.buffer = frame.writeback.buffer;
         to_host.offset = 0u;
         to_host.size = VK_WHOLE_SIZE;
         vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0u, 0u,
@@ -2743,8 +4164,8 @@ void VulkanRenderer::Impl::record_writeback(std::uint32_t address) {
     }
     transition(command_buffer, target.color, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    writeback_recorded = {address, target.stride, target.format};
-    writeback_in_flight = true;
+    frame.writeback_recorded = {address, target.stride, target.format};
+    frame.writeback_in_flight = true;
 }
 
 // Reads one guest word from every 256 bytes of the buffer a target stands for.
@@ -2803,6 +4224,7 @@ VulkanRenderer::Impl::FramebufferTexture VulkanRenderer::Impl::find_framebuffer_
 // A sampled copy of the target, brought up to date with its latest draw. The
 // copy is recorded between render passes, so the pass in progress ends here.
 VkDescriptorSet VulkanRenderer::Impl::framebuffer_descriptor(Target &target, bool opaque) {
+    const perf::SplitScope split(perf::Split::Texture);
     if (target.copy == VK_NULL_HANDLE) {
         std::string error;
         if (!create_image(target_extent.width, target_extent.height, VK_FORMAT_R8G8B8A8_UNORM,
@@ -2854,6 +4276,7 @@ VkDescriptorSet VulkanRenderer::Impl::framebuffer_descriptor(Target &target, boo
         region.extent = {target_extent.width, target_extent.height, 1u};
         vkCmdCopyImage(command_buffer, target.color, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target.copy,
                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &region);
+        perf::count_target_copy();
         transition(command_buffer, target.copy, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         transition(command_buffer, target.color, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -2862,6 +4285,209 @@ VkDescriptorSet VulkanRenderer::Impl::framebuffer_descriptor(Target &target, boo
         target.copy_valid = true;
     }
     return target.copy_descriptors[opaque ? 1u : 0u];
+}
+
+void VulkanRenderer::Impl::load_pipeline_cache() {
+    if (portablekit::env("NO_PIPELINE_CACHE") != nullptr) {
+        std::cout << "[render] pipeline cache off (" << portablekit::env_name("NO_PIPELINE_CACHE") << ")\n";
+        return;
+    }
+    pipeline_cache_path = install::user_data_directory() / "pipeline_cache.bin";
+    std::vector<char> data;
+    {
+        std::ifstream in(pipeline_cache_path, std::ios::binary);
+        if (in) data.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    // The header names the device and driver the data is for; anything else
+    // is dropped here rather than trusted to every driver to reject.
+    const char *dropped = nullptr;
+    if (!data.empty()) {
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(physical_device, &properties);
+        std::uint32_t header[4]{};
+        if (data.size() < 16u + VK_UUID_SIZE) {
+            dropped = "too short";
+        } else {
+            std::memcpy(header, data.data(), sizeof(header));
+            if (header[1] != VK_PIPELINE_CACHE_HEADER_VERSION_ONE || header[0] < 16u + VK_UUID_SIZE ||
+                header[2] != properties.vendorID || header[3] != properties.deviceID ||
+                std::memcmp(data.data() + 16, properties.pipelineCacheUUID, VK_UUID_SIZE) != 0)
+                dropped = "made by another device or driver";
+        }
+        if (dropped != nullptr) data.clear();
+    }
+    VkPipelineCacheCreateInfo info{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+    info.initialDataSize = data.size();
+    info.pInitialData = data.empty() ? nullptr : data.data();
+    if (vkCreatePipelineCache(device, &info, nullptr, &pipeline_cache) != VK_SUCCESS) {
+        info.initialDataSize = 0u;
+        info.pInitialData = nullptr;
+        if (vkCreatePipelineCache(device, &info, nullptr, &pipeline_cache) != VK_SUCCESS) {
+            pipeline_cache = VK_NULL_HANDLE;
+            std::cout << "[render] no pipeline cache: vkCreatePipelineCache failed\n";
+            return;
+        }
+        data.clear();
+    }
+    if (!data.empty())
+        std::cout << "[render] pipeline cache: " << (data.size() + 1023u) / 1024u << " KiB from "
+                  << install::path_to_utf8(pipeline_cache_path) << "\n";
+    else
+        std::cout << "[render] pipeline cache: new" << (dropped != nullptr ? std::string(", the old one was ") + dropped : "")
+                  << "\n";
+}
+
+void VulkanRenderer::Impl::save_pipeline_cache() {
+    if (pipeline_cache == VK_NULL_HANDLE || !pipeline_cache_dirty) return;
+    pipeline_cache_dirty = false;
+    std::size_t size = 0u;
+    if (vkGetPipelineCacheData(device, pipeline_cache, &size, nullptr) != VK_SUCCESS || size == 0u) return;
+    std::vector<char> data(size);
+    if (vkGetPipelineCacheData(device, pipeline_cache, &size, data.data()) != VK_SUCCESS) return;
+    data.resize(size);
+    // Written next to the file and renamed over it, so a crash or a phone
+    // killing the app mid-write leaves the old cache, not half a new one.
+    std::filesystem::path partial = pipeline_cache_path;
+    partial += ".partial";
+    {
+        std::ofstream out(partial, std::ios::binary | std::ios::trunc);
+        if (!out) return;
+        out.write(data.data(), static_cast<std::streamsize>(data.size()));
+        if (!out) return;
+    }
+    std::error_code ec;
+    std::filesystem::rename(partial, pipeline_cache_path, ec);
+    if (ec) std::filesystem::remove(partial, ec);
+}
+
+namespace {
+
+constexpr std::uint32_t kPipelineKeysMagic = 0x4B504B59u;  // "YKPK"
+constexpr std::uint32_t kPipelineKeysVersion = 1u;
+constexpr std::uint32_t kPipelineKeyWords = 12u;
+constexpr std::uint32_t kMaxPipelineKeys = 4096u;
+
+std::array<std::uint32_t, kPipelineKeyWords> key_words(const PipelineKey &key) {
+    return {key.blend ? 1u : 0u, key.source_factor,  key.destination_factor, key.equation,
+            key.depth_test ? 1u : 0u, key.depth_write ? 1u : 0u, key.depth_function, key.cull ? 1u : 0u,
+            key.cull_clockwise ? 1u : 0u, key.color_mask, key.alpha_test ? 1u : 0u, key.raw ? 1u : 0u};
+}
+
+PipelineKey key_from(const std::array<std::uint32_t, kPipelineKeyWords> &words) {
+    PipelineKey key{};
+    key.blend = words[0] != 0u;
+    key.source_factor = words[1];
+    key.destination_factor = words[2];
+    key.equation = words[3];
+    key.depth_test = words[4] != 0u;
+    key.depth_write = words[5] != 0u;
+    key.depth_function = words[6];
+    key.cull = words[7] != 0u;
+    key.cull_clockwise = words[8] != 0u;
+    key.color_mask = words[9] & 0xFu;
+    key.alpha_test = words[10] != 0u;
+    key.raw = words[11] != 0u;
+    return key;
+}
+
+} // namespace
+
+void VulkanRenderer::Impl::save_pipeline_keys() {
+    if (!pipeline_keys_dirty || pipeline_keys_path.empty()) return;
+    pipeline_keys_dirty = false;
+    // The pipelines made this run and those the prewarm made unasked.
+    std::vector<std::uint32_t> data{kPipelineKeysMagic, kPipelineKeysVersion, kPipelineKeyWords, 0u};
+    std::uint32_t count = 0u;
+    const auto add = [&](const PipelineKey &key) {
+        if (count >= kMaxPipelineKeys) return;
+        const auto words = key_words(key);
+        data.insert(data.end(), words.begin(), words.end());
+        ++count;
+    };
+    for (const auto &[key, pipeline] : pipelines) add(key);
+    {
+        std::lock_guard<std::mutex> guard(prewarm->lock);
+        for (const auto &[key, pipeline] : prewarm->made) add(key);
+    }
+    data[3] = count;
+    std::filesystem::path partial = pipeline_keys_path;
+    partial += ".partial";
+    {
+        std::ofstream out(partial, std::ios::binary | std::ios::trunc);
+        if (!out) return;
+        out.write(reinterpret_cast<const char *>(data.data()), static_cast<std::streamsize>(data.size() * 4u));
+        if (!out) return;
+    }
+    std::error_code ec;
+    std::filesystem::rename(partial, pipeline_keys_path, ec);
+    if (ec) std::filesystem::remove(partial, ec);
+}
+
+void VulkanRenderer::Impl::prewarm_pipelines() {
+    if (pipeline_cache == VK_NULL_HANDLE || portablekit::env("NO_PIPELINE_PREWARM") != nullptr) return;
+    pipeline_keys_path = pipeline_cache_path.parent_path() / "pipeline_keys.bin";
+    std::vector<std::uint32_t> data;
+    {
+        std::ifstream in(pipeline_keys_path, std::ios::binary);
+        if (!in) return;
+        in.seekg(0, std::ios::end);
+        const std::streamoff size = in.tellg();
+        if (size < 16 || size % 4 != 0 || size > 16 + static_cast<std::streamoff>(kMaxPipelineKeys) * 48) return;
+        in.seekg(0);
+        data.resize(static_cast<std::size_t>(size / 4));
+        in.read(reinterpret_cast<char *>(data.data()), size);
+        if (!in) return;
+    }
+    if (data[0] != kPipelineKeysMagic || data[1] != kPipelineKeysVersion || data[2] != kPipelineKeyWords ||
+        data.size() != 4u + static_cast<std::size_t>(data[3]) * kPipelineKeyWords)
+        return;
+    std::vector<PipelineKey> keys;
+    for (std::uint32_t i = 0; i < data[3]; ++i) {
+        std::array<std::uint32_t, kPipelineKeyWords> words{};
+        std::copy_n(data.begin() + 4 + static_cast<std::ptrdiff_t>(i) * kPipelineKeyWords, kPipelineKeyWords,
+                    words.begin());
+        keys.push_back(key_from(words));
+    }
+    prewarm->thread = std::thread([this, keys = std::move(keys)] {
+        const auto start = std::chrono::steady_clock::now();
+        std::uint32_t made = 0u;
+        for (const PipelineKey &key : keys) {
+            if (prewarm->stop.load(std::memory_order_relaxed)) break;
+            {
+                std::lock_guard<std::mutex> guard(prewarm->lock);
+                if (prewarm->made.contains(key)) continue;
+            }
+            const VkPipeline pipeline = create_pipeline(key);
+            if (pipeline == VK_NULL_HANDLE) continue;
+            std::lock_guard<std::mutex> guard(prewarm->lock);
+            if (!prewarm->made.emplace(key, pipeline).second) vkDestroyPipeline(device, pipeline, nullptr);
+            ++made;
+        }
+        std::cout << "[render] " << made << " pipelines of earlier runs made in the background in " << std::fixed
+                  << std::setprecision(1)
+                  << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count()
+                  << std::defaultfloat << std::setprecision(6) << " ms\n"
+                  << std::flush;
+    });
+}
+
+void VulkanRenderer::Impl::report_pipelines(bool final) {
+    if (pipelines_new == 0u && !pipeline_cache_dirty) return;
+    // A burst of new pipelines (a new area, an effect seen for the first
+    // time) is reported, and the cache written, once it has settled.
+    if (!final && std::chrono::steady_clock::now() - pipeline_cache_changed < std::chrono::seconds(3)) return;
+    if (pipelines_new != 0u) {
+        pipelines_reported += pipelines_new;
+        std::cout << "[render] " << pipelines_new << " new pipeline" << (pipelines_new == 1u ? "" : "s") << " in "
+                  << std::fixed << std::setprecision(1) << pipeline_new_ms << std::defaultfloat
+                  << std::setprecision(6) << " ms, " << pipelines_reported << " so far"
+                  << (pipeline_cache != VK_NULL_HANDLE ? "; pipeline cache saved" : "") << "\n"
+                  << std::flush;
+        pipelines_new = 0u;
+        pipeline_new_ms = 0.0;
+    }
+    save_pipeline_cache();
+    save_pipeline_keys();
 }
 
 VkPipeline VulkanRenderer::Impl::pipeline_for(const PipelineKey &key) {
@@ -2874,11 +4500,44 @@ VkPipeline VulkanRenderer::Impl::pipeline_for(const PipelineKey &key) {
         last_pipeline = found->second;
         return found->second;
     }
+    // Made in the background from the last run's list (prewarm_pipelines).
+    if (prewarm->thread.joinable()) {
+        std::lock_guard<std::mutex> guard(prewarm->lock);
+        if (const auto ready = prewarm->made.find(key); ready != prewarm->made.end()) {
+            const VkPipeline pipeline = ready->second;
+            prewarm->made.erase(ready);
+            pipelines.emplace(key, pipeline);
+            last_pipeline_key = key;
+            last_pipeline = pipeline;
+            ++pipelines_prewarm_used;
+            return pipeline;
+        }
+    }
+    const perf::Clock::time_point create_start = perf::Clock::now();
+    VkPipeline pipeline = create_pipeline(key);
+    const perf::Clock::duration create_time = perf::Clock::now() - create_start;
+    perf::note_stall(perf::Stall::Pipeline, create_time);
+    ++pipelines_new;
+    pipeline_new_ms += std::chrono::duration<double, std::milli>(create_time).count();
+    if (pipeline_cache != VK_NULL_HANDLE) {
+        pipeline_cache_dirty = true;
+        pipeline_cache_changed = std::chrono::steady_clock::now();
+    }
+    if (pipeline == VK_NULL_HANDLE) return VK_NULL_HANDLE;
+    pipelines.emplace(key, pipeline);
+    pipeline_keys_dirty = true;
+    last_pipeline_key = key;
+    last_pipeline = pipeline;
+    return pipeline;
+}
 
+// The pipeline for `key`; touches nothing but immutable state and the
+// (internally synchronised) pipeline cache, so the prewarm thread uses it too.
+VkPipeline VulkanRenderer::Impl::create_pipeline(const PipelineKey &key) const {
     std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
     stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
     stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-    stages[0].module = vertex_shader;
+    stages[0].module = key.raw ? raw_vertex_shader : vertex_shader;
     stages[0].pName = "main";
     stages[1] = stages[0];
     stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -2892,10 +4551,13 @@ VkPipeline VulkanRenderer::Impl::pipeline_for(const PipelineKey &key) {
         VkVertexInputAttributeDescription{3u, 0u, VK_FORMAT_R32G32B32_SFLOAT, offsetof(GpuVertex, nx)},
     };
     VkPipelineVertexInputStateCreateInfo vertex_input{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-    vertex_input.vertexBindingDescriptionCount = 1u;
-    vertex_input.pVertexBindingDescriptions = &binding;
-    vertex_input.vertexAttributeDescriptionCount = static_cast<std::uint32_t>(attributes.size());
-    vertex_input.pVertexAttributeDescriptions = attributes.data();
+    // The raw vertex shader reads the vertex buffer itself.
+    if (!key.raw) {
+        vertex_input.vertexBindingDescriptionCount = 1u;
+        vertex_input.pVertexBindingDescriptions = &binding;
+        vertex_input.vertexAttributeDescriptionCount = static_cast<std::uint32_t>(attributes.size());
+        vertex_input.pVertexAttributeDescriptions = attributes.data();
+    }
 
     VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
     assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -2937,6 +4599,16 @@ VkPipeline VulkanRenderer::Impl::pipeline_for(const PipelineKey &key) {
     blend.attachmentCount = 1u;
     blend.pAttachments = &blend_attachment;
 
+    // kAlphaTest in ge.frag.
+    const VkBool32 alpha_test = key.alpha_test ? VK_TRUE : VK_FALSE;
+    const VkSpecializationMapEntry alpha_entry{0u, 0u, sizeof(VkBool32)};
+    VkSpecializationInfo specialization{};
+    specialization.mapEntryCount = 1u;
+    specialization.pMapEntries = &alpha_entry;
+    specialization.dataSize = sizeof(alpha_test);
+    specialization.pData = &alpha_test;
+    stages[1].pSpecializationInfo = &specialization;
+
     VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
     info.stageCount = static_cast<std::uint32_t>(stages.size());
     info.pStages = stages.data();
@@ -2951,11 +4623,8 @@ VkPipeline VulkanRenderer::Impl::pipeline_for(const PipelineKey &key) {
     info.layout = pipeline_layout;
     info.renderPass = render_pass;
     VkPipeline pipeline{};
-    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1u, &info, nullptr, &pipeline) != VK_SUCCESS)
+    if (vkCreateGraphicsPipelines(device, pipeline_cache, 1u, &info, nullptr, &pipeline) != VK_SUCCESS)
         return VK_NULL_HANDLE;
-    pipelines.emplace(key, pipeline);
-    last_pipeline_key = key;
-    last_pipeline = pipeline;
     return pipeline;
 }
 
@@ -2976,13 +4645,28 @@ bool VulkanRenderer::pump_events() {
         // reserved for the in-game menu.
         if (event.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED) impl_->update_display_info();
         if (event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) impl_->swapchain_dirty = true;
+        // A phone turned from one landscape to the other keeps its size; only
+        // the display's transform changes.
+        if (event.type == SDL_EVENT_DISPLAY_ORIENTATION) impl_->swapchain_check = true;
+        if (event.type == SDL_EVENT_WINDOW_SAFE_AREA_CHANGED) {
+            impl_->update_content_rect();
+            impl_->resize_now = true;
+        }
         // The mouse, while captured for the game. Releases always count.
-        if (event.type == SDL_EVENT_MOUSE_MOTION && impl_->mouse_captured &&
+        // Touches also arrive as mouse events; they are the touch controls'
+        // alone and never reach the game as a mouse.
+        if ((event.type == SDL_EVENT_MOUSE_MOTION && event.motion.which != SDL_TOUCH_MOUSEID) ||
+            ((event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP) &&
+             event.button.which != SDL_TOUCH_MOUSEID))
+            impl_->real_mouse_seen = true;
+        impl_->handle_touch(event);
+        if (event.type == SDL_EVENT_MOUSE_MOTION && impl_->mouse_captured && event.motion.which != SDL_TOUCH_MOUSEID &&
             (!impl_->scripted_input || event.motion.which == kScriptedMouse)) {
             impl_->mouse_motion.x += event.motion.xrel;
             impl_->mouse_motion.y += event.motion.yrel;
         }
         if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && impl_->mouse_captured && event.button.button < 32u &&
+            event.button.which != SDL_TOUCH_MOUSEID &&
             (!impl_->scripted_input || event.button.which == kScriptedMouse))
             impl_->mouse_buttons |= 1u << event.button.button;
         if (event.type == SDL_EVENT_MOUSE_BUTTON_UP && event.button.button < 32u)
@@ -3046,6 +4730,13 @@ void VulkanRenderer::Impl::sample_pad(bool focused) {
 
     // The gamepad adds to the same bits and offsets, so both sources are live.
     if (impl_->gamepad != nullptr) read_gamepad(impl_->gamepad, pad, analog_x, analog_y);
+    // So do the on-screen controls.
+    if (impl_->touch_visible) {
+        pad.buttons |= impl_->touch.buttons();
+        const input::touch::Point stick = impl_->touch.stick();
+        analog_x += static_cast<int>(std::lround(stick.x * 127.0f));
+        analog_y += static_cast<int>(std::lround(stick.y * 127.0f));
+    }
 
     pad.analog_x = static_cast<std::uint8_t>(std::clamp(0x80 + analog_x, 0, 255));
     pad.analog_y = static_cast<std::uint8_t>(std::clamp(0x80 + analog_y, 0, 255));
@@ -3080,6 +4771,21 @@ void VulkanRenderer::Impl::sample_pad(bool focused) {
 
 PadState VulkanRenderer::pad() const noexcept { return impl_ ? impl_->pad : PadState{}; }
 
+bool VulkanRenderer::touch_controls_visible() const noexcept {
+    return impl_ && impl_->touch_visible && impl_->game_input && settings::current().touch_controls;
+}
+
+const input::touch::Controls &VulkanRenderer::touch_controls() const {
+    impl_->update_touch_layout();
+    return impl_->touch;
+}
+
+MouseMotion VulkanRenderer::take_touch_motion() noexcept {
+    return impl_ ? std::exchange(impl_->touch_motion, MouseMotion{}) : MouseMotion{};
+}
+
+bool VulkanRenderer::take_touch_menu() noexcept { return impl_ && impl_->touch.take_menu(); }
+
 MouseMotion VulkanRenderer::take_mouse_motion() noexcept {
     return impl_ ? std::exchange(impl_->mouse_motion, MouseMotion{}) : MouseMotion{};
 }
@@ -3106,6 +4812,7 @@ void VulkanRenderer::set_event_hook(std::function<bool(const SDL_Event &)> hook)
 void VulkanRenderer::set_game_input(bool enabled) {
     if (!impl_) return;
     if (enabled && !impl_->game_input) impl_->suppress_held = true;
+    if (!enabled) impl_->touch.release_all();
     impl_->game_input = enabled;
 }
 
@@ -3165,9 +4872,9 @@ std::string VulkanRenderer::device_name() const { return impl_ ? impl_->device_n
 SDL_Gamepad *VulkanRenderer::gamepad() const noexcept { return impl_ ? impl_->gamepad : nullptr; }
 
 VkExtent2D VulkanRenderer::Impl::wanted_target_extent() const {
-    const bool known = swapchain_extent.width != 0u && swapchain_extent.height != 0u;
-    const double window_width = known ? swapchain_extent.width : static_cast<double>(target_extent.width);
-    const double window_height = known ? swapchain_extent.height : static_cast<double>(target_extent.height);
+    const bool known = content_rect.extent.width != 0u && content_rect.extent.height != 0u;
+    const double window_width = known ? content_rect.extent.width : static_cast<double>(target_extent.width);
+    const double window_height = known ? content_rect.extent.height : static_cast<double>(target_extent.height);
     if (aspect != settings::Aspect::Fill) {
         std::uint32_t scale = requested_scale;
         if (scale == 0u) {
@@ -3274,7 +4981,7 @@ void VulkanRenderer::Impl::resize_targets(VkExtent2D extent) {
             transition(commands, target->color, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
             transition(commands, target->depth, VK_IMAGE_LAYOUT_UNDEFINED,
-                       VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+                       VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, depth_aspect());
             target->initialized = true;
         }
     });
@@ -3302,6 +5009,9 @@ void VulkanRenderer::set_window_scale(std::uint32_t scale) {
 
 void VulkanRenderer::set_fullscreen(bool fullscreen) {
     if (!impl_ || impl_->window == nullptr) return;
+#if defined(__ANDROID__)
+    fullscreen = true;
+#endif
     SDL_SetWindowFullscreen(impl_->window, fullscreen);
     impl_->swapchain_dirty = true;
 }
@@ -3475,8 +5185,12 @@ bool VulkanRenderer::initialize_ui(std::string &error) {
     info.Queue = impl.queue;
     info.DescriptorPoolSize = IMGUI_IMPL_VULKAN_MINIMUM_SAMPLED_IMAGE_POOL_SIZE;
     info.MinImageCount = impl.swapchain_min_images;
-    info.ImageCount = std::max<std::uint32_t>(static_cast<std::uint32_t>(impl.swapchain_images.size()),
-                                              impl.swapchain_min_images);
+    // ImGui keeps this many vertex and index buffers and writes the next one
+    // for each draw of the interface. Two frames in flight and two presents
+    // between flips can all still be reading one, so there are enough for
+    // all of them however few images the swapchain has.
+    info.ImageCount = std::max<std::uint32_t>({static_cast<std::uint32_t>(impl.swapchain_images.size()),
+                                               impl.swapchain_min_images, 8u});
     info.PipelineInfoMain.RenderPass = impl.ui_render_pass;
     info.PipelineInfoMain.Subpass = 0u;
     info.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
@@ -3525,11 +5239,23 @@ void VulkanRenderer::present_ui(bool show_game) {
 void VulkanRenderer::begin_frame() {
     Impl &impl = *impl_;
     if (!impl.ready || impl.recording) return;
+    // The next slot: its fence is the frame slot_count frames back.
+    impl.slot = (impl.slot + 1u) % impl.slot_count;
+    Impl::FrameSlot &frame = impl.slots[impl.slot];
+    impl.command_buffer = frame.commands;
+    impl.frame_fence = frame.fence;
+    impl.frame_uploads = frame.uploads;
     const perf::Clock::time_point wait_start = perf::Clock::now();
-    vkWaitForFences(impl.device, 1u, &impl.frame_fence, VK_TRUE, UINT64_MAX);
+    impl.wait_fence(impl.frame_fence, "the wait for a frame two back");
     perf::add_wait_time(perf::Clock::now() - wait_start, perf::Stall::Fence);
     vkResetFences(impl.device, 1u, &impl.frame_fence);
-    impl.collect_gpu_time();
+    impl.release_frame_uploads(impl.slot);
+    impl.collect_gpu_time(impl.slot);
+    impl.compare_gpu_decode(impl.slot);
+    // With one frame in flight its write-back is taken here, as before;
+    // with more, write_back_frame() takes it.
+    impl.collect_writeback(impl.slot, false);
+    impl.report_pipelines(false);
     impl.apply_texture_pack();
     impl.replacements.begin_frame(impl.frames);
     if (texture_pack_trace() && impl.pack && impl.frames % 60u == 0u) {
@@ -3538,22 +5264,13 @@ void VulkanRenderer::begin_frame() {
                   << (impl.replacements.resident_bytes() >> 20u) << " MB)\n";
         impl.replaced_draws = 0u;
     }
-    if (impl.writeback_in_flight) {
-        const perf::Clock::time_point copy_start = perf::Clock::now();
-        impl.writeback_pixels.resize(static_cast<std::size_t>(kPspWidth) * kPspHeight);
-        impl.invalidate_writeback();
-        std::memcpy(impl.writeback_pixels.data(), impl.writeback_mapped, impl.writeback_pixels.size() * 4u);
-        impl.writeback_ready = impl.writeback_recorded;
-        impl.writeback_has_pixels = true;
-        impl.writeback_in_flight = false;
-        perf::note_stall(perf::Stall::Copy, perf::Clock::now() - copy_start);
-    }
     vkResetCommandBuffer(impl.command_buffer, 0u);
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(impl.command_buffer, &begin);
+    impl.breadcrumb(impl.command_buffer, "frame begins");
     if (impl.gpu_timer != VK_NULL_HANDLE) {
-        vkCmdResetQueryPool(impl.command_buffer, impl.gpu_timer, 0u, 2u * kGpuTimerSegments);
+        vkCmdResetQueryPool(impl.command_buffer, impl.gpu_timer, impl.gpu_timer_base(), 2u * kGpuTimerSegments);
         impl.gpu_timer_used = 0u;
         impl.gpu_timer_open = false;
         impl.begin_gpu_segment(impl.command_buffer);
@@ -3561,7 +5278,28 @@ void VulkanRenderer::begin_frame() {
     // With frame interpolation each frame writes the next region and is
     // recorded for drawing again; without it, the first region as before.
     impl.interpolating = impl.interpolation_wanted();
-    impl.enter_region(impl.interpolating ? impl.next_region : 0u);
+    const std::uint32_t region = impl.interpolating ? impl.next_region : impl.slot;
+    // A region another frame in flight, or a present between flips, may
+    // still draw from is waited for first (only when interpolation has just
+    // been turned on or off, as their regions follow each other otherwise).
+    for (std::uint32_t other = 0; other < Impl::kMaxSlots; ++other) {
+        if (other != impl.slot && impl.slots[other].region == region &&
+            vkGetFenceStatus(impl.device, impl.slots[other].fence) != VK_SUCCESS) {
+            const perf::Clock::time_point region_start = perf::Clock::now();
+            impl.wait_fence(impl.slots[other].fence, "the wait for the frame before");
+            perf::add_wait_time(perf::Clock::now() - region_start, perf::Stall::Fence);
+        }
+    }
+    for (std::uint32_t present = 0; present < impl.present_fences.size(); ++present) {
+        if ((impl.present_regions[present] & (1u << region)) != 0u) {
+            const perf::Clock::time_point region_start = perf::Clock::now();
+            impl.wait_fence(impl.present_fences[present], "the wait for a present");
+            perf::add_wait_time(perf::Clock::now() - region_start, perf::Stall::Fence);
+            impl.present_regions[present] = 0u;
+        }
+    }
+    frame.region = region;
+    impl.enter_region(region);
     if (impl.interpolating && !impl.recording_frame.recorded) {
         impl.recording_frame.clear();
         impl.recording_frame.recorded = true;
@@ -3569,6 +5307,7 @@ void VulkanRenderer::begin_frame() {
     }
     impl.environment_version = 0u;
     impl.object_valid = false;
+    impl.raw_valid = false;
     impl.forget_bindings();
     impl.pass_active = false;
     impl.recording = true;
@@ -3595,8 +5334,9 @@ void VulkanRenderer::upload_frame(std::uint32_t display_address, const std::uint
     Impl::Target *target = impl.target_for(display_address, error);
     if (target == nullptr) return;
 
-    // The staging buffer is free: the frame fence was waited on in begin_frame.
-    auto *staging = static_cast<std::uint8_t *>(impl.upload_mapped);
+    // The slot's staging buffer is free: its fence was waited on in begin_frame.
+    const Impl::Staging &movie = impl.slots[impl.slot].movie;
+    auto *staging = static_cast<std::uint8_t *>(movie.mapped);
     for (std::uint32_t row = 0; row < height; ++row)
         std::memcpy(staging + static_cast<std::size_t>(row) * width * 4u,
                     pixels + static_cast<std::size_t>(row) * stride * 4u, static_cast<std::size_t>(width) * 4u);
@@ -3605,7 +5345,7 @@ void VulkanRenderer::upload_frame(std::uint32_t display_address, const std::uint
     VkBufferImageCopy copy{};
     copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u};
     copy.imageExtent = {width, height, 1u};
-    vkCmdCopyBufferToImage(impl.command_buffer, impl.upload_staging, impl.upload_image,
+    vkCmdCopyBufferToImage(impl.command_buffer, movie.buffer, impl.upload_image,
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &copy);
     impl.transition(impl.command_buffer, impl.upload_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -3616,7 +5356,7 @@ void VulkanRenderer::upload_frame(std::uint32_t display_address, const std::uint
                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     if (!target->initialized) {
         impl.transition(impl.command_buffer, target->depth, VK_IMAGE_LAYOUT_UNDEFINED,
-                        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+                        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, impl.depth_aspect());
         target->initialized = true;
     }
     VkImageBlit blit{};
@@ -3651,6 +5391,28 @@ void VulkanRenderer::upload_frame(std::uint32_t display_address, const std::uint
     target->guest_words.clear();
 }
 
+bool VulkanRenderer::gpu_decode() const {
+    if (!impl_ || !impl_->ready || !impl_->gpu_decode_available) return false;
+    // Off unless <prefix>_GPU_DECODE=1 asks for it: on the Steam Deck (radv)
+    // the raw vertex path hung the GPU (ring gfx timeout) at the character
+    // select screen, and the CPU decode did not. Also off for the paths and
+    // traces that need decoded vertices.
+    static const bool off = [] {
+        if (portablekit::env("CHECK_GPU_DECODE") != nullptr) return false;
+        const char *text = portablekit::env("GPU_DECODE");
+        return text == nullptr || std::strcmp(text, "1") != 0;
+    }();
+    static const bool needs_vertices =
+        portablekit::env("NO_DIRECT_VERTICES") != nullptr || portablekit::env("CHECK_DIRECT_VERTICES") != nullptr ||
+        portablekit::env("TRACE_GE") != nullptr || portablekit::env("TRACE_3D") != nullptr ||
+        portablekit::env("TRACE_SPRITES") != nullptr || portablekit::env("TRACE_LIGHTING") != nullptr ||
+        portablekit::env("TRACE_FB_TEXTURES") != nullptr;
+    return !off && !needs_vertices && !perf::alternate_off(perf::NewPath::Direct) &&
+           !perf::alternate_off(perf::NewPath::GpuDecode);
+}
+
+bool VulkanRenderer::check_gpu_decode() const { return impl_ && impl_->check_gpu_decode; }
+
 void VulkanRenderer::begin_display_list() {
     if (!impl_) return;
     impl_->list_texture_keys.clear();
@@ -3660,12 +5422,16 @@ void VulkanRenderer::begin_display_list() {
 void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     Impl &impl = *impl_;
     if (!impl.ready) return;
+    const perf::SplitScope split(perf::Split::Draw);
     if (!impl.recording) begin_frame();
     // Presents between flips fall due while the game draws, too: a busy
     // frame spends most of its time in here.
     if (impl.cycle_active && (++impl.draws_since_poll & 15u) == 0u)
         impl.poll_presents(std::chrono::steady_clock::now(), false, false);
-    if (call.vertices.empty()) return;
+    // GPU vertex decode: the draw carries the guest's vertex bytes instead of
+    // decoded vertices (GeState::set_raw_vertices).
+    const bool raw = call.raw_vertices != nullptr;
+    if (call.vertices.empty() && !raw) return;
 
     // Everything becomes a triangle list; sprites expand to two triangles.
     impl.scratch.clear();
@@ -3706,7 +5472,8 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         }
         return call.vertices[std::min(index, call.vertices.size() - 1u)];
     };
-    const std::size_t count = call.indices.empty() ? call.vertices.size() : call.indices.size();
+    const std::size_t vertex_total = raw ? call.raw_count : call.vertices.size();
+    const std::size_t count = call.indices.empty() ? vertex_total : call.indices.size();
 
     static const bool trace = portablekit::env("TRACE_GE") != nullptr;
     static const bool trace3d = portablekit::env("TRACE_3D") != nullptr;
@@ -3726,7 +5493,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     // keep the expansion too.
     static const bool legacy_vertices = portablekit::env("NO_DIRECT_VERTICES") != nullptr;
     static const bool check_direct = portablekit::env("CHECK_DIRECT_VERTICES") != nullptr;
-    const bool direct = !legacy_vertices && !perf::alternate_off(perf::NewPath::Direct) && !call.through &&
+    const bool direct = raw || !legacy_vertices && !perf::alternate_off(perf::NewPath::Direct) && !call.through &&
                         (call.primitive == PrimitiveType::Triangles ||
                          call.primitive == PrimitiveType::TriangleStrip ||
                          call.primitive == PrimitiveType::TriangleFan) &&
@@ -3787,9 +5554,9 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         return true;
     };
     if (direct) {
-        triangle_indices(call.primitive, count, call.indices, call.vertices.size(), impl.direct_indices);
+        triangle_indices(call.primitive, count, call.indices, vertex_total, impl.direct_indices);
         if (impl.direct_indices.empty()) return;
-        if (check_direct) {
+        if (check_direct && !raw) {
             // Every index must name a vertex equal, byte for byte, to the one
             // the expansion puts in its place.
             if (!expand()) return;
@@ -3940,7 +5707,8 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         ++impl.frame_through_draws;
     } else {
         ++impl.frame_transformed_draws;
-        ++impl.frame_transformed_targets[call.target.color_address];
+        // Only <prefix>_TRACE_3D reads it: a map insert per draw otherwise.
+        if (trace3d) ++impl.frame_transformed_targets[call.target.color_address];
         if (watch_camera) {
             const auto same = std::find_if(impl.frame_views.begin(), impl.frame_views.end(),
                                            [&](const auto &entry) { return entry.first == call.view; });
@@ -4028,6 +5796,62 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
             impl.object_valid = true;
         }
     }
+    // A raw draw's format, colour and bones, written when they differ from
+    // the last raw draw's. With <prefix>_CHECK_GPU_DECODE every raw draw gets
+    // its own, naming the slot its shader writes what it decoded into.
+    std::uint32_t check_slot = 0u;
+    bool checked = false;
+    if (raw) {
+        const VertexFormat format = vertex_format(call.vertex_type);
+        const auto field = [](std::uint32_t offset) { return offset == kNoVertexField ? kRawNoField : offset; };
+        RawBlock block{};
+        block.format = {call.raw_stride, call.vertex_type,
+                        field(format.weight_offset) | field(format.texcoord_offset) << 8u |
+                            field(format.color_offset) << 16u | field(format.normal_offset) << 24u,
+                        format.position_offset};
+        // A vertex without a colour is drawn with the material colour when
+        // unlit, white when lit (to_gpu).
+        block.extra = {use_material_color ? call.material_color : 0xFFFFFFFFu, 0u, 0u, 0u};
+        std::size_t bytes = kRawHeaderBytes;
+        if (((call.vertex_type >> 9u) & 3u) != 0u && call.bone_matrices != nullptr) {
+            const std::uint32_t bones = std::min<std::uint32_t>(((call.vertex_type >> 14u) & 7u) + 1u, 8u);
+            for (std::uint32_t bone = 0; bone < bones; ++bone)
+                for (std::uint32_t row = 0; row < 4u; ++row)
+                    for (std::uint32_t axis = 0; axis < 3u; ++axis)
+                        block.bones[bone * 16u + row * 4u + axis] = call.bone_matrices[bone * 12u + row * 3u + axis];
+            bytes += bones * kRawBoneBytes;
+        }
+        if (impl.check_gpu_decode) {
+            Impl::FrameSlot &frame = impl.slots[impl.slot];
+            const std::uint32_t half = impl.slot * 2u * Impl::kCheckVertices * 3u;
+            if (frame.check_used + call.raw_count <= Impl::kCheckVertices) {
+                check_slot = half + frame.check_used * 3u;
+                frame.check_used += call.raw_count;
+                checked = true;
+            } else {
+                // Past the compared part: written, never read.
+                check_slot = half + Impl::kCheckVertices * 3u;
+            }
+            block.extra[1] = check_slot;
+        }
+        if (impl.check_gpu_decode || !impl.raw_valid || bytes != impl.last_raw_bytes ||
+            std::memcmp(&block, &impl.last_raw, bytes) != 0) {
+            if (!impl.write_uniform(&block, bytes, impl.raw_offset)) return;
+            impl.last_raw = block;
+            impl.last_raw_bytes = bytes;
+            impl.raw_valid = true;
+        }
+        if (checked) {
+            Impl::FrameSlot &frame = impl.slots[impl.slot];
+            frame.checks.push_back({check_slot, static_cast<std::uint32_t>(frame.check_expected.size()),
+                                    call.raw_count, call.vertex_type});
+            const std::size_t first = frame.check_expected.size();
+            for (const Vertex &vertex : call.vertices) frame.check_expected.push_back(to_gpu(vertex));
+            frame.check_drawn.resize(frame.check_expected.size(), 0u);
+            for (const std::uint16_t index : impl.direct_indices)
+                if (first + index < frame.check_drawn.size()) frame.check_drawn[first + index] = 1u;
+        }
+    }
     // A texture in a framebuffer the renderer drew is read from that render
     // target: the pixels never reach guest memory, which holds whatever was
     // there before. <prefix>_NO_FB_TEXTURES decodes guest memory as before.
@@ -4069,7 +5893,8 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     // A skinned draw recorded for drawing again keeps a copy of its vertices,
     // to blend them with the next frame's; ge_state.cpp skins exactly the
     // transformed vertices whose type has weights.
-    const bool skinned = impl.interpolating && !call.through && ((call.vertex_type >> 9u) & 3u) != 0u;
+    // A raw draw is blended through its bones instead (replay()).
+    const bool skinned = impl.interpolating && !raw && !call.through && ((call.vertex_type >> 9u) & 3u) != 0u;
     const std::uint32_t skinned_first =
         skinned ? static_cast<std::uint32_t>(impl.recording_frame.skinned.size()) : Impl::kNone;
     VkDeviceSize vertex_start = impl.vertex_offset;
@@ -4082,14 +5907,31 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         // their indices in the index buffer, written once the draw's group is
         // known.
         vertex_start = (impl.vertex_offset + 15u) & ~VkDeviceSize{15u};
-        const VkDeviceSize vertex_end = vertex_start + call.vertices.size() * sizeof(GpuVertex);
+        // A draw that can join the open group follows its vertices directly,
+        // so its indices rebase onto the group's first vertex by the stride.
+        // A GpuVertex is 40 bytes: rounding its start up to 16 bytes as
+        // before broke that for every other draw, and half the draws that
+        // could have merged did not (<prefix>_NO_TIGHT_MERGE rounds as before).
+        static const bool loose_merge = portablekit::env("NO_TIGHT_MERGE") != nullptr;
+        if (merge && impl.group.open && impl.group.raw == raw && impl.vertex_offset == impl.group.vertex_end &&
+            (raw ? impl.group.stride == call.raw_stride && !impl.check_gpu_decode : !loose_merge))
+            vertex_start = impl.vertex_offset;
+        const VkDeviceSize vertex_bytes =
+            raw ? static_cast<VkDeviceSize>(call.raw_count) * call.raw_stride : call.vertices.size() * sizeof(GpuVertex);
+        const VkDeviceSize vertex_end = vertex_start + vertex_bytes;
         index_start = (vertex_end + 3u) & ~VkDeviceSize{3u};
         draw_end = merge ? vertex_end : index_start + impl.direct_indices.size() * sizeof(std::uint16_t);
-        if (draw_end > impl.vertex_limit) return;
-        if (merge && impl.index_offset + 4u + impl.direct_indices.size() * sizeof(std::uint16_t) > impl.index_limit)
+        if (draw_end > impl.vertex_limit) {
+            report_frame_space_full("vertex");
             return;
+        }
+        if (merge && impl.index_offset + 4u + impl.direct_indices.size() * sizeof(std::uint16_t) > impl.index_limit) {
+            report_frame_space_full("index");
+            return;
+        }
         auto *out = static_cast<std::uint8_t *>(impl.vertex_mapped) + vertex_start;
-        for (const Vertex &vertex : call.vertices) {
+        if (raw) std::memcpy(out, call.raw_vertices, static_cast<std::size_t>(vertex_bytes));
+        else for (const Vertex &vertex : call.vertices) {
             const GpuVertex converted = to_gpu(vertex);
             std::memcpy(out, &converted, sizeof(GpuVertex));
             out += sizeof(GpuVertex);
@@ -4101,7 +5943,10 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         draw_count = static_cast<std::uint32_t>(impl.direct_indices.size());
     } else {
         const VkDeviceSize bytes = impl.scratch.size() * sizeof(GpuVertex);
-        if (impl.vertex_offset + bytes > impl.vertex_limit) return;
+        if (impl.vertex_offset + bytes > impl.vertex_limit) {
+            report_frame_space_full("vertex");
+            return;
+        }
         std::memcpy(static_cast<std::uint8_t *>(impl.vertex_mapped) + impl.vertex_offset, impl.scratch.data(),
                     static_cast<std::size_t>(bytes));
         draw_end = impl.vertex_offset + bytes;
@@ -4110,8 +5955,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
             impl.recording_frame.skinned.insert(impl.recording_frame.skinned.end(), impl.scratch.begin(),
                                                 impl.scratch.end());
     }
-    const auto drawn_vertices =
-        static_cast<std::uint32_t>(direct ? call.vertices.size() : impl.scratch.size());
+    const auto drawn_vertices = static_cast<std::uint32_t>(direct ? vertex_total : impl.scratch.size());
 
     PipelineKey key{};
     if (call.clear_mode) {
@@ -4148,6 +5992,13 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         key.cull = call.culling_enabled && !call.through && call.primitive != PrimitiveType::Sprites;
         key.cull_clockwise = call.cull_clockwise;
     }
+    // Matches texture_params.w below: without an alpha test the pipeline's
+    // shader has no discard. <prefix>_NO_ALPHA_VARIANTS keeps the one shader
+    // that tests alpha for every draw, as before.
+    static const bool no_alpha_variants = portablekit::env("NO_ALPHA_VARIANTS") != nullptr;
+    key.alpha_test = no_alpha_variants || perf::alternate_off(perf::NewPath::Alpha) ||
+                     (!call.clear_mode && call.alpha_test.enabled && call.alpha_test.function != 0u);
+    key.raw = raw;
     // Escape hatch for bisecting "nothing is visible" reports.
     static const bool no_cull = portablekit::env("NO_CULL") != nullptr;
     static const bool no_depth = portablekit::env("NO_DEPTH") != nullptr;
@@ -4161,7 +6012,15 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     push.viewport = {static_cast<float>(kPspWidth), static_cast<float>(kPspHeight), call.through ? 1.0f : 0.0f,
                      (fogged ? kPushFog : 0.0f) + (lit ? kPushLighting : 0.0f)};
     push.view_z = {view_world[2], view_world[6], view_world[10], view_world[14]};
-    push.texture_params = {call.texture.enabled ? 1.0f : 0.0f, static_cast<float>(call.texture.function),
+    // The GE's texture wrap register: clamp in u, in v, or repeat. The
+    // sampler repeats; the fragment shader clamps the axes flagged here
+    // (bits 1 and 2 of texture_params.x) to the texture's edge texels.
+    // <prefix>_NO_TEXTURE_CLAMP repeats every texture, as before.
+    static const bool no_texture_clamp = portablekit::env("NO_TEXTURE_CLAMP") != nullptr;
+    const float wrap_flags = no_texture_clamp ? 0.0f
+                                              : (call.texture.wrap_s != 0u ? 2.0f : 0.0f) +
+                                                    (call.texture.wrap_t != 0u ? 4.0f : 0.0f);
+    push.texture_params = {call.texture.enabled ? 1.0f + wrap_flags : 0.0f, static_cast<float>(call.texture.function),
                            static_cast<float>(call.alpha_test.enabled ? call.alpha_test.reference : 0u),
                            static_cast<float>(call.alpha_test.enabled ? call.alpha_test.function : 0u)};
     // Through-mode texture coordinates are in texels, transformed ones in [0,1].
@@ -4188,6 +6047,9 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
             // is pixel (x, y) of a target that holds 480x272 guest pixels at
             // any internal scale.
             texture_descriptor = copy;
+            // The copy's sampler clamps at the target's edges; the shader's
+            // clamp would take the whole target for the texture.
+            push.texture_params[0] = 1.0f;
             const float width = static_cast<float>(call.texture.width);
             const float height = static_cast<float>(call.texture.height);
             const std::array<float, 4> uv = push.uv_transform;
@@ -4202,7 +6064,26 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
 
     if (!impl.pass_active || impl.current_target != call.target.color_address) {
         impl.end_pass();
-        impl.begin_pass(call.target.color_address);
+        // A clear that covers the whole screen, first in its pass, writes
+        // every pixel of what it clears: nothing needs loading for it.
+        std::uint32_t overwritten = 0u;
+        static const bool no_clear_load = portablekit::env("NO_CLEAR_LOAD") != nullptr;
+        if (call.clear_mode && call.through && call.primitive == PrimitiveType::Sprites && !no_clear_load &&
+            !perf::alternate_off(perf::NewPath::ClearLoad) && call.viewport.scissor_x1 == 0u &&
+            call.viewport.scissor_y1 == 0u && call.viewport.scissor_x2 >= kPspWidth - 1u &&
+            call.viewport.scissor_y2 >= kPspHeight - 1u && call.vertices.size() == 2u) {
+            const Vertex &a = call.vertices[0];
+            const Vertex &b = call.vertices[1];
+            const bool covers = std::min(a.position[0], b.position[0]) <= 0.0f &&
+                                std::min(a.position[1], b.position[1]) <= 0.0f &&
+                                std::max(a.position[0], b.position[0]) >= static_cast<float>(kPspWidth) &&
+                                std::max(a.position[1], b.position[1]) >= static_cast<float>(kPspHeight);
+            if (covers && call.indices.empty()) {
+                if ((call.clear_flags & 3u) == 3u) overwritten |= 1u;
+                if ((call.clear_flags & 4u) != 0u) overwritten |= 2u;
+            }
+        }
+        impl.begin_pass(call.target.color_address, overwritten);
         if (!impl.pass_active) return;
     }
     {
@@ -4284,30 +6165,35 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     VkRect2D vk_scissor{};
     vk_scissor.offset = {left, top};
     vk_scissor.extent = {static_cast<std::uint32_t>(right - left), static_cast<std::uint32_t>(bottom - top)};
-    const std::array<std::uint32_t, 2> lighting_offsets{impl.environment_offset, impl.object_offset};
+    const std::array<std::uint32_t, 3> lighting_offsets{impl.environment_offset, impl.object_offset, impl.raw_offset};
     if (merge) {
         const Impl::DrawState state{pipeline, texture_descriptor, lighting_offsets, vk_viewport, vk_scissor,
                                     blend_constants, push};
         if (!direct) {
             impl.flush_group();
             impl.record_state(state);
-            vkCmdBindVertexBuffers(impl.command_buffer, 0u, 1u, &impl.vertex_buffer, &vertex_start);
-            vkCmdDraw(impl.command_buffer, draw_count, 1u, 0u, 0u);
+            {
+                const perf::SplitScope split(perf::Split::Record);
+                vkCmdBindVertexBuffers(impl.command_buffer, 0u, 1u, &impl.vertex_buffer, &vertex_start);
+                vkCmdDraw(impl.command_buffer, draw_count, 1u, 0u, 0u);
+            }
             perf::count_recorded_draws(1u);
             impl.record_draw_for_replay(call, lit, skinned_first, state, vertex_start, VK_NULL_HANDLE, 0u,
                                         draw_count, drawn_vertices, false);
         } else {
             Impl::DrawGroup &group = impl.group;
-            const auto vertex_count = static_cast<std::uint32_t>(call.vertices.size());
+            const auto vertex_count = static_cast<std::uint32_t>(vertex_total);
             std::uint32_t rebase = 0u;
             bool join = group.open && vertex_start == group.vertex_end && impl.state_known &&
-                        Impl::same_state(state, impl.recorded);
+                        Impl::same_state(state, impl.recorded) && group.raw == raw &&
+                        (!raw || group.stride == call.raw_stride) && !impl.check_gpu_decode;
             // Recorded for drawing again, skinned draws join only skinned
             // ones: their vertices are kept on the CPU too, one after another
             // like the group's, so blended ones can replace the group's.
             if (join && impl.interpolating && skinned != impl.group_skinned) join = false;
             if (join) {
-                rebase = static_cast<std::uint32_t>((vertex_start - group.vertex_base) / sizeof(GpuVertex));
+                rebase = static_cast<std::uint32_t>((vertex_start - group.vertex_base) /
+                                                    (raw ? call.raw_stride : sizeof(GpuVertex)));
                 join = rebase + vertex_count <= 65536u;
             }
             if (!join) {
@@ -4315,12 +6201,12 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
                 impl.record_state(state);
                 // Metal wants index buffer offsets on 4 bytes.
                 impl.index_offset = (impl.index_offset + 3u) & ~VkDeviceSize{3u};
-                group = Impl::DrawGroup{true, vertex_start, vertex_start, impl.index_offset, 0u, 0u};
+                group = Impl::DrawGroup{true, vertex_start, vertex_start, impl.index_offset, 0u, 0u, raw, call.raw_stride};
                 rebase = 0u;
                 impl.group_skinned = skinned;
             }
             impl.record_draw_for_replay(call, lit, skinned_first, state, vertex_start, impl.index_buffer,
-                                        group.index_base, draw_count, vertex_count, join);
+                                        group.index_base, draw_count, vertex_count, join, raw);
             auto *indices = reinterpret_cast<std::uint8_t *>(impl.index_mapped) + impl.index_offset;
             if (rebase == 0u) {
                 std::memcpy(indices, impl.direct_indices.data(), impl.direct_indices.size() * sizeof(std::uint16_t));
@@ -4363,7 +6249,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     vkCmdBindVertexBuffers(impl.command_buffer, 0u, 1u, &impl.vertex_buffer, &vertex_start);
     if (direct) {
         vkCmdBindIndexBuffer(impl.command_buffer, impl.vertex_buffer, index_start, VK_INDEX_TYPE_UINT16);
-        vkCmdDrawIndexed(impl.command_buffer, draw_count, 1u, 0u, 0, 0u);
+        vkCmdDrawIndexed(impl.command_buffer, draw_count, 1u, 0u, 0, raw ? static_cast<std::uint32_t>(vertex_start) : 0u);
     } else {
         vkCmdDraw(impl.command_buffer, draw_count, 1u, 0u, 0u);
     }
@@ -4372,7 +6258,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
                                     blend_constants, push};
         impl.record_draw_for_replay(call, lit, skinned_first, state, vertex_start,
                                     direct ? impl.vertex_buffer : VK_NULL_HANDLE, index_start, draw_count,
-                                    drawn_vertices, false);
+                                    drawn_vertices, false, raw);
     }
     impl.vertex_offset = draw_end;
     ++impl.draws;
@@ -4382,8 +6268,17 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
 
 void VulkanRenderer::write_back_frame(GuestMemory &memory) {
     Impl &impl = *impl_;
-    if (!impl.ready || !impl.writeback_has_pixels) return;
+    if (!impl.ready) return;
+    // The frame before this one, still in flight with two slots: its
+    // pixels reach guest memory now, as they did when each frame was waited
+    // for before the next was recorded.
+    if (impl.slot_count > 1u) {
+        const std::uint32_t previous = (impl.slot + impl.slot_count - 1u) % impl.slot_count;
+        if (previous != impl.slot) impl.collect_writeback(previous, true);
+    }
+    if (!impl.writeback_has_pixels) return;
     impl.writeback_has_pixels = false;
+    const perf::SplitScope split(perf::Split::Writeback);
     const perf::Clock::time_point store_start = perf::Clock::now();
     impl.store_frame(memory, impl.writeback_ready, impl.writeback_pixels.data());
     perf::note_stall(perf::Stall::Store, perf::Clock::now() - store_start);
@@ -4410,43 +6305,50 @@ void VulkanRenderer::read_back_framebuffer(std::uint32_t source, GuestMemory &me
     if (!impl.recording) begin_frame();
     impl.end_pass();
     impl.record_writeback(found);
-    if (!impl.writeback_in_flight) return;
+    Impl::FrameSlot &frame = impl.slots[impl.slot];
+    if (!frame.writeback_in_flight) return;
     // Run everything recorded so far and carry on recording afterwards.
     impl.end_gpu_segment(impl.command_buffer);
     vkEndCommandBuffer(impl.command_buffer);
+    std::array<VkCommandBuffer, 2> batch{};
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    submit.commandBufferCount = 1u;
-    submit.pCommandBuffers = &impl.command_buffer;
+    submit.commandBufferCount = impl.frame_batch(impl.command_buffer, batch);
+    submit.pCommandBuffers = batch.data();
     const perf::Clock::time_point wait_start = perf::Clock::now();
     vkQueueSubmit(impl.queue, 1u, &submit, impl.frame_fence);
-    vkWaitForFences(impl.device, 1u, &impl.frame_fence, VK_TRUE, UINT64_MAX);
+    // The frame before, submitted earlier, has finished too; its write-back
+    // is taken first, as it is older than this one.
+    for (std::uint32_t other = 0; other < impl.slot_count; ++other)
+        if (other != impl.slot) impl.collect_writeback(other, true);
+    impl.wait_fence(impl.frame_fence, "a framebuffer read back");
     perf::add_wait_time(perf::Clock::now() - wait_start, perf::Stall::Readback);
     vkResetFences(impl.device, 1u, &impl.frame_fence);
+    // Uploads and evictions recorded so far have finished with the frame.
+    impl.release_frame_uploads(impl.slot);
     vkResetCommandBuffer(impl.command_buffer, 0u);
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(impl.command_buffer, &begin);
+    impl.breadcrumb(impl.command_buffer, "frame goes on after a read-back");
     // The queries written so far stay valid: they were reset at the start of
     // the frame, and the next pair follows them.
     impl.begin_gpu_segment(impl.command_buffer);
     // A frame recorded for drawing again keeps what it wrote so far.
-    if (!impl.interpolating) {
-        impl.vertex_offset = 0u;
-        impl.index_offset = 0u;
-    }
+    if (!impl.interpolating) impl.enter_region(impl.frame_region);
     impl.environment_version = 0u;
     impl.object_valid = false;
+    impl.raw_valid = false;
     impl.forget_bindings();
-    impl.writeback_in_flight = false;
+    frame.writeback_in_flight = false;
     const perf::Clock::time_point copy_start = perf::Clock::now();
     std::vector<std::uint32_t> fresh_pixels;
     std::vector<std::uint32_t> &pixels = Impl::reuse_buffers() ? impl.readback_pixels : fresh_pixels;
     pixels.resize(static_cast<std::size_t>(kPspWidth) * kPspHeight);
-    impl.invalidate_writeback();
-    std::memcpy(pixels.data(), impl.writeback_mapped, pixels.size() * 4u);
+    impl.invalidate_writeback(frame.writeback.memory);
+    std::memcpy(pixels.data(), frame.writeback.mapped, pixels.size() * 4u);
     const perf::Clock::time_point store_start = perf::Clock::now();
     perf::note_stall(perf::Stall::Copy, store_start - copy_start);
-    impl.store_frame(memory, impl.writeback_recorded, pixels.data());
+    impl.store_frame(memory, frame.writeback_recorded, pixels.data());
     perf::note_stall(perf::Stall::Store, perf::Clock::now() - store_start);
     // A write-back still waiting from an earlier frame is older than this one.
     if (impl.writeback_ready.address == found) impl.writeback_has_pixels = false;
@@ -4456,6 +6358,51 @@ void VulkanRenderer::read_back_framebuffer(std::uint32_t source, GuestMemory &me
                   << " back for a block transfer\n";
 }
 
+namespace {
+
+// 480x272 RGBA pixels (red in the low byte) into guest framebuffer rows of
+// `stride` pixels in `format`: 8888 copied, the 16-bit formats packed a row at
+// a time into a buffer the compiler vectorises. The same bits as the
+// per-pixel conversion in store_frame().
+void store_rows(std::uint8_t *out, std::uint32_t stride, std::uint32_t format, const std::uint32_t *pixels) {
+    const std::size_t bytes_per_pixel = format == 3u ? 4u : 2u;
+    std::array<std::uint16_t, kPspWidth> packed{};
+    for (std::uint32_t y = 0; y < kPspHeight; ++y) {
+        const std::uint32_t *row = pixels + static_cast<std::size_t>(y) * kPspWidth;
+        std::uint8_t *line = out + static_cast<std::size_t>(y) * stride * bytes_per_pixel;
+        if (format == 3u) {
+            std::memcpy(line, row, static_cast<std::size_t>(kPspWidth) * 4u);
+            continue;
+        }
+        if (format == 0u) {
+            for (std::uint32_t x = 0; x < kPspWidth; ++x) {
+                const std::uint32_t pixel = row[x];
+                packed[x] = static_cast<std::uint16_t>(((pixel & 0xFFu) >> 3u) | (((pixel >> 8u) & 0xFFu) >> 2u) << 5u |
+                                                       (((pixel >> 16u) & 0xFFu) >> 3u) << 11u);
+            }
+        } else if (format == 1u) {
+            for (std::uint32_t x = 0; x < kPspWidth; ++x) {
+                const std::uint32_t pixel = row[x];
+                packed[x] = static_cast<std::uint16_t>(((pixel & 0xFFu) >> 3u) | (((pixel >> 8u) & 0xFFu) >> 3u) << 5u |
+                                                       (((pixel >> 16u) & 0xFFu) >> 3u) << 10u |
+                                                       (pixel >> 31u) << 15u);
+            }
+        } else {
+            for (std::uint32_t x = 0; x < kPspWidth; ++x) {
+                const std::uint32_t pixel = row[x];
+                packed[x] = static_cast<std::uint16_t>(((pixel & 0xFFu) >> 4u) | (((pixel >> 8u) & 0xFFu) >> 4u) << 4u |
+                                                       (((pixel >> 16u) & 0xFFu) >> 4u) << 8u |
+                                                       (pixel >> 28u) << 12u);
+            }
+        }
+        // Guest memory is little-endian, as every host this runs on.
+        static_assert(std::endian::native == std::endian::little);
+        std::memcpy(line, packed.data(), static_cast<std::size_t>(kPspWidth) * 2u);
+    }
+}
+
+} // namespace
+
 void VulkanRenderer::Impl::store_frame(GuestMemory &memory, const WritebackFrame &frame,
                                        const std::uint32_t *pixels) {
     Impl &impl = *this;
@@ -4463,6 +6410,16 @@ void VulkanRenderer::Impl::store_frame(GuestMemory &memory, const WritebackFrame
     const std::size_t bytes = static_cast<std::size_t>(frame.stride) * kPspHeight * bytes_per_pixel;
     std::uint8_t *out = memory.raw_pointer(frame.address, bytes);
     if (out == nullptr) return;
+    // <prefix>_NO_FAST_STORE converts pixel by pixel into guest memory, as
+    // before, instead of a whole row at a time into a buffer the compiler can
+    // vectorise; the bytes written are the same.
+    static const bool slow_store = portablekit::env("NO_FAST_STORE") != nullptr;
+    if (!slow_store && !perf::alternate_off(perf::NewPath::Store)) {
+        store_rows(out, frame.stride, frame.format, pixels);
+        const auto target = impl.targets.find(frame.address);
+        if (target != impl.targets.end()) impl.snapshot_guest_words(memory, frame.address, target->second);
+        return;
+    }
     for (std::uint32_t y = 0; y < kPspHeight; ++y) {
         const std::uint32_t *row = pixels + static_cast<std::size_t>(y) * kPspWidth;
         std::uint8_t *line = out + static_cast<std::size_t>(y) * frame.stride * bytes_per_pixel;
@@ -4505,9 +6462,10 @@ std::int64_t to_us(std::chrono::steady_clock::time_point time) {
 } // namespace
 
 double VulkanRenderer::Impl::wanted_rate() const {
-    double rate = 30.0;
+    const double own = pacing::game_rate();
+    double rate = own;
     switch (frame_rate) {
-    case settings::FrameRate::Fps30: rate = 30.0; break;
+    case settings::FrameRate::Fps30: rate = own; break;
     case settings::FrameRate::Fps45: rate = 45.0; break;
     case settings::FrameRate::Fps60: rate = 60.0; break;
     case settings::FrameRate::Fps90: rate = 90.0; break;
@@ -4518,14 +6476,14 @@ double VulkanRenderer::Impl::wanted_rate() const {
     // would wait for it with the game's time.
     if (present_mode == VK_PRESENT_MODE_FIFO_KHR && display_hz >= 1.0f)
         rate = std::min(rate, static_cast<double>(display_hz));
-    return std::max(rate, 30.0);
+    return std::max(rate, own);
 }
 
 bool VulkanRenderer::Impl::interpolation_wanted() const {
     // Emulated time running ahead of real time already presents faster than
     // the game's own rate; the keyboard's held frame is shown as it is.
-    return frame_rate != settings::FrameRate::Fps30 && !settings::current().unthrottled && !holding &&
-           governor.rate() > 30.5;
+    return frame_rate != settings::FrameRate::Fps30 && !settings::current().unthrottled && !holding && !fast_forward &&
+           governor.rate() > pacing::game_rate() + 0.5;
 }
 
 // Keeps what drawing a draw again needs: a new group for a draw call the
@@ -4533,10 +6491,11 @@ bool VulkanRenderer::Impl::interpolation_wanted() const {
 void VulkanRenderer::Impl::record_draw_for_replay(const DrawCall &call, bool lit, std::uint32_t skinned,
                                                   const DrawState &state, VkDeviceSize vertex_start,
                                                   VkBuffer indices, VkDeviceSize index_start, std::uint32_t count,
-                                                  std::uint32_t vertex_count, bool joined) {
+                                                  std::uint32_t vertex_count, bool joined, bool raw) {
     if (!interpolating) return;
     FrameRecord &frame = recording_frame;
     if (!frame.recorded) return;
+    const perf::SplitScope split(perf::Split::Summary);
     if (joined && !frame.groups.empty()) {
         ReplayGroup &last = frame.groups.back();
         // The copies must follow each other as the vertices do; a draw given
@@ -4563,6 +6522,15 @@ void VulkanRenderer::Impl::record_draw_for_replay(const DrawCall &call, bool lit
             added.object = static_cast<std::uint32_t>(frame.objects.size() - 1u);
         }
         added.skinned = skinned;
+        added.raw = raw;
+        if (raw && ((call.vertex_type >> 9u) & 3u) != 0u) {
+            // A skinned raw group is blended through its bones.
+            if (frame.raws.empty() || frame.raw_offset != raw_offset) {
+                frame.raws.push_back(last_raw);
+                frame.raw_offset = raw_offset;
+            }
+            added.raw_block = static_cast<std::uint32_t>(frame.raws.size() - 1u);
+        }
         frame.groups.push_back(added);
     }
     ++frame.groups.back().draws;
@@ -4573,15 +6541,17 @@ void VulkanRenderer::Impl::record_draw_for_replay(const DrawCall &call, bool lit
 // Ends the frame's recording and submits it without presenting it: with
 // frame interpolation the presents between flips show it.
 void VulkanRenderer::Impl::submit_frame() {
+    const perf::SplitScope split(perf::Split::Present);
     end_pass();
     end_gpu_segment(command_buffer);
-    gpu_timer_pending = gpu_timer_used;
+    slots[slot].gpu_timer_pending = gpu_timer_used;
     vkEndCommandBuffer(command_buffer);
+    std::array<VkCommandBuffer, 2> batch{};
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    submit.commandBufferCount = 1u;
-    submit.pCommandBuffers = &command_buffer;
+    submit.commandBufferCount = frame_batch(command_buffer, batch);
+    submit.pCommandBuffers = batch.data();
     const perf::Clock::time_point submit_start = perf::Clock::now();
-    vkQueueSubmit(queue, 1u, &submit, frame_fence);
+    if (vkQueueSubmit(queue, 1u, &submit, frame_fence) == VK_ERROR_DEVICE_LOST) device_lost("a frame's submit");
     perf::add_wait_time(perf::Clock::now() - submit_start, perf::Stall::Submit);
     recording = false;
 }
@@ -4590,9 +6560,10 @@ void VulkanRenderer::Impl::submit_frame() {
 // copied, and it is matched against the frame before.
 void VulkanRenderer::Impl::finish_interpolated_frame(VkImage source, std::uint32_t displayed,
                                                      std::int64_t moment_us) {
+    const perf::SplitScope split(perf::Split::Interp);
     FrameRecord &frame = recording_frame;
     frame.recorded = frame.recorded && interpolating;
-    interpolation::mark_eligible(frame.summaries, displayed);
+    interpolation::mark_eligible(frame.summaries, displayed, cut_thresholds.orthographic);
     frame.displayed = displayed;
     frame.moment_us = moment_us;
     frame.valid = true;
@@ -4622,6 +6593,7 @@ void VulkanRenderer::Impl::finish_interpolated_frame(VkImage source, std::uint32
     copy.extent = {target_extent.width, target_extent.height, 1u};
     vkCmdCopyImage(command_buffer, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, picture.color,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &copy);
+    perf::count_target_copy();
     transition(command_buffer, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     transition(command_buffer, picture.color, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -4695,6 +6667,7 @@ bool VulkanRenderer::Impl::poll_presents(std::chrono::steady_clock::time_point n
 }
 
 bool VulkanRenderer::Impl::present_between(const pacing::PresentClock::Present &present, bool account) {
+    const perf::SplitScope split(perf::Split::Present);
     using Clock = std::chrono::steady_clock;
     const Clock::time_point start = Clock::now();
     InterpolationStats &stats = interpolation_stats;
@@ -4707,7 +6680,7 @@ bool VulkanRenderer::Impl::present_between(const pacing::PresentClock::Present &
     VkCommandBuffer commands = present_commands[slot];
     VkFence fence = present_fences[slot];
     const perf::Clock::time_point wait_start = perf::Clock::now();
-    vkWaitForFences(device, 1u, &fence, VK_TRUE, UINT64_MAX);
+    wait_fence(fence, "the wait for a present slot");
     perf::add_wait_time(perf::Clock::now() - wait_start, perf::Stall::Fence);
     if (present_timed[slot]) {
         std::array<std::uint64_t, 4> results{};
@@ -4726,13 +6699,24 @@ bool VulkanRenderer::Impl::present_between(const pacing::PresentClock::Present &
     // An image first, waiting at most 3 ms for one: when the display has
     // none free (it refreshes slower than the presents come), this present
     // is dropped rather than hold the game until the next refresh.
+#if defined(__ANDROID__)
+    check_native_window();
+    if (surface_returned) reset_surface();
+    if (surface_lost) return false;
+#endif
+    check_swapchain();
     if (swapchain_dirty || swapchain == VK_NULL_HANDLE) recreate_swapchain();
     if (swapchain == VK_NULL_HANDLE) return false;
     std::uint32_t image_index = 0u;
     const perf::Clock::time_point acquire_start = perf::Clock::now();
-    const VkResult acquired = vkAcquireNextImageKHR(device, swapchain, 3'000'000u, image_available, VK_NULL_HANDLE, &image_index);
+    const VkResult acquired =
+        vkAcquireNextImageKHR(device, swapchain, 3'000'000u, acquire_semaphore(commands), VK_NULL_HANDLE, &image_index);
     perf::add_wait_time(perf::Clock::now() - acquire_start, perf::Stall::Acquire);
     if (acquired == VK_ERROR_OUT_OF_DATE_KHR) swapchain_dirty = true;
+    if (acquired == VK_SUBOPTIMAL_KHR) swapchain_check = true;
+#if defined(__ANDROID__)
+    if (acquired == VK_ERROR_SURFACE_LOST_KHR) surface_returned = true;
+#endif
     if (acquired != VK_SUCCESS && acquired != VK_SUBOPTIMAL_KHR) {
         ++stats.blocked;
         if (account) perf::add_render_time(Clock::now() - start);
@@ -4740,6 +6724,7 @@ bool VulkanRenderer::Impl::present_between(const pacing::PresentClock::Present &
     }
     acquired_image = image_index;
     vkResetFences(device, 1u, &fence);
+    present_regions[slot] = 0u;
     vkResetCommandBuffer(commands, 0u);
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -4767,6 +6752,7 @@ bool VulkanRenderer::Impl::present_between(const pacing::PresentClock::Present &
             }
             const Clock::time_point replay_start = Clock::now();
             replay(commands, slot, present.t);
+            present_regions[slot] = replay_regions;
             stats.replay_time += Clock::now() - replay_start;
             if (present_timer != VK_NULL_HANDLE) {
                 vkCmdWriteTimestamp(commands, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, present_timer, slot * 2u + 1u);
@@ -4824,6 +6810,8 @@ bool VulkanRenderer::Impl::present_between(const pacing::PresentClock::Present &
 // interface, other framebuffers' content), are drawn as the older frame drew
 // them.
 void VulkanRenderer::Impl::replay(VkCommandBuffer commands, std::uint32_t slot, float t) {
+    const perf::SplitScope split(perf::Split::Replay);
+    breadcrumb(commands, "blended present, " + std::to_string(older_frame.groups.size()) + " draw calls");
     const FrameRecord &older = older_frame;
     const FrameRecord &newer = newer_frame;
     Target &target = blend_targets[slot];
@@ -4833,6 +6821,7 @@ void VulkanRenderer::Impl::replay(VkCommandBuffer commands, std::uint32_t slot, 
     pass.framebuffer = target.framebuffer;
     pass.renderArea = {{0, 0}, target_extent};
     vkCmdBeginRenderPass(commands, &pass, VK_SUBPASS_CONTENTS_INLINE);
+    perf::count_render_pass();
     // The game clears its framebuffer itself; start from a known state for
     // any part it does not.
     std::array<VkClearAttachment, 2> clears{};
@@ -4879,8 +6868,12 @@ void VulkanRenderer::Impl::replay(VkCommandBuffer commands, std::uint32_t slot, 
     static const bool flipbook_guard = portablekit::env("INTERPOLATION_NO_FLIPBOOK_GUARD") == nullptr;
     static const bool motion_guard = portablekit::env("INTERPOLATION_NO_MOTION_GUARD") == nullptr;
 
+    replay_regions = 0u;
     for (const ReplayGroup &drawn : older.groups) {
         if (drawn.target != older.displayed) continue;
+        // The regions this replay reads, for present_regions.
+        if (drawn.vertex_base < static_cast<VkDeviceSize>(kFrameRegions) * kVertexBufferBytes)
+            replay_regions |= 1u << static_cast<std::uint32_t>(drawn.vertex_base / kVertexBufferBytes);
         DrawState state = drawn.state;
         VkDeviceSize vertex_base = drawn.vertex_base;
         std::int32_t partner = -1;
@@ -4975,6 +6968,24 @@ void VulkanRenderer::Impl::replay(VkCommandBuffer commands, std::uint32_t slot, 
                 }
                 if (drawn.object == written_object && world == written_world) state.lighting[1] = written_offset;
             }
+            // A raw skinned group is skinned on the GPU: its bones are blended
+            // instead, which blends the skinned vertices the same way.
+            if (drawn.raw_block != kNone && next.raw_block != kNone && next.vertex_count == drawn.vertex_count) {
+                const RawBlock &a = older.raws[drawn.raw_block];
+                const RawBlock &b = newer.raws[next.raw_block];
+                if (a.format == b.format) {
+                    RawBlock blended = a;
+                    for (std::size_t i = 0; i < blended.bones.size(); ++i)
+                        blended.bones[i] += (b.bones[i] - blended.bones[i]) * t;
+                    const VkDeviceSize at =
+                        (scratch_at + uniform_alignment - 1u) / uniform_alignment * uniform_alignment;
+                    if (at + sizeof(RawBlock) <= scratch_end) {
+                        std::memcpy(mapped + at, &blended, sizeof(RawBlock));
+                        scratch_at = at + sizeof(RawBlock);
+                        state.lighting[2] = static_cast<std::uint32_t>(at);
+                    }
+                }
+            }
             // Skinning is linear in the bone matrices, so blending the skinned
             // vertices blends the bones.
             if (drawn.skinned != kNone && next.skinned != kNone && next.vertex_count == drawn.vertex_count) {
@@ -5022,7 +7033,8 @@ void VulkanRenderer::Impl::replay(VkCommandBuffer commands, std::uint32_t slot, 
         vkCmdBindVertexBuffers(commands, 0u, 1u, &vertex_buffer, &vertex_base);
         if (drawn.index_buffer != VK_NULL_HANDLE) {
             vkCmdBindIndexBuffer(commands, drawn.index_buffer, drawn.index_base, VK_INDEX_TYPE_UINT16);
-            vkCmdDrawIndexed(commands, drawn.count, 1u, 0u, 0, 0u);
+            vkCmdDrawIndexed(commands, drawn.count, 1u, 0u, 0,
+                             drawn.raw ? static_cast<std::uint32_t>(vertex_base) : 0u);
         } else {
             vkCmdDraw(commands, drawn.count, 1u, 0u, 0u);
         }
@@ -5372,7 +7384,22 @@ bool VulkanRenderer::present(std::uint32_t display_address,
     }
     // The game's frame as it is, at its flip.
     if (impl.cycle_active || impl.newer_frame.valid) impl.reset_interpolation();
-    impl.submit_and_present(source, true);
+    if (impl.fast_forward) {
+        // A load running fast: the flip is drawn, and shown only when the
+        // window has not had a picture for a while, so the display's refresh
+        // never holds the load back.
+        if (now - impl.fast_forward_shown < kFastForwardPresentInterval) {
+            impl.ui_draw_data = nullptr;
+            impl.submit_frame();
+            ++impl.frames;
+            return false;
+        }
+        impl.fast_forward_shown = now;
+    }
+    {
+        const perf::SplitScope split(perf::Split::Present);
+        impl.submit_and_present(source, true);
+    }
     ++impl.frames;
     if (impl.frame_rate != settings::FrameRate::Fps30) impl.report_interpolation();
     impl.follow_window();
@@ -5404,6 +7431,13 @@ void VulkanRenderer::present_until(std::chrono::steady_clock::time_point wake) {
     }
 }
 
+void VulkanRenderer::set_fast_forward(bool on) {
+    if (!impl_ || impl_->fast_forward == on) return;
+    impl_->fast_forward = on;
+    // The first flip of a fast stretch is shown.
+    impl_->fast_forward_shown = {};
+}
+
 void VulkanRenderer::pause_interpolation() {
     if (!impl_) return;
     // The game stands still: the presents it had scheduled are dropped and
@@ -5417,7 +7451,7 @@ void VulkanRenderer::set_frame_rate(settings::FrameRate rate) {
     Impl &impl = *impl_;
     if (impl.frame_rate == rate) return;
     impl.frame_rate = rate;
-    impl.governor.set_requested(rate == settings::FrameRate::Fps30 ? 30.0 : impl.wanted_rate());
+    impl.governor.set_requested(rate == settings::FrameRate::Fps30 ? pacing::game_rate() : impl.wanted_rate());
     impl.reset_interpolation();
     perf::set_frame_rate_info(rate == settings::FrameRate::Fps30 ? 0.0 : impl.governor.rate(),
                               rate == settings::FrameRate::Fps30 ? 0.0 : impl.governor.requested());
@@ -5433,7 +7467,7 @@ void VulkanRenderer::set_frame_rate_auto(bool automatic) {
 float VulkanRenderer::display_refresh() const noexcept { return impl_ ? impl_->display_hz : 0.0f; }
 
 double VulkanRenderer::frame_rate_now() const noexcept {
-    if (!impl_ || impl_->frame_rate == settings::FrameRate::Fps30) return 30.0;
+    if (!impl_ || impl_->frame_rate == settings::FrameRate::Fps30) return pacing::game_rate();
     return impl_->governor.rate();
 }
 
@@ -5532,23 +7566,54 @@ void VulkanRenderer::shutdown() {
     if (impl.ui_ready && ImGui::GetCurrentContext() != nullptr) ImGui_ImplVulkan_Shutdown();
     impl.ui_ready = false;
     impl.destroy_swapchain_views();
+#if defined(__ANDROID__)
+    impl.destroy_rotation_pipeline();
+#endif
     if (impl.ui_render_pass != VK_NULL_HANDLE) vkDestroyRenderPass(impl.device, impl.ui_render_pass, nullptr);
     for (auto &[key, texture] : impl.textures) impl.destroy_texture(texture);
     impl.textures.clear();
+    for (Impl::FrameSlot &frame : impl.slots) {
+        for (Impl::Texture &texture : frame.retired_textures) impl.destroy_texture(texture);
+        frame.retired_textures.clear();
+        for (const auto &[buffer, memory] : frame.retired_buffers) {
+            vkDestroyBuffer(impl.device, buffer, nullptr);
+            vkFreeMemory(impl.device, memory, nullptr);
+        }
+        frame.retired_buffers.clear();
+        if (frame.ring_mapped != nullptr) vkUnmapMemory(impl.device, frame.ring_memory);
+        vkDestroyBuffer(impl.device, frame.ring, nullptr);
+        vkFreeMemory(impl.device, frame.ring_memory, nullptr);
+    }
     impl.replacements.shutdown();
     impl.pack.reset();
     impl.dumper.reset();
     impl.destroy_texture(impl.white_texture);
-    if (impl.overlay_mapped != nullptr) vkUnmapMemory(impl.device, impl.overlay_staging_memory);
-    vkDestroyBuffer(impl.device, impl.overlay_staging, nullptr);
-    vkFreeMemory(impl.device, impl.overlay_staging_memory, nullptr);
+    for (Impl::Staging &staging : impl.overlay_staging) {
+        if (staging.mapped != nullptr) vkUnmapMemory(impl.device, staging.memory);
+        vkDestroyBuffer(impl.device, staging.buffer, nullptr);
+        vkFreeMemory(impl.device, staging.memory, nullptr);
+    }
     vkDestroyImageView(impl.device, impl.overlay_view, nullptr);
     vkDestroyImage(impl.device, impl.overlay_image, nullptr);
     vkFreeMemory(impl.device, impl.overlay_memory, nullptr);
     impl.destroy_upload();
     impl.destroy_writeback();
+    if (impl.breadcrumbs.mapped != nullptr) vkUnmapMemory(impl.device, impl.breadcrumbs.memory);
+    vkDestroyBuffer(impl.device, impl.breadcrumbs.buffer, nullptr);
+    vkFreeMemory(impl.device, impl.breadcrumbs.memory, nullptr);
+    impl.prewarm->stop = true;
+    if (impl.prewarm->thread.joinable()) impl.prewarm->thread.join();
+    if (impl.pipelines_prewarm_used != 0u)
+        std::cout << "[render] " << impl.pipelines_prewarm_used << " pipelines came from the background prewarm\n";
+    impl.report_pipelines(true);
+    impl.pending_textures.clear();
+    impl.decode_pool.reset();
+    if (impl.pipeline_cache != VK_NULL_HANDLE) vkDestroyPipelineCache(impl.device, impl.pipeline_cache, nullptr);
+    impl.pipeline_cache = VK_NULL_HANDLE;
     for (auto &[key, pipeline] : impl.pipelines) vkDestroyPipeline(impl.device, pipeline, nullptr);
     impl.pipelines.clear();
+    for (auto &[key, pipeline] : impl.prewarm->made) vkDestroyPipeline(impl.device, pipeline, nullptr);
+    impl.prewarm->made.clear();
     impl.last_pipeline = VK_NULL_HANDLE;
     if (impl.vertex_mapped != nullptr) vkUnmapMemory(impl.device, impl.vertex_memory);
     vkDestroyBuffer(impl.device, impl.vertex_buffer, nullptr);
@@ -5564,6 +7629,10 @@ void VulkanRenderer::shutdown() {
     vkDestroyDescriptorSetLayout(impl.device, impl.lighting_layout, nullptr);
     vkDestroyPipelineLayout(impl.device, impl.pipeline_layout, nullptr);
     vkDestroyShaderModule(impl.device, impl.vertex_shader, nullptr);
+    vkDestroyShaderModule(impl.device, impl.raw_vertex_shader, nullptr);
+    if (impl.check_mapped != nullptr) vkUnmapMemory(impl.device, impl.check_memory);
+    vkDestroyBuffer(impl.device, impl.check_buffer, nullptr);
+    vkFreeMemory(impl.device, impl.check_memory, nullptr);
     vkDestroyShaderModule(impl.device, impl.fragment_shader, nullptr);
     for (auto &[address, target] : impl.targets) impl.destroy_target(target);
     impl.targets.clear();
@@ -5574,14 +7643,19 @@ void VulkanRenderer::shutdown() {
     for (VkFence fence : impl.present_fences) vkDestroyFence(impl.device, fence, nullptr);
     if (impl.present_timer != VK_NULL_HANDLE) vkDestroyQueryPool(impl.device, impl.present_timer, nullptr);
     vkDestroyRenderPass(impl.device, impl.render_pass, nullptr);
-    vkDestroySemaphore(impl.device, impl.image_available, nullptr);
-    vkDestroySemaphore(impl.device, impl.render_finished, nullptr);
-    vkDestroyFence(impl.device, impl.frame_fence, nullptr);
+    for (VkRenderPass pass : impl.discard_passes)
+        if (pass != VK_NULL_HANDLE) vkDestroyRenderPass(impl.device, pass, nullptr);
+    for (VkSemaphore semaphore : impl.image_available) vkDestroySemaphore(impl.device, semaphore, nullptr);
+    for (VkSemaphore semaphore : impl.render_finished) vkDestroySemaphore(impl.device, semaphore, nullptr);
+    for (Impl::FrameSlot &frame : impl.slots) vkDestroyFence(impl.device, frame.fence, nullptr);
     if (impl.gpu_timer != VK_NULL_HANDLE) vkDestroyQueryPool(impl.device, impl.gpu_timer, nullptr);
     impl.destroy_upload_buffer();
     vkDestroyCommandPool(impl.device, impl.command_pool, nullptr);
     vkDestroySwapchainKHR(impl.device, impl.swapchain, nullptr);
     vkDestroyDevice(impl.device, nullptr);
+#if defined(__ANDROID__)
+    SDL_RemoveEventWatch(&Impl::watch_lifecycle, &impl);
+#endif
     if (impl.surface != VK_NULL_HANDLE) vkDestroySurfaceKHR(impl.instance, impl.surface, nullptr);
     vkDestroyInstance(impl.instance, nullptr);
     if (impl.window != nullptr) SDL_DestroyWindow(impl.window);
