@@ -264,6 +264,14 @@ function(portablekit_add_game target)
             "${CMAKE_CURRENT_BINARY_DIR}/generated_shaders"
             "${PORTABLEKIT_ROOT}/third_party/imgui")
         target_link_libraries(${target} PRIVATE SDL3::SDL3 Vulkan::Vulkan)
+        # Windows finds a DLL next to the executable or on PATH, and SDL3's
+        # development package puts it in neither: put it next to the
+        # executable, as the FFmpeg DLLs already are.
+        if(WIN32 AND TARGET SDL3::SDL3-shared)
+            add_custom_command(TARGET ${target} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "$<TARGET_FILE:SDL3::SDL3-shared>" "$<TARGET_FILE_DIR:${target}>")
+        endif()
     endif()
     target_include_directories(${target} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated_version")
     # The host only: the generated code never sees FFmpeg.
