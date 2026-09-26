@@ -4,6 +4,7 @@
 #include "../profile.hpp"
 #include "hle_common.hpp"
 
+#include "kernel/rtc_time.hpp"
 #include "overlays.hpp"
 
 #include "psprecomp/common.hpp"
@@ -13,8 +14,11 @@
 #include <cstring>
 #include <ctime>
 #include <iostream>
+#include <set>
+#include <string>
 
 namespace portablekit {
+void register_rtc_calendar(HleRegistrar &hle);
 namespace {
 
 // Epoch the virtual PSP clock starts at, so guest wall time advances with it.
@@ -192,6 +196,7 @@ void register_platform(HleRegistrar &hle) {
         if (arg(ctx, 0) != 0u) store64(rt.memory(), arg(ctx, 0), kUnixEpochTick + guest_unix_us());
         kernel().finish(ctx, 0u);
     });
+    register_rtc_calendar(hle);
     hle.add("sceImpose", "sceImposeSetLanguageMode", success);
     // (int *language, int *button): the console's, as GetSystemParamInt says.
     hle.add("sceImpose", "sceImposeGetLanguageMode", [](Runtime &rt, AllegrexContext &ctx) {
@@ -233,6 +238,125 @@ void register_platform(HleRegistrar &hle) {
 }
 
 } // namespace
+
+// ScePspDateTime: year, month, day, hour, minute, second (16-bit each), then
+// the microsecond (32-bit).
+rtc::DateTime read_date(const psprecomp::GuestMemory &memory, std::uint32_t address) {
+    rtc::DateTime date;
+    date.year = memory.load16(address);
+    date.month = memory.load16(address + 2u);
+    date.day = memory.load16(address + 4u);
+    date.hour = memory.load16(address + 6u);
+    date.minute = memory.load16(address + 8u);
+    date.second = memory.load16(address + 10u);
+    date.microsecond = memory.load32(address + 12u);
+    return date;
+}
+
+void write_date(psprecomp::GuestMemory &memory, std::uint32_t address, const rtc::DateTime &date) {
+    memory.store16(address, static_cast<std::uint16_t>(date.year));
+    memory.store16(address + 2u, static_cast<std::uint16_t>(date.month));
+    memory.store16(address + 4u, static_cast<std::uint16_t>(date.day));
+    memory.store16(address + 6u, static_cast<std::uint16_t>(date.hour));
+    memory.store16(address + 8u, static_cast<std::uint16_t>(date.minute));
+    memory.store16(address + 10u, static_cast<std::uint16_t>(date.second));
+    memory.store32(address + 12u, date.microsecond);
+}
+
+std::uint64_t load_tick(const psprecomp::GuestMemory &memory, std::uint32_t address) {
+    return static_cast<std::uint64_t>(memory.load32(address)) | static_cast<std::uint64_t>(memory.load32(address + 4u)) << 32u;
+}
+
+void rtc_unverified(const char *name) {
+    static std::set<std::string> said;
+    if (said.insert(name).second) std::cerr << "[rtc] " << name << " (UNVERIFIED: no game traced yet)\n";
+}
+
+// A date that does not exist: what the library answers has not been traced.
+constexpr std::uint32_t kRtcInvalidDate = 0xFFFFFFFFu;
+
+void register_rtc_calendar(HleRegistrar &hle) {
+    // sceRtcGetTick(const ScePspDateTime *, u64 *tick). Vice City Stories and
+    // Chinatown Wars import it and CompareTick, Chinatown Wars GetCurrentClock;
+    // none has been seen calling them yet. The calendar is rtc_time.hpp's,
+    // unit-tested.
+    hle.add("sceRtc", "sceRtcGetTick", [](Runtime &rt, AllegrexContext &ctx) {
+        rtc_unverified("sceRtcGetTick");
+        const auto tick = rtc::to_tick(read_date(rt.memory(), arg(ctx, 0)));
+        if (!tick) {
+            kernel().finish(ctx, kRtcInvalidDate);
+            return;
+        }
+        if (arg(ctx, 1) != 0u) store64(rt.memory(), arg(ctx, 1), *tick);
+        kernel().finish(ctx, 0u);
+    });
+    // sceRtcSetTick(ScePspDateTime *, const u64 *tick)
+    hle.add("sceRtc", "sceRtcSetTick", [](Runtime &rt, AllegrexContext &ctx) {
+        rtc_unverified("sceRtcSetTick");
+        write_date(rt.memory(), arg(ctx, 0), rtc::from_tick(load_tick(rt.memory(), arg(ctx, 1))));
+        kernel().finish(ctx, 0u);
+    });
+    // sceRtcCompareTick(const u64 *a, const u64 *b): 1, 0 or -1.
+    hle.add("sceRtc", "sceRtcCompareTick", [](Runtime &rt, AllegrexContext &ctx) {
+        rtc_unverified("sceRtcCompareTick");
+        const std::uint64_t a = load_tick(rt.memory(), arg(ctx, 0));
+        const std::uint64_t b = load_tick(rt.memory(), arg(ctx, 1));
+        kernel().finish(ctx, a > b ? 1u : a < b ? 0xFFFFFFFFu : 0u);
+    });
+    // sceRtcGetCurrentClock(ScePspDateTime *, int minutes east of UTC).
+    hle.add("sceRtc", "sceRtcGetCurrentClock", [](Runtime &rt, AllegrexContext &ctx) {
+        rtc_unverified("sceRtcGetCurrentClock");
+        const auto offset = static_cast<std::int64_t>(static_cast<std::int32_t>(arg(ctx, 1))) * 60 *
+                            static_cast<std::int64_t>(rtc::kTicksPerSecond);
+        const auto tick = static_cast<std::uint64_t>(static_cast<std::int64_t>(rtc::kUnixEpochTick + guest_unix_us()) + offset);
+        write_date(rt.memory(), arg(ctx, 0), rtc::from_tick(tick));
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("sceRtc", "sceRtcGetDayOfWeek", [](Runtime &, AllegrexContext &ctx) {
+        rtc_unverified("sceRtcGetDayOfWeek");
+        kernel().finish(ctx, static_cast<std::uint32_t>(rtc::day_of_week(static_cast<int>(arg(ctx, 0)),
+                                                                          static_cast<int>(arg(ctx, 1)),
+                                                                          static_cast<int>(arg(ctx, 2)))));
+    });
+    hle.add("sceRtc", "sceRtcGetDaysInMonth", [](Runtime &, AllegrexContext &ctx) {
+        rtc_unverified("sceRtcGetDaysInMonth");
+        kernel().finish(ctx, static_cast<std::uint32_t>(rtc::days_in_month(static_cast<int>(arg(ctx, 0)),
+                                                                            static_cast<int>(arg(ctx, 1)))));
+    });
+    hle.add("sceRtc", "sceRtcIsLeapYear", [](Runtime &, AllegrexContext &ctx) {
+        rtc_unverified("sceRtcIsLeapYear");
+        kernel().finish(ctx, rtc::is_leap_year(static_cast<int>(arg(ctx, 0))) ? 1u : 0u);
+    });
+    hle.add("sceRtc", "sceRtcCheckValid", [](Runtime &rt, AllegrexContext &ctx) {
+        rtc_unverified("sceRtcCheckValid");
+        kernel().finish(ctx, rtc::to_tick(read_date(rt.memory(), arg(ctx, 0))) ? 0u : kRtcInvalidDate);
+    });
+    hle.add("sceRtc", "sceRtcGetTickResolution", [](Runtime &, AllegrexContext &ctx) {
+        rtc_unverified("sceRtcGetTickResolution");
+        kernel().finish(ctx, static_cast<std::uint32_t>(rtc::kTicksPerSecond));
+    });
+    // sceRtcTickAdd*(u64 *dst, const u64 *src, amount): the 64-bit amounts
+    // come in a2:a3, the 32-bit ones in a2.
+    const auto add_ticks = [](const char *name, std::uint64_t unit, bool wide) {
+        return [name, unit, wide](Runtime &rt, AllegrexContext &ctx) {
+            rtc_unverified(name);
+            const std::int64_t amount =
+                wide ? static_cast<std::int64_t>(static_cast<std::uint64_t>(arg(ctx, 2)) |
+                                                 static_cast<std::uint64_t>(arg(ctx, 3)) << 32u)
+                     : static_cast<std::int64_t>(static_cast<std::int32_t>(arg(ctx, 2)));
+            const std::uint64_t source = load_tick(rt.memory(), arg(ctx, 1));
+            store64(rt.memory(), arg(ctx, 0), source + static_cast<std::uint64_t>(amount * static_cast<std::int64_t>(unit)));
+            kernel().finish(ctx, 0u);
+        };
+    };
+    hle.add("sceRtc", "sceRtcTickAddTicks", add_ticks("sceRtcTickAddTicks", 1u, true));
+    hle.add("sceRtc", "sceRtcTickAddMicroseconds", add_ticks("sceRtcTickAddMicroseconds", 1u, true));
+    hle.add("sceRtc", "sceRtcTickAddSeconds", add_ticks("sceRtcTickAddSeconds", rtc::kTicksPerSecond, true));
+    hle.add("sceRtc", "sceRtcTickAddMinutes", add_ticks("sceRtcTickAddMinutes", 60u * rtc::kTicksPerSecond, true));
+    hle.add("sceRtc", "sceRtcTickAddHours", add_ticks("sceRtcTickAddHours", 3600u * rtc::kTicksPerSecond, false));
+    hle.add("sceRtc", "sceRtcTickAddDays", add_ticks("sceRtcTickAddDays", rtc::kTicksPerDay, false));
+    hle.add("sceRtc", "sceRtcTickAddWeeks", add_ticks("sceRtcTickAddWeeks", 7u * rtc::kTicksPerDay, false));
+}
 
 void register_system(HleRegistrar &hle) {
     register_utils(hle);

@@ -283,6 +283,16 @@ if(PSPRECOMP_BUILD_TESTS)
     add_test(NAME portablekit_response_file_tests COMMAND portablekit_response_file_tests)
 endif()
 
+# sceRtc's calendar arithmetic.
+if(PSPRECOMP_BUILD_TESTS)
+    add_executable(portablekit_rtc_tests
+        "${PORTABLEKIT_ROOT}/tests/rtc_tests.cpp"
+        "${PORTABLEKIT_ROOT}/host/kernel/rtc_time.cpp")
+    target_include_directories(portablekit_rtc_tests PRIVATE "${PORTABLEKIT_ROOT}/host")
+    set_target_properties(portablekit_rtc_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME portablekit_rtc_tests COMMAND portablekit_rtc_tests)
+endif()
+
 # Each platform's settings defaults.
 if(PSPRECOMP_BUILD_TESTS)
     add_executable(portablekit_settings_tests
