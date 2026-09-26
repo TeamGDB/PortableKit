@@ -21,6 +21,9 @@ enum class OpcodeKind {
     Mfv, Mtv, Vpfx, Viim, Vfim, Vh2f, Vf2h, Vf2i, Vi2f, Vx2i, Vi2x, Vrnd, Vt5650, VmidT, Vmmov, VfpuMatrixInit, Vidt, Vcst, Vocp, VfpuHorizontal, Vrot, Vtfm, VfpuVectorInit, VfpuVec3, Vscl, Vdot, Vhdp, Vcmp, Vminmax, VfpuCompare3, Vcmov, VfpuUnary, Vmmul, Vmscl, VcrossQuat, Vcrs, Lvs, Svs, Lvq, Svq, Vsgn, Vsocp, Vbfy1,
     Syscall, Break,
     Vflush,
+    // Run through execute_extra_instruction() (extra_instructions.hpp): the
+    // user-mode instructions no game has been seen to run yet.
+    Extra,
     Vfpu,
     Unsupported,
 };

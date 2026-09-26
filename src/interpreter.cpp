@@ -3,6 +3,7 @@
 #include "psprecomp/allegrex_context.hpp"
 #include "psprecomp/common.hpp"
 #include "psprecomp/decoder.hpp"
+#include "psprecomp/extra_instructions.hpp"
 #include "psprecomp/guest_memory.hpp"
 #include "psprecomp/runtime.hpp"
 
@@ -696,6 +697,9 @@ bool execute_simple(Runtime &rt, AllegrexContext &ctx, const DecodedInstruction 
         break;
     case OpcodeKind::Vhdp:
         ctx.execute_vfpu_vhdp(vfpu_vd(d.word), vfpu_vs(d.word), vfpu_vt(d.word), vfpu_length(d.word));
+        break;
+    case OpcodeKind::Extra:
+        execute_extra_instruction(rt, ctx, pc, d.word);
         break;
     case OpcodeKind::Vcrs: {
         float source[4]{};

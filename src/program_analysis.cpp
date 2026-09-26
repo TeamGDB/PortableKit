@@ -233,6 +233,7 @@ void propagate_constant(const DecodedInstruction &decoded,
         break;
     case OpcodeKind::Unsupported:
     case OpcodeKind::Vfpu:
+    case OpcodeKind::Extra:
     case OpcodeKind::Syscall:
     case OpcodeKind::Break:
         clear_all_constants(constants);

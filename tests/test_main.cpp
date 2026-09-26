@@ -829,6 +829,270 @@ static void test_codegen_vh2f_lowering() {
 #endif
 }
 
+// --- Instructions no game has run yet (src/extra_instructions.cpp) ---------
+// Each expected value below was worked out by hand from the instruction's
+// description, not taken from running anything. The interpreter and the
+// recompiled code call the same function for these, so the interpreter's
+// result is also the recompiled code's; test_codegen_extra_instructions checks
+// that the generated code does make that call.
+
+namespace extra_test {
+constexpr std::uint32_t kSizeBits[5] = {0u, 0u, 0x80u, 0x8000u, 0x8080u};  // by lane count
+std::uint32_t vfpu3(std::uint32_t op, std::uint32_t sub, std::uint32_t vd, std::uint32_t vs, std::uint32_t vt,
+                    std::uint32_t lanes) {
+    return (op << 26u) | (sub << 23u) | (vt << 16u) | (vs << 8u) | vd | kSizeBits[lanes];
+}
+std::uint32_t vfpu4(std::uint32_t group, std::uint32_t operation, std::uint32_t vd, std::uint32_t vs,
+                    std::uint32_t lanes) {
+    return 0xD0000000u | (group << 21u) | (operation << 16u) | (vs << 8u) | vd | kSizeBits[lanes];
+}
+std::uint32_t quad_memory(std::uint32_t op, bool right, std::uint32_t rs, std::uint32_t vector, std::uint32_t offset) {
+    return (op << 26u) | (rs << 21u) | ((vector & 0x1Fu) << 16u) | (offset & 0xFFFCu) | (right ? 2u : 0u) |
+           ((vector >> 5u) & 1u);
+}
+float f(std::uint32_t bits) { return std::bit_cast<float>(bits); }
+std::uint32_t b(float value) { return std::bit_cast<std::uint32_t>(value); }
+
+// Runs `words` then jr ra under the interpreter, on ctx as the caller left it.
+void run(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx, std::vector<std::uint32_t> words,
+         const char *what) {
+    words.push_back(mips_r(31u, 0u, 0u, 0u, 0x08u));  // jr ra
+    words.push_back(0u);                              // nop
+    load_program(runtime, kInterpreterBase, words);
+    ctx.pc = kInterpreterBase;
+    ctx.gpr[31] = kInterpreterExit;
+    require(psprecomp::interpret_allegrex(runtime, ctx) == psprecomp::InterpreterExit::Dispatch, what);
+}
+void set(psprecomp::AllegrexContext &ctx, std::uint32_t reg, std::initializer_list<float> lanes) {
+    float values[4]{};
+    std::uint32_t n = 0u;
+    for (const float lane : lanes) values[n++] = lane;
+    ctx.write_vfpu_vector(values, reg, n);
+}
+void set_bits(psprecomp::AllegrexContext &ctx, std::uint32_t reg, std::initializer_list<std::uint32_t> lanes) {
+    float values[4]{};
+    std::uint32_t n = 0u;
+    for (const std::uint32_t lane : lanes) values[n++] = f(lane);
+    ctx.write_vfpu_vector(values, reg, n);
+}
+std::array<std::uint32_t, 4> get_bits(const psprecomp::AllegrexContext &ctx, std::uint32_t reg, std::uint32_t n) {
+    float values[4]{};
+    ctx.read_vfpu_vector(values, reg, n);
+    return {b(values[0]), b(values[1]), b(values[2]), b(values[3])};
+}
+} // namespace extra_test
+
+static void test_extra_instruction_decoding() {
+    using namespace extra_test;
+    const std::pair<std::uint32_t, const char *> cases[] = {
+        {0xC0000000u, "ll"}, {0xE0000000u, "sc"},
+        {quad_memory(0x35u, false, 4u, 0u, 8u), "lvl.q"}, {quad_memory(0x35u, true, 4u, 0u, 8u), "lvr.q"},
+        {quad_memory(0x3Du, false, 4u, 0u, 8u), "svl.q"}, {quad_memory(0x3Du, true, 4u, 0u, 8u), "svr.q"},
+        {vfpu3(0x18u, 2u, 2u, 0u, 1u, 1u), "vsbn"}, {vfpu3(0x19u, 6u, 2u, 0u, 1u, 2u), "vdet"},
+        {0xD3000000u | (130u << 16u), "vwbn"}, {vfpu4(1u, 0u, 0u, 0u, 1u), "vrnds"},
+        {vfpu4(1u, 22u, 0u, 0u, 1u), "vsbz"}, {vfpu4(1u, 23u, 0u, 0u, 1u), "vlgb"},
+        {vfpu4(1u, 29u, 0u, 0u, 4u), "vi2c"}, {vfpu4(1u, 30u, 0u, 0u, 4u), "vi2us"},
+        {vfpu4(2u, 0u, 0u, 0u, 4u), "vsrt1"}, {vfpu4(2u, 1u, 0u, 0u, 4u), "vsrt2"},
+        {vfpu4(2u, 8u, 0u, 0u, 4u), "vsrt3"}, {vfpu4(2u, 9u, 0u, 0u, 4u), "vsrt4"},
+        {vfpu4(2u, 3u, 0u, 0u, 4u), "vbfy2"}, {vfpu4(2u, 16u, 0u, 3u, 1u), "vmfvc"},
+        {vfpu4(2u, 17u, 3u, 0u, 1u), "vmtvc"}, {vfpu4(2u, 25u, 0u, 0u, 2u), "vt4444"},
+        {vfpu4(2u, 26u, 0u, 0u, 2u), "vt5551"},
+    };
+    for (const auto &[word, name] : cases) {
+        const auto decoded = psprecomp::decode_allegrex(word);
+        require(decoded.kind == psprecomp::OpcodeKind::Extra && decoded.mnemonic == name,
+                (std::string("extra instruction decoded wrongly: ") + name).c_str());
+    }
+    // Their neighbours keep their own decoding.
+    require(psprecomp::decode_allegrex(vfpu4(1u, 28u, 0u, 0u, 4u)).kind == psprecomp::OpcodeKind::Vi2x, "vi2uc moved");
+    require(psprecomp::decode_allegrex(vfpu4(1u, 31u, 0u, 0u, 4u)).kind == psprecomp::OpcodeKind::Vi2x, "vi2s moved");
+    require(psprecomp::decode_allegrex(vfpu4(2u, 2u, 0u, 0u, 4u)).kind == psprecomp::OpcodeKind::Vbfy1, "vbfy1 moved");
+    require(psprecomp::decode_allegrex(vfpu4(2u, 27u, 0u, 0u, 4u)).kind == psprecomp::OpcodeKind::Vt5650, "vt5650 moved");
+    require(psprecomp::decode_allegrex(vfpu3(0x18u, 7u, 0u, 0u, 0u, 1u)).kind == psprecomp::OpcodeKind::VfpuVec3, "vdiv moved");
+    require(psprecomp::decode_allegrex(0xD8800000u).kind == psprecomp::OpcodeKind::Lvq, "lv.q moved");
+    require(psprecomp::decode_allegrex(0xF8800000u).kind == psprecomp::OpcodeKind::Svq, "sv.q moved");
+}
+
+static void test_extra_instruction_semantics() {
+    using namespace extra_test;
+    psprecomp::Runtime runtime;
+    runtime.register_function(kInterpreterExit, &interpreter_exit_function, "interpreter_exit");
+
+    { // vsbn.s S020, S000, S010: 3.0 (1.5 * 2^1) with exponent 127 + 2 is 6.0.
+        psprecomp::AllegrexContext ctx{};
+        ctx.eat_vfpu_prefixes();
+        set(ctx, 0u, {3.0f});
+        set_bits(ctx, 1u, {2u});
+        run(runtime, ctx, {vfpu3(0x18u, 2u, 2u, 0u, 1u, 1u)}, "vsbn");
+        require(get_bits(ctx, 2u, 1u)[0] == b(6.0f), "vsbn gave the wrong result");
+    }
+    { // vdet.p S020, C000, C010: 2*7 - 3*5 = -1.
+        psprecomp::AllegrexContext ctx{};
+        ctx.eat_vfpu_prefixes();
+        set(ctx, 0u, {2.0f, 3.0f});
+        set(ctx, 1u, {5.0f, 7.0f});
+        run(runtime, ctx, {vfpu3(0x19u, 6u, 2u, 0u, 1u, 2u)}, "vdet");
+        require(get_bits(ctx, 2u, 1u)[0] == b(-1.0f), "vdet gave the wrong result");
+    }
+    { // vwbn.s S020, S000, 130: 3.0's mantissa 0xC00000 shifted right by 2 is
+      // 0x300000, under exponent 130: 0x41300000 (11.0).
+        psprecomp::AllegrexContext ctx{};
+        ctx.eat_vfpu_prefixes();
+        set(ctx, 0u, {3.0f});
+        run(runtime, ctx, {0xD3000000u | (130u << 16u) | (0u << 8u) | 2u}, "vwbn");
+        require(get_bits(ctx, 2u, 1u)[0] == 0x41300000u, "vwbn gave the wrong result");
+    }
+    { // vsbz.s S020, S000: -6.0 (0xC0C00000) becomes 0x3FC00000 (1.5), sign gone.
+      // vlgb.s S030, S000: 6.0's exponent is 2.
+        psprecomp::AllegrexContext ctx{};
+        ctx.eat_vfpu_prefixes();
+        set(ctx, 0u, {-6.0f});
+        set(ctx, 1u, {6.0f});
+        set(ctx, 4u, {0.0f});
+        run(runtime, ctx, {vfpu4(1u, 22u, 2u, 0u, 1u), vfpu4(1u, 23u, 3u, 1u, 1u), vfpu4(1u, 23u, 5u, 4u, 1u)},
+            "vsbz/vlgb");
+        require(get_bits(ctx, 2u, 1u)[0] == 0x3FC00000u, "vsbz gave the wrong result");
+        require(get_bits(ctx, 3u, 1u)[0] == b(2.0f), "vlgb gave the wrong result");
+        require(get_bits(ctx, 5u, 1u)[0] == b(-INFINITY), "vlgb of zero is not -infinity");
+    }
+    { // vi2c.q S020, C010: top bytes 7F 80 01 FF -> 0xFF01807F.
+      // vi2us.q C020, C010 on (0x40000000, -5, 0x00018000, 0x7FFFFFFF):
+      // 0x8000, 0, 3, 0xFFFF -> (0x00008000, 0xFFFF0003).
+        psprecomp::AllegrexContext ctx{};
+        ctx.eat_vfpu_prefixes();
+        set_bits(ctx, 1u, {0x7F000000u, 0x80000000u, 0x01FFFFFFu, 0xFF000000u});
+        run(runtime, ctx, {vfpu4(1u, 29u, 2u, 1u, 4u)}, "vi2c");
+        require(get_bits(ctx, 2u, 1u)[0] == 0xFF01807Fu, "vi2c gave the wrong result");
+        set_bits(ctx, 1u, {0x40000000u, static_cast<std::uint32_t>(-5), 0x00018000u, 0x7FFFFFFFu});
+        run(runtime, ctx, {vfpu4(1u, 30u, 2u, 1u, 4u)}, "vi2us");
+        const auto packed = get_bits(ctx, 2u, 2u);
+        require(packed[0] == 0x00008000u && packed[1] == 0xFFFF0003u, "vi2us gave the wrong result");
+    }
+    { // The sort steps on (4, 1, 3, 2), and vbfy2 on (1, 2, 3, 4).
+        psprecomp::AllegrexContext ctx{};
+        ctx.eat_vfpu_prefixes();
+        const std::pair<std::uint32_t, std::array<float, 4>> steps[] = {
+            {0u, {1.0f, 4.0f, 2.0f, 3.0f}}, {1u, {2.0f, 1.0f, 3.0f, 4.0f}},
+            {8u, {4.0f, 1.0f, 3.0f, 2.0f}}, {9u, {4.0f, 3.0f, 1.0f, 2.0f}},
+        };
+        for (const auto &[operation, expected] : steps) {
+            set(ctx, 1u, {4.0f, 1.0f, 3.0f, 2.0f});
+            run(runtime, ctx, {vfpu4(2u, operation, 2u, 1u, 4u)}, "vsrt");
+            const auto result = get_bits(ctx, 2u, 4u);
+            for (std::uint32_t lane = 0u; lane < 4u; ++lane)
+                require(result[lane] == b(expected[lane]), "a vsrt step gave the wrong result");
+        }
+        set(ctx, 1u, {1.0f, 2.0f, 3.0f, 4.0f});
+        run(runtime, ctx, {vfpu4(2u, 3u, 2u, 1u, 4u)}, "vbfy2");
+        const auto result = get_bits(ctx, 2u, 4u);
+        require(result[0] == b(4.0f) && result[1] == b(6.0f) && result[2] == b(-2.0f) && result[3] == b(-2.0f),
+                "vbfy2 gave the wrong result");
+    }
+    { // vmfvc S000, VFPU_CC (control 3); vmtvc S001 into control 3.
+        psprecomp::AllegrexContext ctx{};
+        ctx.eat_vfpu_prefixes();
+        ctx.vfpu_ctrl[3] = 0x25u;
+        run(runtime, ctx, {vfpu4(2u, 16u, 0u, 3u, 1u)}, "vmfvc");
+        require(get_bits(ctx, 0u, 1u)[0] == 0x25u, "vmfvc did not read the control register");
+        set_bits(ctx, 1u, {0x3Fu});
+        run(runtime, ctx, {vfpu4(2u, 17u, 3u, 1u, 1u)}, "vmtvc");
+        require(ctx.vfpu_ctrl[3] == 0x3Fu, "vmtvc did not write the control register");
+    }
+    { // vt4444.p / vt5551.p on (0xFF804020, 0x10204080).
+      // 4444: F842 and 1248; 5551: C104 and 1110.
+        psprecomp::AllegrexContext ctx{};
+        ctx.eat_vfpu_prefixes();
+        set_bits(ctx, 1u, {0xFF804020u, 0x10204080u});
+        run(runtime, ctx, {vfpu4(2u, 25u, 2u, 1u, 2u), vfpu4(2u, 26u, 3u, 1u, 2u)}, "vt4444/vt5551");
+        require(get_bits(ctx, 2u, 1u)[0] == 0x1248F842u, "vt4444 gave the wrong result");
+        require(get_bits(ctx, 3u, 1u)[0] == 0x1110C104u, "vt5551 gave the wrong result");
+    }
+    { // vrnds S000 seeds the generator from S000's bits.
+        psprecomp::AllegrexContext ctx{};
+        ctx.eat_vfpu_prefixes();
+        set_bits(ctx, 0u, {42u});
+        run(runtime, ctx, {vfpu4(1u, 0u, 0u, 0u, 1u)}, "vrnds");
+        require(ctx.vfpu_ctrl[8] == (42u ^ 0x9E3779B9u), "vrnds did not seed the generator");
+    }
+    { // lvl.q / lvr.q / svl.q / svr.q at a0 + 8, the third word of the line.
+        psprecomp::AllegrexContext ctx{};
+        ctx.eat_vfpu_prefixes();
+        for (std::uint32_t i = 0u; i < 4u; ++i) runtime.memory().store32(kInterpreterScratch + 4u * i, 0xA0u + i);
+        ctx.gpr[4] = kInterpreterScratch;
+        set_bits(ctx, 0u, {1u, 2u, 3u, 4u});
+        run(runtime, ctx, {quad_memory(0x35u, false, 4u, 0u, 8u)}, "lvl.q");
+        auto lanes = get_bits(ctx, 0u, 4u);
+        require(lanes[0] == 1u && lanes[1] == 0xA0u && lanes[2] == 0xA1u && lanes[3] == 0xA2u, "lvl.q loaded the wrong lanes");
+        set_bits(ctx, 0u, {1u, 2u, 3u, 4u});
+        run(runtime, ctx, {quad_memory(0x35u, true, 4u, 0u, 8u)}, "lvr.q");
+        lanes = get_bits(ctx, 0u, 4u);
+        require(lanes[0] == 0xA2u && lanes[1] == 0xA3u && lanes[2] == 3u && lanes[3] == 4u, "lvr.q loaded the wrong lanes");
+        set_bits(ctx, 0u, {0xB0u, 0xB1u, 0xB2u, 0xB3u});
+        run(runtime, ctx, {quad_memory(0x3Du, false, 4u, 0u, 8u)}, "svl.q");
+        auto &memory = runtime.memory();
+        require(memory.load32(kInterpreterScratch) == 0xB1u && memory.load32(kInterpreterScratch + 4u) == 0xB2u &&
+                    memory.load32(kInterpreterScratch + 8u) == 0xB3u && memory.load32(kInterpreterScratch + 12u) == 0xA3u,
+                "svl.q stored the wrong lanes");
+        run(runtime, ctx, {quad_memory(0x3Du, true, 4u, 0u, 8u)}, "svr.q");
+        require(memory.load32(kInterpreterScratch + 8u) == 0xB0u && memory.load32(kInterpreterScratch + 12u) == 0xB1u &&
+                    memory.load32(kInterpreterScratch + 4u) == 0xB2u,
+                "svr.q stored the wrong lanes");
+    }
+    { // ll t0, 4(a0); sc t1, 8(a0): t0 is the word, the store happens, t1 = 1.
+        psprecomp::AllegrexContext ctx{};
+        runtime.memory().store32(kInterpreterScratch + 4u, 0x12345678u);
+        ctx.gpr[4] = kInterpreterScratch;
+        ctx.gpr[9] = 0xCAFEF00Du;
+        run(runtime, ctx, {mips_i(0x30u, 4u, 8u, 4u), mips_i(0x38u, 4u, 9u, 8u)}, "ll/sc");
+        require(ctx.gpr[8] == 0x12345678u, "ll loaded the wrong word");
+        require(runtime.memory().load32(kInterpreterScratch + 8u) == 0xCAFEF00Du, "sc did not store");
+        require(ctx.gpr[9] == 1u, "sc did not report success");
+    }
+}
+
+static std::vector<std::uint8_t> make_extra_instruction_test_elf() {
+    auto bytes = make_branch_delay_test_elf();
+    const std::uint32_t code[] = {
+        0xC0880004u,                                // ll   t0, 4(a0)
+        extra_test::vfpu3(0x18u, 2u, 2u, 0u, 1u, 1u), // vsbn.s S020, S000, S010
+        0x03E00008u,                                // jr ra
+        0x00000000u,                                // nop
+    };
+    for (std::size_t i = 0; i < std::size(code); ++i) put32(bytes, 0x80u + i * 4u, code[i]);
+    return bytes;
+}
+
+static void test_codegen_extra_instructions() {
+#ifndef PSPRECOMP_CODEGEN_PATH
+    throw std::runtime_error("PSPRECOMP_CODEGEN_PATH was not provided by CMake");
+#else
+    const auto root = std::filesystem::temp_directory_path() / "psprecomp_extra_codegen_test";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    const auto elf_path = root / "extra.elf";
+    const auto csv_path = root / "functions.csv";
+    const auto cpp_path = root / "generated.cpp";
+    const auto bytes = make_extra_instruction_test_elf();
+    { std::ofstream out(elf_path, std::ios::binary); out.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size())); }
+    { std::ofstream out(csv_path); out << "name,address,size\nextra_test,0x08804000,0x00000010\n"; }
+    const std::string command = shell_quote(codegen_tool_path()) + " " + shell_quote(elf_path) + " " + shell_quote(csv_path) + " " + shell_quote(cpp_path);
+    require(std::system(shell_command(command).c_str()) == 0, "psp_recomp extra-instruction fixture generation failed");
+    std::string text;
+    {
+        std::ifstream generated(cpp_path);
+        text.assign((std::istreambuf_iterator<char>(generated)), std::istreambuf_iterator<char>());
+    }
+    require(text.find("void execute_extra_instruction(Runtime &, AllegrexContext &, std::uint32_t, std::uint32_t);") != std::string::npos,
+            "a unit with an extra instruction does not declare execute_extra_instruction");
+    require(text.find("execute_extra_instruction(rt, ctx, 0x08804000u, 0xC0880004u)") != std::string::npos,
+            "LL was not lowered to execute_extra_instruction");
+    require(text.find("execute_extra_instruction(rt, ctx, 0x08804004u, ") != std::string::npos,
+            "VSBN was not lowered to execute_extra_instruction");
+    require(text.find("not lowered yet") == std::string::npos, "an extra instruction was left unsupported");
+    std::filesystem::remove_all(root);
+#endif
+}
+
 static std::vector<std::uint8_t> make_function_pointer_test_elf() {
     std::vector<std::uint8_t> bytes(0xB0u, 0u);
     bytes[0] = 0x7Fu; bytes[1] = 'E'; bytes[2] = 'L'; bytes[3] = 'F';
@@ -1915,6 +2179,9 @@ int main() {
         test_codegen_link_branch_before_delay_slot();
         test_codegen_zero_divisor_constant_folding();
         test_codegen_vh2f_lowering();
+        test_extra_instruction_decoding();
+        test_extra_instruction_semantics();
+        test_codegen_extra_instructions();
         test_vfpu_branch_cfg_discovery();
         test_automatic_cfg_and_codegen();
         test_automatic_cross_unit_tail_chaining();
