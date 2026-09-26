@@ -84,6 +84,10 @@ void register_atrac(HleRegistrar &hle);
 void register_mpeg(HleRegistrar &hle);
 void register_psmfplayer(HleRegistrar &hle);
 void register_psmf(HleRegistrar &hle);
+// A picture the CPU wrote into a VRAM framebuffer, handed to the renderer
+// (hle_media.cpp).
+void show_cpu_picture_in_vram(Runtime &rt, std::uint32_t address, std::uint32_t width, std::uint32_t height,
+                              std::uint32_t stride, std::uint32_t pixel_mode);
 void register_net_offline(HleRegistrar &hle);
 void register_font(HleRegistrar &hle);
 void register_utility(HleRegistrar &hle, const std::filesystem::path &memory_stick);

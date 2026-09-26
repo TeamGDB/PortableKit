@@ -521,7 +521,10 @@ void register_decoding(HleRegistrar &hle) {
         if (width == 0u) width = state->default_frame_width != 0u ? state->default_frame_width : state->picture.width;
         if (produced) {
             ++state->pictures;
-            store_pixels(memory, memory.load32(arg(ctx, 3)), width, state->pixel_mode, state->picture);
+            const std::uint32_t destination = memory.load32(arg(ctx, 3));
+            store_pixels(memory, destination, width, state->pixel_mode, state->picture);
+            show_cpu_picture_in_vram(rt, destination, state->picture.width, state->picture.height, width,
+                                     state->pixel_mode);
         }
         if (arg(ctx, 4) != 0u) memory.store32(arg(ctx, 4), produced ? 1u : 0u);
         finish_traced(ctx, "sceMpegAvcDecode", 0u,

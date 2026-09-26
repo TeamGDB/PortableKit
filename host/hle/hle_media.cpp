@@ -1098,6 +1098,27 @@ void initialize_renderer() {
 #endif
 }
 
+// A picture the CPU wrote straight into a VRAM framebuffer (the movie
+// player decoding into the display buffers, as God of War's does): the
+// renderer keeps each framebuffer on the GPU, so the pixels go to that
+// framebuffer's target, and what the GE draws afterwards (subtitles) lands
+// on top. 32-bit pixels only. <prefix>_NO_VRAM_UPLOAD turns it off.
+void show_cpu_picture_in_vram(Runtime &rt, std::uint32_t address, std::uint32_t width, std::uint32_t height,
+                              std::uint32_t stride, std::uint32_t pixel_mode) {
+#if defined(PORTABLEKIT_HAS_RENDERER)
+    static const bool off = portablekit::env("NO_VRAM_UPLOAD") != nullptr;
+    if (off || (address & 0x1F000000u) != kEdramBase || !media().renderer || !media().renderer->available()) return;
+    if (pixel_mode != 3u) {
+        log_once("vram-upload-format", "[mpeg] a picture decoded into VRAM in a 16-bit format is not shown");
+        return;
+    }
+    const std::size_t bytes = static_cast<std::size_t>(stride) * height * 4u;
+    media().renderer->upload_frame(address | kEdramBase, rt.memory().raw_pointer(address, bytes), width, height, stride);
+#else
+    (void)rt, (void)address, (void)width, (void)height, (void)stride, (void)pixel_mode;
+#endif
+}
+
 void register_media(HleRegistrar &hle) {
     initialize_renderer();
     register_display_ctrl(hle);
