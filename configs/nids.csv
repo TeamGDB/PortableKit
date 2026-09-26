@@ -29,6 +29,7 @@ IoFileMgrForUser,0xB29DDF9C,sceIoDopen
 IoFileMgrForUser,0xE3EB004C,sceIoDread
 IoFileMgrForUser,0xEB092469,sceIoDclose
 IoFileMgrForUser,0xB8A740F4,sceIoChstat
+IoFileMgrForUser,0x55F4717D,sceIoChdir
 Kernel_Library,0x092968F4,sceKernelCpuSuspendIntr
 Kernel_Library,0x15B6446B,sceKernelUnlockLwMutex
 Kernel_Library,0x1839852A,sceKernelMemcpy

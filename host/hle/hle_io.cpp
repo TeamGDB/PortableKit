@@ -116,6 +116,9 @@ struct IoState {
     std::uint32_t next_fd{3u};
     std::map<std::uint32_t, DiscReadAhead> read_ahead;
     std::uint32_t next_read_ahead{1u};
+    // sceIoChdir's directory ("device:/path"), which a path without a device
+    // is relative to; empty until a game sets one, and then the disc's root.
+    std::string current_directory;
 };
 
 IoState &io() {
@@ -143,8 +146,16 @@ struct SplitPath {
     std::string path;  // without device, '/' separated, no leading '/'
 };
 
-SplitPath split_path(const std::string &full) {
+SplitPath split_path(const std::string &given) {
     SplitPath result;
+    std::string full = given;
+    if (full.find(':') == std::string::npos && !io().current_directory.empty()) {
+        const std::string &current = io().current_directory;
+        if (!full.empty() && (full[0] == '/' || full[0] == '\\'))
+            full = current.substr(0, current.find(':') + 1u) + full;
+        else
+            full = current + "/" + full;
+    }
     const auto colon = full.find(':');
     std::string device = colon == std::string::npos ? "disc0" : full.substr(0, colon);
     std::transform(device.begin(), device.end(), device.begin(), [](unsigned char c) { return std::tolower(c); });
@@ -208,7 +219,9 @@ std::int64_t open_file(const std::string &full_path, std::uint32_t flags) {
     file.path = full_path;
     if (split.device == Device::Disc) {
         if (!io().disc) return static_cast<std::int32_t>(io_error::kDeviceNotFound);
-        if ((flags & kOpenWrite) != 0u) return static_cast<std::int32_t>(io_error::kReadOnly);
+        // Write access is not refused at the open: God of War (UCES00842)
+        // opens its disc archives read-write (flags 0x3) and cannot go on
+        // without them. Writes to a disc file are what fail.
         if (split.path.empty()) {
             // The device itself, with no path: the whole image as a stream of
             // sectors, which is how a game reads the disc without going
@@ -653,6 +666,29 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
         kernel().finish64(ctx, static_cast<std::uint64_t>(lseek_op(arg(ctx, 0), static_cast<std::int64_t>(arg64(ctx, 2)), arg(ctx, 4))));
     });
     register_async_io(hle);
+    // sceIoChdir(path): the directory later paths without a device are
+    // relative to. God of War (UCES00842) sets it at start-up.
+    hle.add("IoFileMgrForUser", "sceIoChdir", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::string path = read_cstring(rt.memory(), arg(ctx, 0), 256u);
+        const SplitPath split = split_path(path);
+        std::uint32_t result = 0u;
+        if (split.device == Device::Disc) {
+            std::optional<IsoImage::Entry> entry;
+            if (io().disc) entry = io().disc->find(split.path);
+            if (!split.path.empty() && (!entry || !entry->directory)) result = io_error::kFileNotFound;
+        } else if (split.device == Device::MemoryStick) {
+            std::error_code ec;
+            if (!std::filesystem::is_directory(host_path(split.path), ec)) result = io_error::kFileNotFound;
+        } else {
+            result = io_error::kDeviceNotFound;
+        }
+        if (result == 0u) {
+            const std::string device = split.device == Device::Disc ? "disc0:" : "ms0:";
+            io().current_directory = device + "/" + split.path;
+        }
+        if (trace_io()) std::cerr << "[io] chdir " << path << " -> " << psprecomp::hex32(result) << "\n";
+        kernel().finish(ctx, result);
+    });
     hle.add("IoFileMgrForUser", "sceIoGetstat", [](Runtime &rt, AllegrexContext &ctx) {
         const std::string path = read_cstring(rt.memory(), arg(ctx, 0), 256u);
         const SplitPath split = split_path(path);
@@ -740,7 +776,9 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
         write_stat(memory, dirent, entry.directory, entry.size, entry.lba);
         for (std::uint32_t i = 0; i < 256u; ++i)
             memory.store8(dirent + 88u + i, i < entry.name.size() ? static_cast<std::uint8_t>(entry.name[i]) : 0u);
-        if (trace_io()) std::cerr << "[io] dread " << directory.path << " -> " << entry.name << "\n";
+        if (trace_io())
+            std::cerr << "[io] dread " << directory.path << " -> " << entry.name << " lba=" << entry.lba
+                      << " size=" << entry.size << "\n";
         kernel().finish(ctx, 1u);
     });
     hle.add("IoFileMgrForUser", "sceIoDclose", [](Runtime &, AllegrexContext &ctx) {
