@@ -396,9 +396,37 @@ void register_semaphores(HleRegistrar &hle) {
 void register_event_flags(HleRegistrar &hle) {
     hle.add("ThreadManForUser", "sceKernelCreateEventFlag", [](Runtime &rt, AllegrexContext &ctx) {
         const SceUID uid = kernel().allocate_uid();
-        kernel().event_flags[uid] = EventFlag{read_cstring(rt.memory(), arg(ctx, 0), 32u), arg(ctx, 1), arg(ctx, 2), {}};
+        kernel().event_flags[uid] = EventFlag{read_cstring(rt.memory(), arg(ctx, 0), 32u), arg(ctx, 1), arg(ctx, 2), {}, arg(ctx, 2)};
         if (trace_sync()) log_sync("CreateEventFlag " + std::to_string(uid) + " " + kernel().event_flags[uid].name);
         kernel().finish(ctx, as_unsigned(uid));
+    });
+    // sceKernelReferEventFlagStatus(uid, SceKernelEventFlagInfo *info): size,
+    // name[32], attr, initPattern, currentPattern, numWaitThreads, as in
+    // pspthreadman.h; written up to the size the game gives. God of War
+    // (UCES00842) and Patapon (UCES00995) read the current pattern.
+    hle.add("ThreadManForUser", "sceKernelReferEventFlagStatus", [](Runtime &rt, AllegrexContext &ctx) {
+        const auto found = kernel().event_flags.find(as_signed(arg(ctx, 0)));
+        if (found == kernel().event_flags.end()) {
+            kernel().finish(ctx, error::kUnknownEvfid);
+            return;
+        }
+        const EventFlag &flag = found->second;
+        auto &memory = rt.memory();
+        const std::uint32_t info = arg(ctx, 1);
+        const std::uint32_t size = info != 0u ? memory.load32(info) : 0u;
+        std::array<std::uint8_t, 52> bytes{};
+        const auto put = [&bytes](std::size_t at, std::uint32_t value) {
+            for (std::size_t i = 0; i < 4u; ++i) bytes[at + i] = static_cast<std::uint8_t>(value >> (8u * i));
+        };
+        put(0u, size);
+        for (std::size_t i = 0; i < 31u && i < flag.name.size(); ++i) bytes[4u + i] = static_cast<std::uint8_t>(flag.name[i]);
+        put(36u, flag.attributes);
+        put(40u, flag.initial_pattern);
+        put(44u, flag.pattern);
+        put(48u, static_cast<std::uint32_t>(flag.waiters.size()));
+        for (std::uint32_t i = 0; i < std::min<std::uint32_t>(size, static_cast<std::uint32_t>(bytes.size())); ++i)
+            memory.store8(info + i, bytes[i]);
+        kernel().finish(ctx, 0u);
     });
     hle.add("ThreadManForUser", "sceKernelDeleteEventFlag", [](Runtime &, AllegrexContext &ctx) {
         auto found = kernel().event_flags.find(as_signed(arg(ctx, 0)));

@@ -656,6 +656,12 @@ void register_vblank_waits(HleRegistrar &hle) {
         wait.type = WaitType::VBlank;
         kernel().block(ctx, wait, 0u);
     });
+    // sceDisplayGetFramePerSec() -> float in $f0: the refresh rate, 60000/1001
+    // (59.94) on a PSP. God of War (UCES00842) and Patapon (UCES00995) ask.
+    hle.add("sceDisplay", "sceDisplayGetFramePerSec", [](Runtime &, AllegrexContext &ctx) {
+        ctx.fpr[0] = 60000.0f / 1001.0f;
+        kernel().finish(ctx, 0u);
+    });
     hle.add("sceDisplay", "sceDisplayGetVcount", [](Runtime &, AllegrexContext &ctx) {
         trace_pacing("sceDisplayGetVcount", static_cast<std::int64_t>(kernel().vblank_count()));
         kernel().finish(ctx, static_cast<std::uint32_t>(kernel().vblank_count()));

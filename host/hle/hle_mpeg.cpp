@@ -573,6 +573,19 @@ void register_decoding(HleRegistrar &hle) {
         if (arg(ctx, 3) != 0u) memory.store32(arg(ctx, 3), produced ? 1u : 0u);
         finish_traced(ctx, "sceMpegAvcDecodeYCbCr", 0u, produced ? "picture " + std::to_string(state->pictures) : "none");
     });
+    // sceMpegAvcDecodeFlush(mpeg): drops what the decoder holds, as before a
+    // seek or a new stream. God of War (UCES00842) calls it when a movie
+    // starts.
+    hle.add("sceMpeg", "sceMpegAvcDecodeFlush", [](Runtime &, AllegrexContext &ctx) {
+        MpegState *state = find_mpeg(arg(ctx, 0));
+        if (state == nullptr) {
+            finish_traced(ctx, "sceMpegAvcDecodeFlush", mpeg_error::kInvalidValue, {}, 1u);
+            return;
+        }
+        state->video_unit.reset();
+        state->video.reset();
+        finish_traced(ctx, "sceMpegAvcDecodeFlush", 0u, {}, 1u);
+    });
     // sceMpegAvcCsc(mpeg, ycbcr, range, frameWidth, dest): a picture from
     // sceMpegAvcDecodeYCbCr's buffer into pixels in the format
     // sceMpegAvcDecodeMode set, `frameWidth` pixels a row. `range` is

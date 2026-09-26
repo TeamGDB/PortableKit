@@ -99,6 +99,7 @@ sceDisplay,0x984C27E7,sceDisplayWaitVblankStart
 sceDisplay,0x9C6EAAD7,sceDisplayGetVcount
 sceDisplay,0x36CDFADE,sceDisplayWaitVblank
 sceDisplay,0xEEDA2E54,sceDisplayGetFrameBuf
+sceDisplay,0xDBA6C4C4,sceDisplayGetFramePerSec
 sceDmac,0x617F3FE6,sceDmacMemcpy
 sceGe_user,0x03444EB4,sceGeListSync
 sceGe_user,0x05DB22CE,sceGeUnsetCallback
@@ -190,6 +191,7 @@ sceMpeg,0xF5E7EA31,sceMpegAvcConvertToYuv420
 sceMpeg,0xF8DCB679,sceMpegQueryAtracEsSize
 sceMpeg,0xFE246728,sceMpegGetAvcAu
 sceMpeg,0x31BD0272,sceMpegAvcCsc
+sceMpeg,0x4571CC64,sceMpegAvcDecodeFlush
 sceNet,0x0BF0A3AE,sceNetGetLocalEtherAddr
 sceNet,0x281928A9,sceNetTerm
 sceNet,0x39AF39A6,sceNetInit
@@ -456,6 +458,7 @@ ThreadManForUser,0xDF52098F,sceKernelTryReceiveMsgPipe
 ThreadManForUser,0x349B864D,sceKernelCancelMsgPipe
 ThreadManForUser,0x33BE4024,sceKernelReferMsgPipeStatus
 ThreadManForUser,0x17C1684E,sceKernelReferThreadStatus
+ThreadManForUser,0xA66B0120,sceKernelReferEventFlagStatus
 UtilsForUser,0x27CC57F0,sceKernelLibcTime
 UtilsForUser,0x3EE30821,sceKernelDcacheWritebackRange
 UtilsForUser,0x6AD345D7,sceKernelSetGPO

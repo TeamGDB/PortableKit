@@ -154,6 +154,7 @@ struct EventFlag {
     std::uint32_t attributes{};
     std::uint32_t pattern{};
     std::deque<SceUID> waiters;
+    std::uint32_t initial_pattern{};  // for sceKernelReferEventFlagStatus
 };
 
 struct Mutex {
