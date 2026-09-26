@@ -1134,9 +1134,11 @@ struct PatchWeights {
 };
 
 // A cubic B-spline over `count` control points has count + 4 knots, one
-// apart. An end that passes through its last control point ("closed" in the
-// GE's terms) repeats its end knot three more times instead. Either way the
-// curve runs over the knots [3, count], count - 3 spans of one each.
+// apart. An end that passes through its last control point ("open" in the
+// GE's terms, its type bit set) repeats its end knot three more times
+// instead; a "closed" end keeps the knots evenly spaced, which is how a game
+// makes a loop out of control points that repeat. Either way the curve runs
+// over the knots [3, count], count - 3 spans of one each.
 std::vector<float> spline_knots(std::uint32_t count, bool clamp_start, bool clamp_end) {
     std::vector<float> knots(count + 4u);
     for (std::uint32_t i = 0; i < knots.size(); ++i) knots[i] = static_cast<float>(static_cast<int>(i) - 3);
@@ -1202,10 +1204,14 @@ void GeState::draw_patch(const GuestMemory &memory, std::uint32_t command, std::
     const bool spline = command == kSpline;
     const std::uint32_t u_count = data & 0xFFu;
     const std::uint32_t v_count = (data >> 8u) & 0xFFu;
-    const bool u_clamp_start = ((data >> 16u) & 1u) == 0u;
-    const bool u_clamp_end = ((data >> 16u) & 2u) == 0u;
-    const bool v_clamp_start = ((data >> 18u) & 1u) == 0u;
-    const bool v_clamp_end = ((data >> 18u) & 2u) == 0u;
+    // Bits 16-17 and 18-19 give each direction's ends: set is open, the end
+    // runs through its last control point; clear is closed. Read the other
+    // way round, Purun's hero, a band of 20 by 4 points whose v runs from its
+    // outline to its middle, stopped short of the middle and had a hole there.
+    const bool u_clamp_start = ((data >> 16u) & 1u) != 0u;
+    const bool u_clamp_end = ((data >> 16u) & 2u) != 0u;
+    const bool v_clamp_start = ((data >> 18u) & 1u) != 0u;
+    const bool v_clamp_end = ((data >> 18u) & 2u) != 0u;
     if (u_count < 4u || v_count < 4u || vertex_address_ == 0u) return;
     if (!spline && ((u_count - 1u) % 3u != 0u || (v_count - 1u) % 3u != 0u)) return;
 
