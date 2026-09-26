@@ -131,6 +131,25 @@ void register_threads(HleRegistrar &hle) {
     };
     hle.add("ThreadManForUser", "sceKernelSleepThread", sleep);
     hle.add("ThreadManForUser", "sceKernelSleepThreadCB", sleep_cb);
+    // sceKernelReleaseWaitThread(uid): a waiting thread stops waiting, its
+    // call answering SCE_KERNEL_ERROR_RELEASE_WAIT. Phantasy Star Portable 2
+    // Infinity (NPJH50332) calls it.
+    hle.add("ThreadManForUser", "sceKernelReleaseWaitThread", [](Runtime &, AllegrexContext &ctx) {
+        constexpr std::uint32_t kReleaseWait = 0x800201AAu;
+        constexpr std::uint32_t kNotWait = 0x800201A6u;
+        Thread *thread = kernel().find_thread(as_signed(arg(ctx, 0)));
+        if (thread == nullptr) {
+            kernel().finish(ctx, error::kUnknownThid);
+            return;
+        }
+        if (thread->status != ThreadStatus::Waiting) {
+            kernel().finish(ctx, kNotWait);
+            return;
+        }
+        if (trace_sync()) log_sync("ReleaseWaitThread " + std::to_string(thread->uid) + " " + thread->name);
+        kernel().wake(*thread, kReleaseWait);
+        kernel().finish(ctx, 0u);
+    });
     hle.add("ThreadManForUser", "sceKernelWakeupThread", [](Runtime &, AllegrexContext &ctx) {
         Thread *thread = kernel().find_thread(as_signed(arg(ctx, 0)));
         if (thread == nullptr) {

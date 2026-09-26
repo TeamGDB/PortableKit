@@ -34,8 +34,11 @@ std::uint64_t guest_unix_us() { return boot_unix_us() + kernel().now_us(); }
 void success(Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, 0u); }
 
 void register_utils(HleRegistrar &hle) {
+    // The host has no data cache to keep coherent. Phantasy Star Portable 2
+    // Infinity (NPJH50332) uses WritebackInvalidateRange.
     for (const char *name : {"sceKernelDcacheWritebackAll", "sceKernelDcacheWritebackInvalidateAll",
-                             "sceKernelDcacheInvalidateRange", "sceKernelDcacheWritebackRange", "sceKernelSetGPO"})
+                             "sceKernelDcacheInvalidateRange", "sceKernelDcacheWritebackRange",
+                             "sceKernelDcacheWritebackInvalidateRange", "sceKernelSetGPO"})
         hle.add("UtilsForUser", name, success);
     // The guest flushes the instruction cache after copying code into an overlay
     // slot, which is the profile's cue to re-check which overlay is loaded.
@@ -165,8 +168,38 @@ void register_platform(HleRegistrar &hle) {
     // Nothing here ever changes the power state, so there is nothing to stop
     // reporting; the slot is simply forgotten.
     hle.add("scePower", "scePowerUnregisterCallback", success);
-    hle.add("scePower", "scePowerSetClockFrequency630", success);
-    hle.add("scePower", "scePowerSetClockFrequency", success);
+    // The clocks the game asked for, reported back when it asks: a PSP
+    // starts at 222/111 MHz. Setting them changes nothing here.
+    struct Clocks {
+        std::uint32_t pll{222u}, cpu{222u}, bus{111u};
+    };
+    static Clocks clocks;
+    // scePowerSetClockFrequency(pll, cpu, bus) and its aliases: 0xEBD177D6
+    // (its name in public NID lists is scePower_EBD177D6), which God of War,
+    // Patapon and Chinatown Wars call with 333, 333, 166.
+    const auto set_clocks = [](Runtime &, AllegrexContext &ctx) {
+        clocks.pll = arg(ctx, 0);
+        clocks.cpu = arg(ctx, 1);
+        clocks.bus = arg(ctx, 2);
+        kernel().finish(ctx, 0u);
+    };
+    hle.add("scePower", "scePowerSetClockFrequency630", set_clocks);
+    hle.add("scePower", "scePowerSetClockFrequency", set_clocks);
+    hle.add("scePower", "scePower_EBD177D6", set_clocks);
+    hle.add("scePower", "scePowerGetCpuClockFrequencyInt", [](Runtime &, AllegrexContext &ctx) {
+        kernel().finish(ctx, clocks.cpu);
+    });
+    hle.add("scePower", "scePowerGetBusClockFrequencyInt", [](Runtime &, AllegrexContext &ctx) {
+        kernel().finish(ctx, clocks.bus);
+    });
+    hle.add("scePower", "scePowerGetPllClockFrequencyInt", [](Runtime &, AllegrexContext &ctx) {
+        kernel().finish(ctx, clocks.pll);
+    });
+    // The float forms answer in $f0.
+    hle.add("scePower", "scePowerGetPllClockFrequencyFloat", [](Runtime &, AllegrexContext &ctx) {
+        ctx.fpr[0] = static_cast<float>(clocks.pll);
+        kernel().finish(ctx, 0u);
+    });
     hle.add("scePower", "scePowerCheckWlanCoexistenceClock", success);
 
     hle.add("sceRtc", "sceRtcGetCurrentClockLocalTime", [](Runtime &rt, AllegrexContext &ctx) {
@@ -330,6 +363,17 @@ void register_rtc_calendar(HleRegistrar &hle) {
     hle.add("sceRtc", "sceRtcCheckValid", [](Runtime &rt, AllegrexContext &ctx) {
         rtc_unverified("sceRtcCheckValid");
         kernel().finish(ctx, rtc::to_tick(read_date(rt.memory(), arg(ctx, 0))) ? 0u : kRtcInvalidDate);
+    });
+    // sceRtcGetTime64_t(const ScePspDateTime *, u64 *time): seconds since
+    // 1970-01-01. Phantasy Star Portable 2 Infinity (NPJH50332) calls it.
+    hle.add("sceRtc", "sceRtcGetTime64_t", [](Runtime &rt, AllegrexContext &ctx) {
+        const auto tick = rtc::to_tick(read_date(rt.memory(), arg(ctx, 0)));
+        if (!tick || *tick < rtc::kUnixEpochTick) {
+            kernel().finish(ctx, kRtcInvalidDate);
+            return;
+        }
+        if (arg(ctx, 1) != 0u) store64(rt.memory(), arg(ctx, 1), (*tick - rtc::kUnixEpochTick) / rtc::kTicksPerSecond);
+        kernel().finish(ctx, 0u);
     });
     hle.add("sceRtc", "sceRtcGetTickResolution", [](Runtime &, AllegrexContext &ctx) {
         rtc_unverified("sceRtcGetTickResolution");
