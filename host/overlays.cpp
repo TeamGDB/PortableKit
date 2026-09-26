@@ -280,7 +280,10 @@ bool install_overlay_for(Runtime &runtime, std::uint32_t pc) {
     return false;
 }
 
-bool missing_function_hook(Runtime &runtime, AllegrexContext &, std::uint32_t pc) {
+CodeMissHook g_code_miss_hook = nullptr;
+
+bool missing_function_hook(Runtime &runtime, AllegrexContext &ctx, std::uint32_t pc) {
+    if (g_code_miss_hook != nullptr && g_code_miss_hook(runtime, ctx, pc)) return true;
     return install_overlay_for(runtime, pc);
 }
 
@@ -331,6 +334,8 @@ void revalidate_overlays(Runtime &runtime) {
         it = installed_overlays().erase(it);
     }
 }
+
+void set_code_miss_hook(CodeMissHook hook) { g_code_miss_hook = hook; }
 
 void install_overlay_support(Runtime &runtime) {
     (void)runtime;

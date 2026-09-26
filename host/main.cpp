@@ -311,7 +311,14 @@ int run_adhoc_server(int argc, char **argv) {
 
 } // namespace
 
+// A program that wraps the port (the desktop app in apps/portablekit) compiles
+// this file with PORTABLEKIT_HOST_MAIN_NAME set, so it can choose the game and
+// prepare its files before this runs it.
+#if defined(PORTABLEKIT_HOST_MAIN_NAME)
+int PORTABLEKIT_HOST_MAIN_NAME(int argc, char **argv) {
+#else
 int main(int argc, char **argv) {
+#endif
 #if defined(__linux__)
     ensure_main_stack(argv);
 #endif

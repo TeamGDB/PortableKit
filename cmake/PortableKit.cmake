@@ -101,7 +101,11 @@ set(PORTABLEKIT_RENDERER_SOURCES
 function(_portablekit_prefix out root)
     set(result)
     foreach(source IN LISTS ARGN)
-        list(APPEND result "${root}/${source}")
+        if(IS_ABSOLUTE "${source}")
+            list(APPEND result "${source}")
+        else()
+            list(APPEND result "${root}/${source}")
+        endif()
     endforeach()
     set(${out} "${result}" PARENT_SCOPE)
 endfunction()
@@ -132,7 +136,15 @@ function(_portablekit_inherit_settings target)
 endfunction()
 
 function(portablekit_add_game target)
-    cmake_parse_arguments(GAME "" "PROFILE_DIR" "SOURCES" ${ARGN})
+    # Options a program that wraps the port uses (the desktop app,
+    # apps/portablekit); a port passes none of them.
+    #   EXTERNAL_KEYS   do not link crypto_keys_builtin.cpp: the program
+    #                   defines portablekit::crypto_keys() itself.
+    #   NO_CORPUS       link no generated code and no stub: the program
+    #                   defines psprecomp::register_generated_functions().
+    #   HOST_MAIN_NAME  compile host/main.cpp's main() under this name, so the
+    #                   program's own main() can call it.
+    cmake_parse_arguments(GAME "EXTERNAL_KEYS;NO_CORPUS" "PROFILE_DIR;HOST_MAIN_NAME" "SOURCES" ${ARGN})
     if(NOT GAME_PROFILE_DIR)
         set(GAME_PROFILE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
     endif()
@@ -141,7 +153,9 @@ function(portablekit_add_game target)
     # committed. Until the profile's generate step has produced it, link an
     # empty registry instead, so a checkout still builds and says so.
     file(GLOB generated CONFIGURE_DEPENDS "${GAME_PROFILE_DIR}/generated/*.cpp")
-    if(generated)
+    if(GAME_NO_CORPUS)
+        set(generated)
+    elseif(generated)
         list(LENGTH generated generated_count)
         message(STATUS "${target}: ${generated_count} generated AOT units")
         if(MSVC)
@@ -157,6 +171,13 @@ function(portablekit_add_game target)
     else()
         message(STATUS "${target}: no generated AOT units; run the profile's generate step")
         set(generated "${PORTABLEKIT_ROOT}/host/generated_stub.cpp")
+    endif()
+    if(NOT GAME_EXTERNAL_KEYS)
+        list(APPEND GAME_SOURCES_ABSOLUTE "${PORTABLEKIT_ROOT}/host/crypto_keys_builtin.cpp")
+    endif()
+    if(GAME_HOST_MAIN_NAME)
+        set_property(SOURCE "${PORTABLEKIT_ROOT}/host/main.cpp" APPEND PROPERTY COMPILE_DEFINITIONS
+            PORTABLEKIT_HOST_MAIN_NAME=${GAME_HOST_MAIN_NAME})
     endif()
 
     # Renderer: SDL3 for the window and Vulkan for drawing. Both are optional
@@ -210,6 +231,7 @@ function(portablekit_add_game target)
     # psprecomp headers, so definitions and include paths the host adds do not
     # change its compile commands and rebuild all of it. Its objects still link
     # straight into the executable, which exports their symbols to the overlays.
+    if(generated)
     add_library(${target}_generated OBJECT ${generated})
     # The standard is stated per target: a game's own CMakeLists is the top
     # level project and need not set CMAKE_CXX_STANDARD for the framework.
@@ -218,13 +240,18 @@ function(portablekit_add_game target)
         "${PORTABLEKIT_ROOT}/include" "${GAME_PROFILE_DIR}/generated")
     set_target_properties(${target}_generated PROPERTIES JOB_POOL_COMPILE psprecomp_generated)
     _portablekit_inherit_settings(${target}_generated)
+    set(generated_objects $<TARGET_OBJECTS:${target}_generated>)
+    else()
+        set(generated_objects)
+    endif()
 
     add_executable(${target}
         "${PORTABLEKIT_ROOT}/host/main.cpp"
         ${host_sources}
         ${profile_sources}
+        ${GAME_SOURCES_ABSOLUTE}
         ${renderer_sources}
-        $<TARGET_OBJECTS:${target}_generated>)
+        ${generated_objects})
     target_compile_features(${target} PRIVATE cxx_std_20)
     _portablekit_inherit_settings(${target})
     add_dependencies(${target} ${target}_version)

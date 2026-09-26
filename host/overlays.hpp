@@ -18,4 +18,12 @@ void install_overlay_support(psprecomp::Runtime &runtime);
 // this is called; the next jump into the slot then installs the right corpus.
 void revalidate_overlays(psprecomp::Runtime &runtime);
 
+// Asked first when dispatch finds no function at an address, before the
+// overlay corpora. A program that loads the game's main corpus while the game
+// already runs (the desktop app, which starts under the interpreter and
+// switches to compiled code when it is ready) registers it from here and
+// returns true to have the dispatch retried.
+using CodeMissHook = bool (*)(psprecomp::Runtime &, psprecomp::AllegrexContext &, std::uint32_t pc);
+void set_code_miss_hook(CodeMissHook hook);
+
 } // namespace portablekit

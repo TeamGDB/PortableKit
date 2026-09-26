@@ -1,58 +1,42 @@
 #include "save_data/savedata_crypto.hpp"
 
+#include "crypto_keys.hpp"
+
+#include "psprecomp/common.hpp"
+
 #include <algorithm>
 #include <cstring>
+#include <map>
+#include <mutex>
+#include <string>
 
 namespace portablekit::savedata {
 namespace {
 
-Block block_from_hex(const char *hex) {
-    Block out{};
-    const auto nibble = [](char c) -> std::uint8_t {
-        if (c >= '0' && c <= '9') return static_cast<std::uint8_t>(c - '0');
-        return static_cast<std::uint8_t>((c | 0x20) - 'a' + 10);
-    };
-    for (std::size_t i = 0; i < out.size(); ++i)
-        out[i] = static_cast<std::uint8_t>((nibble(hex[2 * i]) << 4u) | nibble(hex[2 * i + 1]));
-    return out;
+[[noreturn]] void missing_key(const char *what) {
+    throw psprecomp::Error(std::string("Save-data encryption needs ") + what +
+                           ", which is not in the keys this program has");
 }
 
-// KIRK command 4/7 keys by key seed.
+// KIRK command 4/7 keys by key seed, from crypto_keys().
 const Aes128 &kirk_key(std::uint8_t seed) {
-    static const Aes128 k03(block_from_hex("9802C4E6EC9E9E2FFC634CE42FBB4668"));
-    static const Aes128 k04(block_from_hex("99244CD258F51BCBB0619CA73830075F"));
-    static const Aes128 k0c(block_from_hex("8485C848750843BC9B9AECA79C7F6018"));
-    static const Aes128 k0e(block_from_hex("C871FDB3BCC5D2F2E2D7729DDF826882"));
-    static const Aes128 k10(block_from_hex("32295BD5EAF7A34216C88E48FF50D371"));
-    static const Aes128 k12(block_from_hex("5DC71139D01938BC027FDDDCB0837D9D"));
-    static const Aes128 k53(block_from_hex("AFFE8EB13DD17ED80A61241C959256B6"));
-    static const Aes128 k57(block_from_hex("1C9BC490E3066481FA59FDB600BB2870"));
-    static const Aes128 k64(block_from_hex("03B302E85FF381B13B8DAA2A90FF5E61"));
-    switch (seed) {
-    case 0x03: return k03;
-    case 0x04: return k04;
-    case 0x0C: return k0c;
-    case 0x0E: return k0e;
-    case 0x10: return k10;
-    case 0x12: return k12;
-    case 0x53: return k53;
-    case 0x57: return k57;
-    default: return k64;
-    }
+    static std::map<std::uint8_t, Aes128> ciphers;
+    static std::mutex lock;
+    const std::lock_guard<std::mutex> guard(lock);
+    if (const auto it = ciphers.find(seed); it != ciphers.end()) return it->second;
+    const CryptoKeys *keys = crypto_keys();
+    const Key16 *key = keys != nullptr ? keys->kirk(seed) : nullptr;
+    if (key == nullptr) missing_key("a KIRK key");
+    return ciphers.emplace(seed, Aes128(*key)).first->second;
 }
 
 // Save-data keys 2 to 7, numbered in the order they are usually published
 // (key 1 is not used by these modes).
 const Block &sd_key(int index) {
-    static const Block keys[] = {
-        block_from_hex("FAAA50EC2FDE5493AD14B2CEA53005DF"),  // 2
-        block_from_hex("36A53EACC5269EA383D9EC256C484872"),  // 3
-        block_from_hex("D8C0B0F33E6B7685FDFB4D7D451E9203"),  // 4
-        block_from_hex("CB15F407F96A523C04B9B2EE5C53FA86"),  // 5
-        block_from_hex("7044A3AEEF5DA5F2857FF2D694F5363B"),  // 6
-        block_from_hex("EC6D29592635A57F972A0DBCA3263300"),  // 7
-    };
-    return keys[index - 2];
+    const CryptoKeys *keys = crypto_keys();
+    const Key16 *key = keys != nullptr ? keys->savedata_key(index) : nullptr;
+    if (key == nullptr) missing_key("a save-data key");
+    return *key;
 }
 
 // What each mode uses. A zero mask stands for "no mask".
@@ -222,3 +206,17 @@ bool verify_param_sfo(std::span<const std::uint8_t> sfo, std::size_t params_offs
 }
 
 } // namespace portablekit::savedata
+
+namespace portablekit {
+
+bool savedata_keys_available() {
+    const CryptoKeys *keys = crypto_keys();
+    if (keys == nullptr) return false;
+    for (const std::uint8_t slot : {0x03, 0x04, 0x0C, 0x0E, 0x10, 0x12, 0x53, 0x57, 0x64})
+        if (keys->kirk(slot) == nullptr) return false;
+    for (int index = 2; index <= 7; ++index)
+        if (keys->savedata_key(index) == nullptr) return false;
+    return true;
+}
+
+} // namespace portablekit

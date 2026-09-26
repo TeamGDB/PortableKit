@@ -1278,6 +1278,16 @@ void note_menu_closed(bool quit) {
 
 bool attach(gpu::VulkanRenderer &renderer) { return Layer::get().attach(renderer); }
 
+namespace {
+bool (*g_status_overlay_visible)() = nullptr;
+void (*g_status_overlay_draw)() = nullptr;
+} // namespace
+
+void set_status_overlay(bool (*visible)(), void (*draw)()) {
+    g_status_overlay_visible = visible;
+    g_status_overlay_draw = draw;
+}
+
 void draw_over_game() {
     Layer &layer = Layer::get();
     if (!layer.attached()) return;
@@ -1293,10 +1303,12 @@ void draw_over_game() {
     }
     const double hint_left = menu || settings::current().menu_hint_seen ? -1.0 : hint_seconds_left();
     const bool overlay = network_overlay();
-    if (hint_left <= 0.0 && !overlay && !menu) return;
+    const bool status = g_status_overlay_visible != nullptr && g_status_overlay_visible();
+    if (hint_left <= 0.0 && !overlay && !menu && !status) return;
     layer.begin_frame();
     if (hint_left > 0.0) draw_hint(hint_left);
     if (overlay) draw_network_overlay();
+    if (status) g_status_overlay_draw();
     if (menu && !menu->frame()) {
         const bool quit = menu->quit() || layer.window_closed();
         menu.reset();
