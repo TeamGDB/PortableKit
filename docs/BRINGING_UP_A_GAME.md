@@ -85,7 +85,7 @@ Every one of these takes the profile's own prefix, so `TENKAWA_TRACE_KERNEL` for
 | `<PREFIX>_NO_BUSY_CLOCK` | Keep emulated time still for a thread that never waits, as before the busy clock (`Kernel::charge_busy_time`) |
 | `PSPRECOMP_NO_INTERPRETER=1` | Turn the interpreter off. Nothing runs without a corpus; with one, the runtime stops at the first address the recompiler missed and names it |
 | `PSPRECOMP_MAX_DISPATCHES` | Stop after this many dispatches, for a bounded run |
-| `PSPRECOMP_INTERPRETER_WATCH` | Guest addresses, comma separated: report the registers each time interpreted code reaches one. `PSPRECOMP_INTERPRETER_WATCH_WORDS=N` also dumps N words at `a0`, and `PSPRECOMP_INTERPRETER_WATCH_LIMIT` bounds how many times each address is reported (40 by default, 0 for no limit) |
+| `PSPRECOMP_INTERPRETER_WATCH` | Guest addresses, comma separated: report the registers each time interpreted code reaches one. `PSPRECOMP_INTERPRETER_WATCH_WORDS=N` also dumps N words at `a0`, `PSPRECOMP_INTERPRETER_WATCH_MEMORY` (addresses, comma separated) prints those guest words with every report, and `PSPRECOMP_INTERPRETER_WATCH_LIMIT` bounds how many times each address is reported (40 by default, 0 for no limit) |
 
 ## Reading what the game itself decides
 

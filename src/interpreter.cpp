@@ -41,18 +41,21 @@ std::vector<std::uint32_t> g_watch;
 std::uint64_t g_watch_limit = 40u;
 std::uint32_t g_watch_words = 0u;
 std::unordered_map<std::uint32_t, std::uint64_t> g_watch_seen;
+// Fixed guest words printed with every report (PSPRECOMP_INTERPRETER_WATCH_MEMORY):
+// the global a game's state machine waits on is rarely at a0.
+std::vector<std::uint32_t> g_watch_memory;
 
-void load_watch_list(const char *text) {
+void load_address_list(const char *text, std::vector<std::uint32_t> &into) {
     while (*text != '\0') {
         char *end = nullptr;
         const unsigned long long value = std::strtoull(text, &end, 0);
         if (end == text) break;
-        g_watch.push_back(static_cast<std::uint32_t>(value));
+        into.push_back(static_cast<std::uint32_t>(value));
         text = end;
         while (*text == ',' || *text == ' ') ++text;
     }
-    std::sort(g_watch.begin(), g_watch.end());
-    g_watch.erase(std::unique(g_watch.begin(), g_watch.end()), g_watch.end());
+    std::sort(into.begin(), into.end());
+    into.erase(std::unique(into.begin(), into.end()), into.end());
 }
 
 void load_settings() {
@@ -66,7 +69,8 @@ void load_settings() {
         if (end != text && *end == '\0' && value != 0ull)
             g_budget = static_cast<std::uint64_t>(value);
     }
-    if (const char *text = std::getenv("PSPRECOMP_INTERPRETER_WATCH")) load_watch_list(text);
+    if (const char *text = std::getenv("PSPRECOMP_INTERPRETER_WATCH")) load_address_list(text, g_watch);
+    if (const char *text = std::getenv("PSPRECOMP_INTERPRETER_WATCH_MEMORY")) load_address_list(text, g_watch_memory);
     if (const char *text = std::getenv("PSPRECOMP_INTERPRETER_WATCH_LIMIT")) {
         char *end = nullptr;
         const unsigned long long value = std::strtoull(text, &end, 0);
@@ -99,6 +103,10 @@ void report_watch(Runtime &runtime, const AllegrexContext &ctx, std::uint32_t pc
             std::cerr << " +" << std::hex << (i * 4u) << std::dec << "="
                       << hex32(runtime.memory().load32(ctx.gpr[4] + i * 4u));
         }
+    }
+    for (const std::uint32_t address : g_watch_memory) {
+        if (!runtime.memory().contains(address & ~3u, 4u)) continue;
+        std::cerr << "\n         [" << hex32(address & ~3u) << "]=" << hex32(runtime.memory().load32(address & ~3u));
     }
     std::cerr << "\n";
 }
