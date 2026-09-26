@@ -25,6 +25,7 @@ set(app_sources
     src/app_main.cpp
     src/app_home.cpp
     src/auto_profile.cpp
+    src/compile_control.cpp
     src/corpus.cpp
     src/corpus_loader.cpp
     src/game_import.cpp

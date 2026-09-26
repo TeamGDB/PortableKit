@@ -22,6 +22,7 @@
 
 #include "app_home.hpp"
 #include "auto_profile.hpp"
+#include "compile_control.hpp"
 #include "corpus.hpp"
 #include "corpus_loader.hpp"
 #include "game_import.hpp"
@@ -272,17 +273,6 @@ std::string self_path(char **argv) {
     return self.empty() ? std::string(argv[0]) : path_text(self);
 }
 
-int start_background_compile(const GameRecord &game, const std::string &level, unsigned jobs, char **argv) {
-    std::vector<std::string> command{self_path(argv), "compile", game.id, "--opt", level};
-    if (jobs != 0u) {
-        command.push_back("--jobs");
-        command.push_back(std::to_string(jobs));
-    }
-    const std::filesystem::path log_dir = cache_root() / game.id;
-    std::error_code ec;
-    std::filesystem::create_directories(log_dir, ec);
-    return spawn_detached(command, log_dir / "compile-process.log") ? 0 : 1;
-}
 
 int command_compile(const GameRecord &game, const Arguments &args, char **argv) {
     CompileOptions options;
@@ -293,7 +283,7 @@ int command_compile(const GameRecord &game, const Arguments &args, char **argv) 
     options.jobs = static_cast<unsigned>(std::atoi(args.get("jobs", "0").c_str()));
     options.keep_intermediates = args.has("keep");
     if (args.has("background")) {
-        if (start_background_compile(game, args.get("opt", "2"), options.jobs, argv) != 0)
+        if (!start_background_compile(game, args.get("opt", "2"), options.jobs))
             return report_error(1, "cannot start the background compile");
         if (g_json) std::cout << Json().field("ok", true).field("started", true).field("opt_level", options.opt_level).str() << "\n";
         else std::cout << "Compiling " << game.title << " in the background; follow it with: portablekit status " << game.disc_id << "\n";
@@ -384,7 +374,7 @@ int command_run(const GameRecord &game, const Arguments &args, char **argv) {
         }
         if (!running && find_toolchain().found) {
             std::cout << "[portablekit] compiling " << game.title << " in the background\n";
-            (void)start_background_compile(game, args.get("opt", "tiered"), 0u, argv);
+            (void)start_background_compile(game, args.get("opt", "tiered"), 0u);
         }
     }
     prepare_corpus_loading(game, choice);
@@ -424,13 +414,16 @@ int command_keys(const Arguments &args) {
         if (g_json) {
             std::vector<Json> problems;
             for (const std::string &problem : report.problems) problems.push_back(Json().field("problem", problem));
+            std::vector<Json> warnings;
+            for (const std::string &warning : report.warnings) warnings.push_back(Json().field("warning", warning));
             std::cout << Json().field("ok", ok).field("path", path_text(keys_file_path()))
                              .field("executables", report.can_decrypt_executables)
                              .field("saves", report.can_encrypt_saves)
                              .field("tags", static_cast<std::uint64_t>(report.tag_count))
-                             .array("problems", problems).str() << "\n";
+                             .array("problems", problems).array("warnings", warnings).str() << "\n";
         } else {
             for (const std::string &problem : report.problems) std::cerr << "  " << problem << "\n";
+            for (const std::string &warning : report.warnings) std::cerr << "  warning: " << warning << "\n";
             if (ok) std::cout << "Keys saved to " << path_text(keys_file_path()) << "\n";
         }
         return ok ? 0 : kKeysRejected;
@@ -440,11 +433,17 @@ int command_keys(const Arguments &args) {
     if (g_json) {
         std::vector<Json> problems;
         for (const std::string &problem : report.problems) problems.push_back(Json().field("problem", problem));
+        std::vector<Json> warnings;
+        for (const std::string &warning : report.warnings) warnings.push_back(Json().field("warning", warning));
+        std::vector<Json> declared;
+        for (const KeysReport::DeclaredStatus &key : report.declared)
+            declared.push_back(Json().field("name", key.name).field("module", key.module).field("present", key.present));
         std::cout << Json().field("ok", true).field("path", path_text(report.path)).field("found", report.file_found)
                          .field("executables", report.can_decrypt_executables)
                          .field("saves", report.can_encrypt_saves)
                          .field("tags", static_cast<std::uint64_t>(report.tag_count))
-                         .array("problems", problems).str() << "\n";
+                         .array("problems", problems).array("warnings", warnings)
+                         .array("extension_keys", declared).str() << "\n";
         return 0;
     }
     std::cout << "Keys file: " << path_text(report.path) << (report.file_found ? "" : " (none)") << "\n"
@@ -452,6 +451,16 @@ int command_keys(const Arguments &args) {
               << "  encrypt saves:       " << (report.can_encrypt_saves ? "yes" : "no (saves are kept unencrypted)") << "\n"
               << "  tag keys:            " << report.tag_count << "\n";
     for (const std::string &problem : report.problems) std::cout << "  problem: " << problem << "\n";
+    for (const std::string &warning : report.warnings) std::cout << "  warning: " << warning << "\n";
+    // The keys HLE extension modules read, by module.
+    std::string module;
+    for (const KeysReport::DeclaredStatus &key : report.declared) {
+        if (key.module != module) {
+            module = key.module;
+            std::cout << "  keys " << module << " reads:\n";
+        }
+        std::cout << "    " << key.name << ": " << (key.present ? "present" : "missing") << "\n";
+    }
     return 0;
 }
 

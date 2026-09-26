@@ -79,6 +79,7 @@ void write_status(const CorpusPaths &paths, const CorpusStatus &status) {
         {"toolchain", status.toolchain},
         {"abi", kCorpusAbi},
         {"updated", now_text()},
+        {"started", std::to_string(status.started)},
     };
     (void)write_key_values(paths.status, values, "# Written by portablekit compile; read by the running game.\n");
 }
@@ -335,6 +336,7 @@ CorpusStatus read_status(const CorpusPaths &paths) {
     status.message = get("message");
     status.toolchain = get("toolchain");
     status.updated = get("updated");
+    status.started = std::atoll(get("started").c_str());
     if (get("abi") != kCorpusAbi) status.state = CorpusState::None;
     return status;
 }
@@ -392,6 +394,7 @@ int compile_corpus(const GameRecord &game, const CompileOptions &options) {
         return kAlreadyCompiling;
     }
     status = CorpusStatus{};
+    status.started = static_cast<std::int64_t>(std::time(nullptr));
     status.opt_level = options.opt_level;
     status.pid = current_process_id();
     status.jobs = options.jobs != 0u ? options.jobs : default_jobs();
@@ -475,10 +478,14 @@ int compile_corpus(const GameRecord &game, const CompileOptions &options) {
             const bool current = fs::exists(object, time_ec) &&
                                  fs::last_write_time(object, time_ec) >= fs::last_write_time(source, time_ec);
             if (!current) {
-                // Compile lines are short; one that is not goes through a
-                // response file, as the link does.
+                // Written under another name and renamed when complete, so a
+                // compile stopped halfway never leaves an object that looks
+                // finished. Compile lines are short; one that is not goes
+                // through a response file, as the link does.
+                fs::path partial_object = object;
+                partial_object += ".part";
                 std::vector<std::string> arguments =
-                    compile_arguments(command, options.opt_level, source, object, paths.generated);
+                    compile_arguments(command, options.opt_level, source, partial_object, paths.generated);
                 if (command_line_length(arguments) > kLongCommandLine) {
                     fs::path rsp = object;
                     rsp += ".rsp";
@@ -489,9 +496,10 @@ int compile_corpus(const GameRecord &game, const CompileOptions &options) {
                     const std::lock_guard<std::mutex> guard(status_lock);
                     if (!failed) failure = result.started ? "Compiling " + source.filename().string() + " failed; see " + path_text(paths.log) + "." : result.error;
                     failed = true;
-                    fs::remove(object, time_ec);
+                    fs::remove(partial_object, time_ec);
                     return;
                 }
+                fs::rename(partial_object, object, time_ec);
             }
             const std::lock_guard<std::mutex> guard(status_lock);
             ++status.units_done;

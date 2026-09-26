@@ -67,6 +67,7 @@ struct CorpusStatus {
     std::string message;
     std::string toolchain;
     std::string updated;
+    std::int64_t started{};  // Unix time the compile began, for the elapsed time
 };
 
 [[nodiscard]] CorpusStatus read_status(const CorpusPaths &paths);
