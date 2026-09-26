@@ -8,6 +8,7 @@
 #include "psprecomp/common.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <map>
 #include <optional>
@@ -185,6 +186,68 @@ void register_threads(HleRegistrar &hle) {
         if (trace_sync()) log_sync("ResumeThread " + std::to_string(thread->uid) + " " + thread->name);
         kernel().finish(ctx, 0u);  // which runs it now if it outranks this thread
     });
+    // sceKernelReferThreadStatus(uid, SceKernelThreadInfo *info), uid 0 the
+    // calling thread. The info's layout is pspthreadman.h's: size, name[32],
+    // attr, status, entry, stack, stackSize, gpReg, initPriority,
+    // currentPriority, waitType, waitId, wakeupCount, exitStatus, runClocks
+    // (8 bytes), three counters; written up to the size the game gives.
+    // God of War (UCES00842) polls it with DelayThread until a loader
+    // thread is done.
+    hle.add("ThreadManForUser", "sceKernelReferThreadStatus", [](Runtime &rt, AllegrexContext &ctx) {
+        const SceUID uid = as_signed(arg(ctx, 0));
+        const Thread *thread = kernel().find_thread(uid == 0 ? kernel().current_uid() : uid);
+        if (thread == nullptr) {
+            kernel().finish(ctx, error::kUnknownThid);
+            return;
+        }
+        auto &memory = rt.memory();
+        const std::uint32_t info = arg(ctx, 1);
+        const std::uint32_t size = info != 0u ? memory.load32(info) : 0u;
+        std::uint32_t status = 0u;
+        switch (thread->status) {
+        case ThreadStatus::Running: status = 1u; break;
+        case ThreadStatus::Ready: status = 2u; break;
+        case ThreadStatus::Waiting: status = 4u; break;
+        case ThreadStatus::Dormant: status = 16u; break;
+        case ThreadStatus::Dead: status = 32u; break;
+        }
+        if (thread->uid == kernel().current_uid()) status = 1u;
+        if (thread->suspended) status |= 8u;
+        std::uint32_t wait_type = 0u;
+        if (thread->status == ThreadStatus::Waiting) {
+            switch (thread->wait.type) {
+            case WaitType::Sleep: wait_type = 1u; break;
+            case WaitType::Delay: wait_type = 2u; break;
+            case WaitType::Semaphore: wait_type = 3u; break;
+            case WaitType::EventFlag: wait_type = 4u; break;
+            case WaitType::Mailbox: wait_type = 5u; break;
+            case WaitType::ThreadEnd: wait_type = 9u; break;
+            case WaitType::Mutex: wait_type = 12u; break;
+            default: wait_type = 0u; break;
+            }
+        }
+        std::array<std::uint8_t, 0x68> bytes{};
+        const auto put = [&bytes](std::size_t at, std::uint32_t value) {
+            for (std::size_t i = 0; i < 4u; ++i) bytes[at + i] = static_cast<std::uint8_t>(value >> (8u * i));
+        };
+        put(0u, size);
+        for (std::size_t i = 0; i < 31u && i < thread->name.size(); ++i) bytes[4u + i] = static_cast<std::uint8_t>(thread->name[i]);
+        put(36u, thread->attributes);
+        put(40u, status);
+        put(44u, thread->entry);
+        put(48u, thread->stack_bottom);
+        put(52u, thread->stack_size);
+        put(56u, thread->gp);
+        put(60u, thread->initial_priority);
+        put(64u, thread->priority);
+        put(68u, wait_type);
+        put(72u, thread->status == ThreadStatus::Waiting ? as_unsigned(thread->wait.object) : 0u);
+        put(76u, thread->wakeup_count);
+        put(80u, as_unsigned(thread->exit_status));
+        for (std::uint32_t i = 0; i < std::min<std::uint32_t>(size, static_cast<std::uint32_t>(bytes.size())); ++i)
+            memory.store8(info + i, bytes[i]);
+        kernel().finish(ctx, 0u);
+    });
     // Runs the thread's notified callbacks now: 1 when there were any.
     hle.add("ThreadManForUser", "sceKernelCheckCallback", [](Runtime &, AllegrexContext &ctx) {
         kernel().finish(ctx, kernel().deliver_callbacks() ? 1u : 0u);
@@ -206,14 +269,21 @@ void register_threads(HleRegistrar &hle) {
 }
 
 void register_time(HleRegistrar &hle) {
+    // Each clock read charges the time a thread that never waits has run
+    // (Kernel::charge_busy_time): God of War (UCES00842) draws its first
+    // screens in a loop that reads sceKernelGetSystemTimeWide and never
+    // waits, and without it the clock stood still at 1.2 s for good.
     hle.add("ThreadManForUser", "sceKernelGetSystemTime", [](Runtime &rt, AllegrexContext &ctx) {
+        kernel().charge_busy_time();
         store64(rt.memory(), arg(ctx, 0), kernel().now_us());
         kernel().finish(ctx, 0u);
     });
     hle.add("ThreadManForUser", "sceKernelGetSystemTimeWide", [](Runtime &, AllegrexContext &ctx) {
+        kernel().charge_busy_time();
         kernel().finish64(ctx, kernel().now_us());
     });
     hle.add("ThreadManForUser", "sceKernelGetSystemTimeLow", [](Runtime &, AllegrexContext &ctx) {
+        kernel().charge_busy_time();
         kernel().finish(ctx, static_cast<std::uint32_t>(kernel().now_us()));
     });
     // (SceKernelSysClock *clock, seconds *, microseconds *): the clock in
