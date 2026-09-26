@@ -1427,9 +1427,9 @@ int main() {
                 "CACHE decode failed");
         const auto sync_codegen = psprecomp::codegen::memory_ordering_statement(psprecomp::OpcodeKind::Sync);
         const auto cache_codegen = psprecomp::codegen::memory_ordering_statement(psprecomp::OpcodeKind::Cache);
-        require(sync_codegen.find("memory_barrier") != std::string_view::npos,
+        require(sync_codegen.find("atomic_thread_fence") != std::string_view::npos,
                 "SYNC codegen must retain a host memory fence");
-        require(cache_codegen.find("memory_barrier") == std::string_view::npos,
+        require(cache_codegen.find("atomic_thread_fence") == std::string_view::npos,
                 "CACHE codegen must remain a coherent-memory no-op");
         const auto bltzal = psprecomp::decode_allegrex(0x05500027u);
         require(bltzal.kind == psprecomp::OpcodeKind::Bltzal && bltzal.rs == 10u && bltzal.has_delay_slot(),
