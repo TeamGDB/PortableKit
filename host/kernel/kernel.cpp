@@ -322,6 +322,7 @@ void Kernel::switch_to(AllegrexContext &ctx, Thread &thread) {
 void Kernel::finish(AllegrexContext &ctx, std::uint32_t result) {
     ctx.set_gpr(2, result);
     if (interrupt_active_ || current_thread() == nullptr) return;
+    charge_busy_time();
 
     if (interrupts_enabled_ && !pending_interrupts_.empty()) {
         interrupted_context_ = ctx;
@@ -637,8 +638,10 @@ std::string Kernel::describe_threads() const {
 void Kernel::charge_busy_time() {
     static const bool off = portablekit::env("NO_BUSY_CLOCK") != nullptr;
     if (off || interrupt_active_ || current_thread() == nullptr) return;
-    constexpr std::int64_t kBusyChargeMinUs = 1000;
-    constexpr std::int64_t kBusyChargeMaxUs = 50000;
+    // A frame that computes and then waits for the vblank never gets here:
+    // only a thread that has gone this long without any wait is charged.
+    constexpr std::int64_t kBusyChargeMinUs = 100000;
+    constexpr std::int64_t kBusyChargeMaxUs = 250000;
     const auto now = std::chrono::steady_clock::now();
     if (busy_thread_ != current_uid_ || busy_waits_ != waits_begun_) {
         busy_thread_ = current_uid_;

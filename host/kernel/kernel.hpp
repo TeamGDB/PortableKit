@@ -347,12 +347,14 @@ public:
 
     // Periodic hook from the runtime's starvation boundary.
     void on_starvation(AllegrexContext &ctx);
-    // A thread that reads the clock again and again without ever waiting is
-    // using CPU time the clock should show: a PSP's loop that draws, reads
-    // the time and draws again sees it move. Called by the clock reads, this
-    // moves emulated time on by the real time the thread has run since it
-    // last waited or was charged (at most kBusyChargeMaxUs at a time), once
-    // that is at least kBusyChargeMinUs. <prefix>_NO_BUSY_CLOCK turns it off.
+    // A thread that calls into the system again and again without ever
+    // waiting is using CPU time the clock should show: a PSP's loop that
+    // draws and reads the time, or polls a ring buffer, sees it move. Called
+    // as every import finishes, this moves emulated time on by the real time
+    // the thread has run since it last waited or was charged (at most
+    // kBusyChargeMaxUs at a time), once that is at least kBusyChargeMinUs
+    // (100 ms: longer than any frame of a game that waits for the vblank).
+    // <prefix>_NO_BUSY_CLOCK turns it off.
     void charge_busy_time();
 
     // Guest entry stubs.

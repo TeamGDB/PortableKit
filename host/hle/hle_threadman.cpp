@@ -269,21 +269,14 @@ void register_threads(HleRegistrar &hle) {
 }
 
 void register_time(HleRegistrar &hle) {
-    // Each clock read charges the time a thread that never waits has run
-    // (Kernel::charge_busy_time): God of War (UCES00842) draws its first
-    // screens in a loop that reads sceKernelGetSystemTimeWide and never
-    // waits, and without it the clock stood still at 1.2 s for good.
     hle.add("ThreadManForUser", "sceKernelGetSystemTime", [](Runtime &rt, AllegrexContext &ctx) {
-        kernel().charge_busy_time();
         store64(rt.memory(), arg(ctx, 0), kernel().now_us());
         kernel().finish(ctx, 0u);
     });
     hle.add("ThreadManForUser", "sceKernelGetSystemTimeWide", [](Runtime &, AllegrexContext &ctx) {
-        kernel().charge_busy_time();
         kernel().finish64(ctx, kernel().now_us());
     });
     hle.add("ThreadManForUser", "sceKernelGetSystemTimeLow", [](Runtime &, AllegrexContext &ctx) {
-        kernel().charge_busy_time();
         kernel().finish(ctx, static_cast<std::uint32_t>(kernel().now_us()));
     });
     // (SceKernelSysClock *clock, seconds *, microseconds *): the clock in
