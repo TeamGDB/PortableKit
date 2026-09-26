@@ -2,7 +2,7 @@
 
 A design, and a prototype of it in [`apps/portablekit`](../apps/portablekit): one program a player installs, points at the disc image of a PSP game they own, and plays. It recompiles the game on the player's own machine, and until that is done it plays the game under the interpreter.
 
-Everything measured here was measured on one machine: a MacBook Air M1 with 8 GB of memory, macOS 27, Apple clang 21, with LocoRoco 2 (`UCES-01059`) as the game. Windows and Linux are designed here but not built or run; see [What was not verified](#what-was-not-verified).
+The game throughout is LocoRoco 2 (`UCES-01059`). The prototype was built and run on a MacBook Air M1 with 8 GB of memory, macOS 27 and Apple clang 21; the corpus half of the Windows design (compiling, linking and loading the game's code with a shipped toolchain) was measured on the maintainer's Windows 11 PC. The app itself was not built on Windows, and Linux is designed only; see [What was not verified](#what-was-not-verified).
 
 **Contents:** [The product](#the-product) · [What the program ships, what the player brings](#what-the-program-ships-what-the-player-brings) · [Architecture](#architecture) · [Any game: the automatic profile](#any-game-the-automatic-profile) · [Keys](#keys) · [Saves](#saves) · [Compiling on the player's machine](#compiling-on-the-players-machine) · [Switching to compiled code](#switching-to-compiled-code) · [Growing the corpus](#growing-the-corpus) · [The interface](#the-interface) · [The command line](#the-command-line) · [What changed in the framework](#what-changed-in-the-framework) · [What the prototype does](#what-the-prototype-does) · [Decisions for the maintainer](#decisions-for-the-maintainer)
 
@@ -158,7 +158,7 @@ LocoRoco 2's corpus: 19 201 functions, 193 C++ units plus the registry and the a
 
 | Step | -O0 | -O2 |
 | --- | --- | --- |
-| Recompile to C++ (`psp_recomp`, one thread, peak 0.9 GB) | 178 s | 181 s |
+| Recompile to C++ (`psp_recomp`, one thread, under 1 GB) | 178 s | 181 s |
 | Compile 195 units | **173 s** | **2144 s** (36 min) |
 | Largest compiler process | 287 MB | 491 MB |
 | Link | 1.6 s | < 1 s |
@@ -193,6 +193,7 @@ So for this game on this machine:
 - **The interpreter is playable.** It is 12× slower than -O2 in play, but LocoRoco 2 needs a fraction of a PSP, so even interpreted it stays within its frame; the price is long hitches while a level loads. A heavier game (Monster Hunter's 3D, Tenkaichi's fights) will not be playable interpreted, and the design must not promise it: "plays slowly" is the honest wording.
 - **-O0 is the right first tier**: ready in 6 minutes (under 10 with the game running), twice as fast as the interpreter, and without the interpreter's worst hitches.
 - **-O2 is 6.5× faster than -O0** and worth the 36 minutes in the background: the first tier is what the player waits for, the second is free.
+
 ### macOS: Apple's Command Line Tools
 
 - **Use Apple's compiler; do not ship one.** It is free, it is what the program was built with (the corpus shares the program's C++ ABI and libc++ by construction), it is signed by Apple, and it is kept up to date by the system. Bundling a clang would add ~400 MB to the download and a second libc++ to reason about.
@@ -232,8 +233,8 @@ One portability bug found on the way: `include/psprecomp/allegrex_context.hpp` u
 | --- | --- | --- |
 | **Tiers**: compile -O0 first (6 min here), switch to it, then -O2 in the background and switch again | time to compiled code: 42 min → 6 min | 8% more compile work; the switch already exists |
 | **Pipelining**: `psp_recomp` writes units one by one (1 per second); start compiling each as it is written | the 3 minutes of recompiling overlap with compiling | `psp_recomp` reporting each finished unit, which it already prints |
-| **Share the C++ between levels**: the generated code does not depend on the level | the second 3-minute recompile | keying `generated/` by ABI only |
-| **Hot units at -O2, the rest at -O1/-O0**, from the interpreter's profile (`interpreted.txt`) or a first -O0 run's dispatch counts | most of the -O2 time: the hot set is a few percent of 194 units | a profile to collect before the fast build |
+| **Share the C++ between levels**: the generated code does not depend on the level | the second 3-minute recompile | done in the prototype's tiered compile: -O2 takes -O0's `generated/` |
+| **Hot units at -O2, the rest at -O1/-O0**, from the interpreter's profile (`interpreted.txt`) or a first -O0 run's dispatch counts | most of the -O2 time: in level 2 the hot set is 14 of 193 units | a profile to collect before the fast build |
 | **Parallelism by memory**: jobs from memory left and the per-unit peak (0.3–0.5 GB with clang) instead of one per 4 GiB | on 8 GB: 4 jobs instead of 2 | the app records the peak per compile, so it can adjust |
 | **Split large functions**: the recompiler emits one function per 16 KiB unit (up to ~20 000 lines); -O2's time grows faster than the function's size | not measured | recompiler work |
 | **Keep the objects** and relink only what changed when a profile-guided pass adds code | minutes per pass | 565 MB of disk per game |
@@ -243,7 +244,7 @@ For Yakumo, whose corpus plus 355 overlays take about two hours on an M1 at `-j2
 
 ### The corpus ABI and the cache
 
-- The library is `<cache>/<game id>/<abi>-O<level>/corpus.<dylib|so|dll>`. `<abi>` is a SHA-256 over every runtime header the generated code includes, every source of the recompiler and the runtime, and the compile definitions ([`cmake/corpus_abi.cmake`](../apps/portablekit/cmake/corpus_abi.cmake)); the prototype's is `f68962b4825ab46d…`.
+- The library is `<cache>/<game id>/<abi>-O<level>/corpus.<dylib|so|dll>`. `<abi>` is a SHA-256 over every runtime header the generated code includes, every source of the recompiler and the runtime, and the compile definitions ([`cmake/corpus_abi.cmake`](../apps/portablekit/cmake/corpus_abi.cmake)); the prototype's is `826f07749a791529…` (it was `f68962b4…` before the recompiler fix taken from #29).
 - The library exports `portablekit_corpus_abi()`, `portablekit_corpus_executable()` (the executable's SHA-256) and `portablekit_corpus_register(Runtime &)`; the program refuses a library whose answers differ from its own. Its own `register_generated_functions` is renamed at compile time so it cannot collide with the program's loader.
 - So a program update that touches none of those files keeps every cache; one that does compiles again, as it must. Today that is almost every update, because `runtime.hpp` changes often.
 - **Thin corpus ABI (proposed)**: generated code today includes `runtime.hpp`, which pulls in `std::string`, `std::vector` and the whole `Runtime` class. It needs far less: 11 runtime functions and 2 globals (listed from an object file of this corpus: `invoke_chained_call`, `invoke_chained_unit`, `register_function`, `register_generated_unit`, `run_starvation_boundary`, `unsupported`, five `GuestMemory::aot_*_slow`, the two chain globals) plus the layouts of `AllegrexContext` and `GuestMemory::AotFastView`. A C header with those layouts and a table of function pointers the program passes in would make the cache survive every runtime change that does not touch them, let any C++ compiler build the corpus for a program built by any other (MSVC program, clang corpus), and remove the C++ standard library from the corpus's link. It is the change that most improves this design; it touches the recompiler's output and `include/psprecomp/`, so it is its own piece of work.
@@ -270,7 +271,7 @@ Static analysis finds what the executable shows; code a game builds or copies at
 
 Step 3 needs `psp_recomp --seeds <file>`, which means an entry point into `analyze_program()` for extra seeds (`include/psprecomp/program_analysis.hpp`): not in the prototype, because that header is part of the corpus ABI. For code at addresses whose contents change (overlays), seeds are not enough: the corpus must be keyed by the bytes, which is exactly what the framework's overlay libraries do. An automatic version of that — detect a slot by `sceKernelIcacheInvalidate*` over a range the interpreter then runs, dump it, recompile it as an overlay library — is the path to Yakumo-like games without a hand profile.
 
-For LocoRoco 2 the question does not arise: the interpreter was never entered with the compiled corpus loaded (`interpreted.txt` stays empty), as Purun's README reports for its own build.
+For LocoRoco 2 the question does not arise: with the compiled corpus loaded, the interpreter was never entered (no interpreter line in any compiled run's log), as Purun's README reports for its own build. From an interpreter-only run the same file is the other thing the design wants, the hot set: from the title into level 2, 78 entry addresses account for 90% of the instructions interpreted, and they lie in **14 of the 193 units**. Those are what "hot units at -O2 first" would compile first: a few minutes instead of 36 for most of -O2's benefit, if the hot set holds across a game (not measured past level 2).
 
 ## The interface
 
@@ -370,7 +371,7 @@ Built with `cmake -S apps/portablekit -B out-app -G Ninja -DCMAKE_BUILD_TYPE=Rel
 - **Windows**: the app itself was not built or run there. What was run on the maintainer's PC is the corpus half: the trimmed llvm-mingw compiling this game's generated units, and the link model (a stand-in program exporting the runtime, a corpus DLL linked against its import library and loaded). Whether the framework and the app build with llvm-mingw is the open question of option A.
 - **Linux and the Steam Deck**: designed only. The code has Linux paths (`posix_spawn`, `dlopen`, XDG directories, `c++` on `PATH`) that were not compiled.
 - **macOS without Xcode**: compiled with Xcode's toolchain through `xcrun`; a machine with only the Command Line Tools was not tried, nor the install prompt, nor a signed and notarized build loading an unsigned corpus.
-- **Gameplay** past the title sequence was not played in the app; the level-2 comparison used a save made by Purun's build (see the table).
+- **Gameplay** in the app went as far as the start of level 2, reached by continuing from a save made by Purun's build; nothing was played by hand, and nothing past that point was tried.
 - **Unknown games**: only LocoRoco 2 was added. The automatic profile's defaults are reasoned, not tested on a second game; Tenkawa's disc was not at hand.
 - **The encrypted-executable message without keys** (exit 11) was checked by reading the code only: this disc always has `BOOT.BIN` to fall back to.
 - Import and export of saves in the no-keys mode were not exercised through the menu.
