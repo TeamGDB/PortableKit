@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <span>
 #include <string>
+#include <string_view>
 
 namespace psprecomp {
 class Elf32Image;
@@ -97,6 +98,25 @@ struct CameraDriver {
     float (*degrees_per_second)() = nullptr;
 };
 
+// One edition of the game a profile covers beside the one its own fields
+// describe: another executable of the same disc id, such as the release with
+// a fan patch applied (FUComplete on Monster Hunter Portable 2nd G) or a
+// translation. Each is known by its executable's hash, runs its own corpus
+// (a port builds it from generated-variants/<key>/), and shares the saves.
+struct ProfileVariant {
+    const char *key;  // "fuc-1.4": its corpus's name; lower case, digits, '-' and '_'
+    const char *name; // "FUComplete 1.4", for the player
+    // SHA-256 of EBOOT.BIN on the disc when it is encrypted (the installer
+    // decrypts it with the profile's key), or null when this edition's
+    // EBOOT.BIN is the plain executable already.
+    const char *encrypted_executable_sha256 = nullptr;
+    const char *executable_sha256 = nullptr;
+    // What this edition does differently; null or empty: the profile's own.
+    void (*register_extra_hle)(HleRegistrar &) = nullptr;
+    void (*patch_loaded_image)(psprecomp::Runtime &, const psprecomp::Elf32Image &) = nullptr;
+    std::span<const std::uint32_t> overlay_slots = {};
+};
+
 struct GameProfile {
     // --- What the port is called -------------------------------------------
     const char *app_name;          // the executable: "MHP3rdNative"
@@ -132,6 +152,13 @@ struct GameProfile {
     // selects instead of a 16-byte key, as the published tables give it
     // (already scrambled). Empty: the tag selects decryption_key.
     std::span<const std::uint8_t> decryption_key_table = {};
+    // Other editions of the same disc (see ProfileVariant). Empty: only the
+    // executable above is known.
+    std::span<const ProfileVariant> variants = {};
+    // An unencrypted executable that is none of the known ones (a patch in a
+    // version nobody listed yet): true installs and runs it under the
+    // interpreter, with a warning; false refuses it at setup.
+    bool run_unknown_executables = false;
 
     // --- How the game sits in guest memory ---------------------------------
     std::uint32_t load_base;
@@ -215,6 +242,24 @@ struct GameProfile {
 // Defined by the port, exactly once. Everything under host/ reads the game
 // through this and nothing else.
 [[nodiscard]] const GameProfile &game();
+
+// --- Editions (ProfileVariant) ----------------------------------------------
+// The edition whose executable, or encrypted EBOOT.BIN, has this SHA-256; null
+// for the profile's own and for an unknown one.
+[[nodiscard]] const ProfileVariant *find_variant(std::string_view executable_sha256);
+[[nodiscard]] const ProfileVariant *find_variant_by_encrypted(std::string_view eboot_sha256);
+// The profile's own executable or one of its editions'.
+[[nodiscard]] bool is_known_executable(std::string_view executable_sha256);
+// The edition running now, chosen by host/main.cpp from the executable's hash;
+// null for the profile's own (and before it is known).
+void set_active_variant(const ProfileVariant *variant);
+[[nodiscard]] const ProfileVariant *active_variant();
+// The profile's hooks and overlay slots as the running edition sets them.
+using ExtraHleHook = void (*)(HleRegistrar &);
+using PatchImageHook = void (*)(psprecomp::Runtime &, const psprecomp::Elf32Image &);
+[[nodiscard]] ExtraHleHook active_register_extra_hle();
+[[nodiscard]] PatchImageHook active_patch_loaded_image();
+[[nodiscard]] std::span<const std::uint32_t> active_overlay_slots();
 
 // getenv("<env_prefix>_" + name), so host code names the variable without the
 // game's prefix: env("TRACE_GE") reads <prefix>_TRACE_GE in Yakumo.

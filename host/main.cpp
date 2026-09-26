@@ -2,6 +2,7 @@
 #include "system.hpp"
 
 #include "app_paths.hpp"
+#include "corpus_library.hpp"
 
 #include "adhoc/client.hpp"
 #include "adhoc/discovery.hpp"
@@ -347,8 +348,17 @@ int main(int argc, char **argv) {
             throw psprecomp::Error("Missing " + executable.string() + " (run scripts/prepare_game.sh)");
 
         const std::string sha256 = psprecomp::sha256_file(executable);
-        if (sha256 != portablekit::game().executable_sha256)
-            std::cerr << "warning: unsupported executable hash " << sha256 << "\n";
+        // Which edition this is decides which corpus may run it: code
+        // generated from another executable must never run this one.
+        const portablekit::ProfileVariant *variant = portablekit::find_variant(sha256);
+        const bool known_executable = portablekit::is_known_executable(sha256);
+        portablekit::set_active_variant(variant);
+        if (!known_executable)
+            std::cerr << "warning: " << executable.string() << " (SHA-256 " << sha256
+                      << ") is not an executable this build knows; it runs under the interpreter, without "
+                         "recompiled code\n";
+        else if (variant != nullptr)
+            std::cout << "Edition:    " << variant->name << "\n";
 
         const psprecomp::Elf32Image elf = psprecomp::Elf32Image::from_file(executable);
         const std::uint32_t load_base = portablekit::game().load_base;
@@ -360,7 +370,20 @@ int main(int argc, char **argv) {
         psprecomp::Runtime runtime(ram_bytes);
         for (const EmbeddedNid &entry : kEmbeddedNids) runtime.nids().add(entry.library, entry.nid, entry.name);
         (void)elf.load_and_relocate(runtime.memory(), load_base);
-        psprecomp::register_generated_functions(runtime);
+        if (known_executable && variant == nullptr) {
+            psprecomp::register_generated_functions(runtime);
+        } else if (variant != nullptr) {
+            // An edition's corpus is a library of its own (generated-variants/<key>/).
+            const std::filesystem::path library = portablekit::variant_corpus_path(*variant);
+            std::string error;
+            if (!std::filesystem::exists(library))
+                std::cout << "No recompiled code for " << variant->name << " (" << library.string()
+                          << "); it runs under the interpreter.\n";
+            else if (const auto corpus = portablekit::open_corpus_library(library, sha256, error))
+                corpus->register_all(runtime);
+            else
+                std::cerr << "warning: cannot use " << library.string() << ": " << error << "\n";
+        }
         portablekit::install_system(runtime, elf, paths);
 
         std::cout << portablekit::game().app_name << " PSP bootstrap\n"

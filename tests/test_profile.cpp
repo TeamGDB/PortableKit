@@ -16,6 +16,23 @@ constexpr SaveFolder kSaveFolders[] = {
     {"TEST00001DAT", "Install data", false},
 };
 
+constexpr std::uint32_t kPatchedSlots[] = {0x09000000u, 0x09100000u};
+void patched_image(psprecomp::Runtime &, const psprecomp::Elf32Image &) {}
+
+// Two editions beside the release: a patched plain executable, and an
+// encrypted one. The hashes are invented.
+constexpr ProfileVariant kVariants[] = {
+    {.key = "patched",
+     .name = "Test patch 1.0",
+     .executable_sha256 = "1111111111111111111111111111111111111111111111111111111111111111",
+     .patch_loaded_image = &patched_image,
+     .overlay_slots = kPatchedSlots},
+    {.key = "other",
+     .name = "Other release",
+     .encrypted_executable_sha256 = "2222222222222222222222222222222222222222222222222222222222222222",
+     .executable_sha256 = "3333333333333333333333333333333333333333333333333333333333333333"},
+};
+
 } // namespace
 
 const GameProfile &game() {
@@ -34,6 +51,7 @@ const GameProfile &game() {
         .executable_sha256 = "",
         .decryption_tag = 0u,
         .decryption_key = {},
+        .variants = kVariants,
         .load_base = 0x08804000u,
         .guest_ram_bytes = 32u * 1024u * 1024u,
         .boot_path = "disc0:/PSP_GAME/SYSDIR/EBOOT.BIN",

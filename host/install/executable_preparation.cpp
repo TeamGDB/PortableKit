@@ -218,13 +218,27 @@ std::vector<std::uint8_t> decrypt_executable(std::span<const std::uint8_t> eboot
 
 std::vector<std::uint8_t> prepare_executable(std::span<const std::uint8_t> eboot_bin,
                                              const std::function<void(std::uint64_t, std::uint64_t)> &progress) {
-    if (psprecomp::sha256_bytes(eboot_bin) != game().encrypted_executable_sha256)
+    const std::string eboot_sha256 = psprecomp::sha256_bytes(eboot_bin);
+    // An edition whose EBOOT.BIN is the plain executable (a patched release):
+    // nothing to decrypt. The installer has already decided whether an
+    // unknown one may run.
+    if (eboot_bin.size() > 4u && eboot_bin[0] == 0x7Fu && eboot_bin[1] == 'E' && eboot_bin[2] == 'L' &&
+        eboot_bin[3] == 'F') {
+        if (!is_known_executable(eboot_sha256) && !game().run_unknown_executables)
+            throw psprecomp::Error("EBOOT.BIN is not an executable of " + std::string(game().game_title) + " (" +
+                                   game().disc_id_display + ") this build knows");
+        if (progress) progress(eboot_bin.size(), eboot_bin.size());
+        return {eboot_bin.begin(), eboot_bin.end()};
+    }
+    const ProfileVariant *variant = find_variant_by_encrypted(eboot_sha256);
+    if (variant == nullptr && eboot_sha256 != game().encrypted_executable_sha256)
         throw psprecomp::Error("EBOOT.BIN is not the supported executable of " + std::string(game().game_title) + " (" +
                                game().disc_id_display + ")");
     // The hash already pins the file; the profile names the key its tag selects.
     const TagKeyMaterial tag{game().decryption_tag, game().decryption_key, game().decryption_key_table};
     std::vector<std::uint8_t> executable = decrypt_executable(eboot_bin, tag, progress);
-    if (psprecomp::sha256_bytes(executable) != game().executable_sha256)
+    const char *expected = variant != nullptr ? variant->executable_sha256 : game().executable_sha256;
+    if (expected == nullptr || psprecomp::sha256_bytes(executable) != expected)
         throw psprecomp::Error("The prepared executable does not match the supported one");
     return executable;
 }
