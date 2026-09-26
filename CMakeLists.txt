@@ -235,6 +235,16 @@ if(PSPRECOMP_BUILD_TESTS)
     add_test(NAME portablekit_profile_tests COMMAND portablekit_profile_tests)
 endif()
 
+# Fixed-size memory pools (sceKernel*Fpl): their bookkeeping, with no kernel.
+if(PSPRECOMP_BUILD_TESTS)
+    add_executable(portablekit_pool_tests
+        "${PORTABLEKIT_ROOT}/tests/pool_tests.cpp"
+        "${PORTABLEKIT_ROOT}/host/kernel/fixed_pool.cpp")
+    target_include_directories(portablekit_pool_tests PRIVATE "${PORTABLEKIT_ROOT}/host")
+    set_target_properties(portablekit_pool_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME portablekit_pool_tests COMMAND portablekit_pool_tests)
+endif()
+
 # Texture pack import: finding a pack in the layouts packs come in, the
 # checks made before copying, and the copy, swap and backup. No game data.
 if(PSPRECOMP_BUILD_TESTS)

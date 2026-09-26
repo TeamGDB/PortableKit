@@ -2,6 +2,8 @@
 // mutexes, callbacks, VTimers and interrupt masking.
 #include "hle_common.hpp"
 
+#include "kernel/fixed_pool.hpp"
+
 #include "psprecomp/common.hpp"
 
 #include <algorithm>
@@ -794,11 +796,17 @@ struct Vpl {
     std::uint32_t address{};
     std::uint32_t size{};
     std::map<std::uint32_t, std::uint32_t> used; // start -> bytes, including the overhead
+    std::uint32_t waiting{};                     // threads blocked in sceKernelAllocateVpl
+    std::uint64_t cancel_generation{};           // bumped by sceKernelCancelVpl
 };
 
 constexpr std::uint32_t kVplOverhead = 8u;
 constexpr std::uint32_t kVplAttrHighMemory = 0x4000u;
 constexpr std::uint32_t kUnknownVplid = 0x8002019Cu;
+constexpr std::uint32_t kUnknownFplid = 0x8002019Du;
+constexpr std::uint32_t kIllegalAttr = 0x80020191u;
+constexpr std::uint32_t kWaitCancel = 0x800201A9u;
+constexpr std::uint32_t kIllegalMemsize = 0x800201B7u;
 
 std::map<SceUID, Vpl> &vpls() {
     static std::map<SceUID, Vpl> pools;
@@ -893,16 +901,29 @@ void register_vpls(HleRegistrar &hle) {
         std::optional<std::uint64_t> timeout;
         if (timeout_address != 0u) timeout = rt.memory().load32(timeout_address);
         auto &memory = rt.memory();
-        kernel().wait_host(ctx, timeout, [uid, size, out, timeout_address, &memory](bool timed_out) -> std::optional<std::uint32_t> {
+        // Room now: no wait at all.
+        if (const auto address = vpl_allocate(found->second, size)) {
+            if (out != 0u) memory.store32(out, *address);
+            kernel().finish(ctx, 0u);
+            return;
+        }
+        ++found->second.waiting;
+        const std::uint64_t generation = found->second.cancel_generation;
+        kernel().wait_host(ctx, timeout, [uid, size, out, timeout_address, generation, &memory](bool timed_out) -> std::optional<std::uint32_t> {
             const auto pool = vpls().find(uid);
             if (pool == vpls().end()) return error::kWaitDelete;
+            if (pool->second.cancel_generation != generation) return kWaitCancel;  // counted out by the cancel
+            const auto leave = [&](std::uint32_t result) {
+                --pool->second.waiting;
+                return result;
+            };
             if (const auto address = vpl_allocate(pool->second, size)) {
                 if (out != 0u) memory.store32(out, *address);
-                return 0u;
+                return leave(0u);
             }
             if (timed_out) {
                 if (timeout_address != 0u) memory.store32(timeout_address, 0u);
-                return error::kWaitTimeout;
+                return leave(error::kWaitTimeout);
             }
             return std::nullopt;
         });
@@ -942,15 +963,18 @@ void register_vpls(HleRegistrar &hle) {
         found->second.used.erase(used);
         kernel().finish(ctx, 0u);
     });
+    // Releases every waiting thread with SCE_KERNEL_ERROR_WAIT_CANCEL and
+    // stores how many there were.
     hle.add("ThreadManForUser", "sceKernelCancelVpl", [](Runtime &rt, AllegrexContext &ctx) {
-        // Waiters poll; nothing here tracks them, so there are none to count.
         const auto found = vpls().find(as_signed(arg(ctx, 0)));
         if (found == vpls().end()) {
             kernel().finish(ctx, kUnknownVplid);
             return;
         }
-        log_once("vpl-cancel", "[kernel] sceKernelCancelVpl does not release waiting threads");
-        if (arg(ctx, 1) != 0u) rt.memory().store32(arg(ctx, 1), 0u);
+        const std::uint32_t released = found->second.waiting;
+        found->second.waiting = 0u;
+        ++found->second.cancel_generation;
+        if (arg(ctx, 1) != 0u) rt.memory().store32(arg(ctx, 1), released);
         kernel().finish(ctx, 0u);
     });
     // SceKernelVplInfo: size, name[32], attr, poolSize, freeSize, numWaitThreads.
@@ -969,8 +993,206 @@ void register_vpls(HleRegistrar &hle) {
             memory.store32(info + 36u, pool.attributes);
             memory.store32(info + 40u, pool.size);
             memory.store32(info + 44u, vpl_free_size(pool));
-            memory.store32(info + 48u, 0u);
+            memory.store32(info + 48u, pool.waiting);
         }
+        kernel().finish(ctx, 0u);
+    });
+}
+
+// Fixed-size memory pools: `count` blocks of one size in a block of partition
+// memory (kernel/fixed_pool.hpp keeps the books). The calls and the layout of
+// SceKernelFplInfo follow the SDK's pspthreadman.h; the option block's
+// alignment word (at +4, when its size says it is there) and the attributes
+// are what games pass, logged with <prefix>_TRACE_SYNC.
+struct Fpl {
+    std::string name;
+    std::uint32_t attributes{};
+    SceUID block{};
+    kernel_pools::FixedPool pool;
+};
+
+// 0x100: waiting threads are served by priority rather than in order (served
+// in order here, see below); 0x4000: from the top of the partition.
+constexpr std::uint32_t kFplAttrPriority = 0x100u;
+constexpr std::uint32_t kFplAttrHighMemory = 0x4000u;
+constexpr std::uint32_t kFplKnownAttributes = kFplAttrPriority | kFplAttrHighMemory;
+
+std::map<SceUID, Fpl> &fpls() {
+    static std::map<SceUID, Fpl> pools;
+    return pools;
+}
+
+void register_fpls(HleRegistrar &hle) {
+    // sceKernelCreateFpl(name, partition, attr, block size, blocks, option)
+    hle.add("ThreadManForUser", "sceKernelCreateFpl", [](Runtime &rt, AllegrexContext &ctx) {
+        auto &memory = rt.memory();
+        Fpl fpl;
+        fpl.name = arg(ctx, 0) != 0u ? read_cstring(memory, arg(ctx, 0), 32u) : std::string();
+        const std::uint32_t partition = arg(ctx, 1);
+        fpl.attributes = arg(ctx, 2);
+        const std::uint32_t block_size = arg(ctx, 3);
+        const std::uint32_t count = ctx.gpr[8];   // t0: the fifth argument
+        const std::uint32_t option = ctx.gpr[9];  // t1
+        std::uint32_t alignment = 0u;
+        if (option != 0u && memory.load32(option) >= 8u) alignment = memory.load32(option + 4u);
+        if (trace_sync())
+            log_sync("[kernel] CreateFpl \"" + fpl.name + "\" partition=" + std::to_string(partition) + " attr=" +
+                     psprecomp::hex32(fpl.attributes) + " block=" + psprecomp::hex32(block_size) + " count=" +
+                     std::to_string(count) + " option=" + psprecomp::hex32(option) + " align=" +
+                     std::to_string(alignment));
+        if ((fpl.attributes & ~kFplKnownAttributes) != 0u) {
+            kernel().finish(ctx, kIllegalAttr);
+            return;
+        }
+        const auto layout = kernel_pools::fixed_pool_layout(block_size, count, alignment);
+        if (!layout) {
+            kernel().finish(ctx, block_size == 0u || count == 0u ? kIllegalMemsize : error::kIllegalArgument);
+            return;
+        }
+        if ((fpl.attributes & kFplAttrPriority) != 0u)
+            log_once("fpl-priority", "[kernel] an Fpl asks for waiters by priority; they are served in order");
+        const bool high = (fpl.attributes & kFplAttrHighMemory) != 0u;
+        // Aligned block types (3 low, 4 high) when the pool asks for more than
+        // the partition's own alignment.
+        const std::int32_t block =
+            layout->alignment > 4u
+                ? kernel().allocate_block("fpl:" + fpl.name, high ? 4u : 3u, layout->bytes, layout->alignment)
+                : kernel().allocate_block("fpl:" + fpl.name, high ? 1u : 0u, layout->bytes, 0u);
+        if (block < 0) {
+            kernel().finish(ctx, error::kNoMemory);
+            return;
+        }
+        fpl.block = block;
+        fpl.pool = kernel_pools::FixedPool(kernel().find_block(block)->address, block_size, count, *layout);
+        const SceUID uid = kernel().allocate_uid();
+        if (trace_sync())
+            log_sync("[kernel] fpl " + fpl.name + " uid=" + std::to_string(uid) + " at " +
+                     psprecomp::hex32(fpl.pool.address()) + " bytes=" + psprecomp::hex32(layout->bytes));
+        fpls().emplace(uid, std::move(fpl));
+        kernel().finish(ctx, as_unsigned(uid));
+    });
+    // Threads waiting on it wake with SCE_KERNEL_ERROR_WAIT_DELETE.
+    hle.add("ThreadManForUser", "sceKernelDeleteFpl", [](Runtime &, AllegrexContext &ctx) {
+        const auto found = fpls().find(as_signed(arg(ctx, 0)));
+        if (found == fpls().end()) {
+            kernel().finish(ctx, kUnknownFplid);
+            return;
+        }
+        (void)kernel().free_block(found->second.block);
+        fpls().erase(found);
+        kernel().finish(ctx, 0u);
+    });
+    // sceKernelAllocateFpl(uid, void **block, unsigned *timeout). A thread that
+    // finds no free block waits, first come first served, until one is freed,
+    // the pool is deleted or cancelled, or the timeout (microseconds, rewritten
+    // with what is left: 0 when it runs out) passes.
+    const auto allocate = [](Runtime &rt, AllegrexContext &ctx) {
+        const SceUID uid = as_signed(arg(ctx, 0));
+        const auto found = fpls().find(uid);
+        if (found == fpls().end()) {
+            kernel().finish(ctx, kUnknownFplid);
+            return;
+        }
+        auto &memory = rt.memory();
+        const std::uint32_t out = arg(ctx, 1);
+        const std::uint32_t timeout_address = arg(ctx, 2);
+        kernel_pools::FixedPool &pool = found->second.pool;
+        if (pool.waiting() == 0u) {
+            if (const auto block = pool.allocate()) {
+                if (out != 0u) memory.store32(out, *block);
+                if (trace_sync())
+                    log_sync("[kernel] AllocateFpl " + std::to_string(uid) + " -> " + psprecomp::hex32(*block));
+                kernel().finish(ctx, 0u);
+                return;
+            }
+        }
+        std::optional<std::uint64_t> timeout;
+        if (timeout_address != 0u) timeout = memory.load32(timeout_address);
+        const std::uint64_t ticket = pool.enqueue();
+        const std::uint64_t generation = pool.cancel_generation();
+        if (trace_sync()) log_sync("[kernel] AllocateFpl " + std::to_string(uid) + " waits");
+        kernel().wait_host(ctx, timeout, [uid, out, timeout_address, ticket, generation, &memory](bool timed_out) -> std::optional<std::uint32_t> {
+            const auto fpl = fpls().find(uid);
+            if (fpl == fpls().end()) return error::kWaitDelete;
+            kernel_pools::FixedPool &waited = fpl->second.pool;
+            if (waited.cancel_generation() != generation) return kWaitCancel;
+            if (waited.first_in_line(ticket)) {
+                if (const auto block = waited.allocate()) {
+                    waited.leave(ticket);
+                    if (out != 0u) memory.store32(out, *block);
+                    return 0u;
+                }
+            }
+            if (timed_out) {
+                waited.leave(ticket);
+                if (timeout_address != 0u) memory.store32(timeout_address, 0u);
+                return error::kWaitTimeout;
+            }
+            return std::nullopt;
+        });
+    };
+    hle.add("ThreadManForUser", "sceKernelAllocateFpl", allocate);
+    hle.add("ThreadManForUser", "sceKernelAllocateFplCB", allocate);
+    // No free block, or threads already waiting for one: SCE_KERNEL_ERROR_NO_MEMORY.
+    hle.add("ThreadManForUser", "sceKernelTryAllocateFpl", [](Runtime &rt, AllegrexContext &ctx) {
+        const auto found = fpls().find(as_signed(arg(ctx, 0)));
+        if (found == fpls().end()) {
+            kernel().finish(ctx, kUnknownFplid);
+            return;
+        }
+        kernel_pools::FixedPool &pool = found->second.pool;
+        const auto block = pool.waiting() == 0u ? pool.allocate() : std::nullopt;
+        if (!block) {
+            kernel().finish(ctx, error::kNoMemory);
+            return;
+        }
+        if (arg(ctx, 1) != 0u) rt.memory().store32(arg(ctx, 1), *block);
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("ThreadManForUser", "sceKernelFreeFpl", [](Runtime &, AllegrexContext &ctx) {
+        const auto found = fpls().find(as_signed(arg(ctx, 0)));
+        if (found == fpls().end()) {
+            kernel().finish(ctx, kUnknownFplid);
+            return;
+        }
+        if (!found->second.pool.free(arg(ctx, 1))) {
+            kernel().finish(ctx, error::kIllegalMemblock);
+            return;
+        }
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("ThreadManForUser", "sceKernelCancelFpl", [](Runtime &rt, AllegrexContext &ctx) {
+        const auto found = fpls().find(as_signed(arg(ctx, 0)));
+        if (found == fpls().end()) {
+            kernel().finish(ctx, kUnknownFplid);
+            return;
+        }
+        const std::uint32_t released = found->second.pool.cancel_waiters();
+        if (arg(ctx, 1) != 0u) rt.memory().store32(arg(ctx, 1), released);
+        kernel().finish(ctx, 0u);
+    });
+    // SceKernelFplInfo: size, name[32], attr, blockSize, numBlocks, freeBlocks,
+    // numWaitThreads. Written only when the game says it has room (size).
+    hle.add("ThreadManForUser", "sceKernelReferFplStatus", [](Runtime &rt, AllegrexContext &ctx) {
+        const auto found = fpls().find(as_signed(arg(ctx, 0)));
+        if (found == fpls().end()) {
+            kernel().finish(ctx, kUnknownFplid);
+            return;
+        }
+        const Fpl &fpl = found->second;
+        const std::uint32_t info = arg(ctx, 1);
+        auto &memory = rt.memory();
+        const std::uint32_t size = memory.load32(info);
+        const auto put = [&](std::uint32_t offset, std::uint32_t value) {
+            if (offset + 4u <= size) memory.store32(info + offset, value);
+        };
+        for (std::uint32_t i = 0; i < 32u && 4u + i < size; ++i)
+            memory.store8(info + 4u + i, i < fpl.name.size() ? static_cast<std::uint8_t>(fpl.name[i]) : 0u);
+        put(36u, fpl.attributes);
+        put(40u, fpl.pool.block_size());
+        put(44u, fpl.pool.count());
+        put(48u, fpl.pool.free_count());
+        put(52u, fpl.pool.waiting());
         kernel().finish(ctx, 0u);
     });
 }
@@ -987,6 +1209,7 @@ void register_threadman(HleRegistrar &hle) {
     register_stack_extension(hle);
     register_mailboxes(hle);
     register_vpls(hle);
+    register_fpls(hle);
     register_callbacks_and_timers(hle);
     register_kernel_library(hle);
 }
