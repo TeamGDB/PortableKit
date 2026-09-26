@@ -32,7 +32,10 @@
 
 #include "app_paths.hpp"
 #include "corpus_abi.hpp"
+#include "hle/hle_extensions.hpp"
 #include "install/user_data.hpp"
+#include "portablekit_build_label.hpp"
+#include "portablekit_version.hpp"
 
 #include "psprecomp/interpreter.hpp"
 
@@ -72,6 +75,7 @@ const char *const kUsageText =
     "       portablekit keys status\n"
     "       portablekit cache clear <game>\n"
     "       portablekit toolchain\n"
+    "       portablekit version                 also --version\n"
     "  <game> is a game's id, its disc id (UCES01059 or UCES-01059), or a unique prefix.\n"
     "  Every command takes --json and then prints one JSON object on stdout, and\n"
     "  --data-dir <folder> to use another data folder than the one next to the program.\n";
@@ -466,6 +470,25 @@ int command_toolchain() {
     return toolchain.found ? 0 : 20;
 }
 
+// The build: its version, its label and the HLE extension modules linked in.
+int command_version() {
+    const auto modules = linked_hle_extensions();
+    if (g_json) {
+        std::vector<Json> items;
+        for (const HleExtensionModule &module : modules)
+            items.push_back(Json().field("name", module.name).field("title", module.title)
+                                .field("version", module.version).field("license", module.license));
+        std::cout << Json().field("ok", true).field("version", kBuildVersion).field("label", kBuildLabel)
+                         .field("abi", kCorpusAbi).array("hle_extensions", items).str() << "\n";
+        return 0;
+    }
+    std::cout << "PortableKit " << kBuildVersion;
+    if (*kBuildLabel != '\0') std::cout << " (" << kBuildLabel << ")";
+    std::cout << "\n  corpus ABI: " << kCorpusAbi << "\n";
+    print_hle_extension_modules(std::cout, modules);
+    return 0;
+}
+
 int dispatch(int argc, char **argv) {
     const Arguments args = parse(argc, argv, 1);
     g_json = args.has("json");
@@ -474,6 +497,8 @@ int dispatch(int argc, char **argv) {
         std::cout << kUsageText;
         return 0;
     }
+    if (args.has("version") || (!args.positional.empty() && args.positional[0] == "version"))
+        return command_version();
     if (args.positional.empty()) {
         activate_launcher_profile();
         set_environment("PORTABLEKIT_DATA_DIR", path_text(home_directory() / "launcher"));

@@ -64,8 +64,12 @@ struct CameraReading {
     std::array<float, 16> view{};
 };
 
+// The program's name, followed by the build label (PORTABLEKIT_BUILD_LABEL)
+// when there is one.
+[[nodiscard]] std::string default_window_title();
+
 struct RendererConfig {
-    std::string title{portablekit::game().app_name};
+    std::string title{default_window_title()};
 };
 
 // Vulkan backend for the GE. Draw calls are rendered into an offscreen target
