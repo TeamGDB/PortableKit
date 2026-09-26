@@ -13,6 +13,9 @@ namespace portablekit {
 
 // Read-only ISO9660 view of a PSP UMD image. Paths are case-insensitive and
 // use '/' separators relative to the image root (e.g. "PSP_GAME/USRDIR/DATA.BIN").
+// Listings keep each name as the disc spells it: a game may hash the names
+// it reads from a directory (God of War does) and look them up by its own
+// mixed-case paths.
 class IsoImage {
 public:
     static constexpr std::uint32_t kSectorSize = 2048u;
@@ -21,6 +24,7 @@ public:
         std::uint32_t lba{};
         std::uint32_t size{};
         bool directory{};
+        std::string name;  // the last component, as on the disc
     };
 
     explicit IsoImage(const std::filesystem::path &path);

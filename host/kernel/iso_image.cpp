@@ -60,7 +60,7 @@ void IsoImage::scan_directory(std::uint32_t lba, std::uint32_t size, const std::
         if (name_length == 1u && (name[0] == '\0' || name[0] == '\1')) continue;
         if (const auto version = name.find(';'); version != std::string::npos) name.resize(version);
         const std::string full = normalize(prefix.empty() ? name : prefix + "/" + name);
-        entries_[full] = Entry{entry_lba, entry_size, directory};
+        entries_[full] = Entry{entry_lba, entry_size, directory, name};
         if (directory) scan_directory(entry_lba, entry_size, full, depth + 1);
     }
 }
@@ -84,11 +84,10 @@ std::vector<std::string> IsoImage::list(std::string directory) const {
     const std::string prefix = normalize(std::move(directory));
     std::vector<std::string> names;
     for (const auto &[path, entry] : entries_) {
-        (void)entry;
         if (path.empty() || path.size() <= prefix.size()) continue;
         if (!prefix.empty() && (path.compare(0, prefix.size(), prefix) != 0 || path[prefix.size()] != '/')) continue;
         const std::string rest = prefix.empty() ? path : path.substr(prefix.size() + 1u);
-        if (rest.find('/') == std::string::npos) names.push_back(rest);
+        if (rest.find('/') == std::string::npos) names.push_back(entry.name.empty() ? rest : entry.name);
     }
     return names;
 }
