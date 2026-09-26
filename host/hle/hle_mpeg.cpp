@@ -525,7 +525,10 @@ void register_decoding(HleRegistrar &hle) {
         }
         if (arg(ctx, 4) != 0u) memory.store32(arg(ctx, 4), produced ? 1u : 0u);
         finish_traced(ctx, "sceMpegAvcDecode", 0u,
-                      produced ? "picture " + std::to_string(state->pictures) + " width " + std::to_string(width) : "none", 5u);
+                      produced ? "picture " + std::to_string(state->pictures) + " width " + std::to_string(width) + " mode " +
+                                     std::to_string(state->pixel_mode) + " to " + psprecomp::hex32(memory.load32(arg(ctx, 3)))
+                               : "none",
+                      5u);
     });
     // sceMpegAvcDecodeStop(mpeg, frameWidth, bufferPointer, outStatus): a
     // picture the decoder still holds at the end of the stream.
