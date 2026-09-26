@@ -160,10 +160,12 @@ kirk.cmd1    = <16 bytes>      # the KIRK command 1 AES key
 savedata.2   = <16 bytes>      # save-data keys 2 to 7
 tag.C0CB167C = <16 bytes, or the 0x90-byte table of an old header layout>
 tag.C0CB167C.slot = 5D         # optional: the KIRK slot the tag's header uses
+amctrl.1CD4  = <16 bytes>      # the DRM library's fixed keys, for PGD data (also .1CE4, .1CF4, amctrl.dnas.1A90, .1AA0)
 ```
 
 - `portablekit keys import <file>` checks the file and copies it into the data folder. Every fixed key is checked against a SHA-256 fingerprint compiled into the program, so the player is told "`savedata.4` is not the right key" instead of getting garbage later. Tag keys have no fingerprint: an executable that decrypts to an ELF the runtime can load is the check.
 - What each group enables: `kirk.aes.5D` + `kirk.cmd1` + the game's `tag.*` decrypt that game's `EBOOT.BIN`; the nine save slots and `savedata.2`–`7` encrypt and decrypt saves. `portablekit keys status` says which of these the file provides.
+- PGD data (below) uses `kirk.aes.38`, `kirk.aes.39`, `kirk.aes.63`, `amctrl.1CD4`, `amctrl.1CE4`, `amctrl.1CF4`, `amctrl.dnas.1A90` and `amctrl.dnas.1AA0` ; `keys status` says "decrypt PGD data: yes" when the first six are there. All eight have fingerprints, checked against PSP2i's file; the two DNAS keys are accepted but not used yet, since no PGD file of that kind has been checked.
 - Without keys, a game can still be added when its disc carries an unencrypted `BOOT.BIN` (LocoRoco 2 does), or when the player gives an executable they decrypted (`--executable`). The program never names a source of keys.
 - A name the program does not use is a warning ("... is not a key this program or its extension modules use; it is ignored.") and is left out; it does not refuse the file. HLE extension modules the build links may declare more names, which are read and checked like the program's own ([HLE_EXTENSIONS.md](HLE_EXTENSIONS.md#keys)); `keys status` lists them by module.
 
@@ -173,6 +175,14 @@ Messages when something is missing, as the prototype prints them:
 - *"EBOOT.BIN is encrypted with tag D91613F0, and the keys file has no key for it (tag.D91613F0)."* (exit code 11)
 - *"The save is encrypted, as a PSP writes it. Importing it needs the console's keys: add a keys file."* (the save menu's import)
 - In the log, for an encrypted save found in `ms0`: *"the save is encrypted, and reading it needs the console's keys (add a keys file)"*.
+
+### PGD data
+
+Some games keep large data files in PGD containers, "Protected Game Data" (Phantasy Star Portable 2 Infinity's `PSP_GAME/INSDIR/MEDIA.FPB`, 275 MB). The game opens the file with flag `0x40000000` and gives the library the file's key with `sceIoIoctl(fd, 0x04100001, key, 16)`; after that it reads and seeks in the decrypted data. [`host/crypto/pgd.hpp`](../host/crypto/pgd.hpp) implements the container from public descriptions of the format: the 0x90-byte header, the encrypted description (data key, size, 0x400-byte blocks from 0x90), and block-by-block decryption for random access. The keys come only from the player's file.
+
+The public descriptions do not say which KIRK slots, masks and counter conventions the console's cipher uses; they were found by trying combinations against PSP2i's file (key index 1, DRM type 1) until its header MAC matched and its description decrypted to known values, and the data blocks to structured bytes. The result is written out in `pgd.hpp`. Other key indices and DRM types are refused with a log line, because none has been checked. The decrypted view is a file filter (`hle_extension::set_file_filter`), set by the ioctl. `portablekit keys pgd-check <game> <path on the disc> <key>` says whether a file opens with the player's keys: the MAC, the description, and how much of the first block is zero. It never prints a key.
+
+Without the keys, the file is refused with the I/O error (what a PSP answers for a file it cannot decrypt has not been traced), and the log names the file and the missing key once: `[pgd] <file>: cannot decrypt: the keys file has no kirk.aes.39`.
 
 ## Saves
 

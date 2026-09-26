@@ -293,6 +293,22 @@ if(PSPRECOMP_BUILD_TESTS)
     add_test(NAME portablekit_rtc_tests COMMAND portablekit_rtc_tests)
 endif()
 
+# PGD containers with dummy keys: no console key and no game data.
+if(PSPRECOMP_BUILD_TESTS)
+    add_executable(portablekit_pgd_tests
+        "${PORTABLEKIT_ROOT}/tests/pgd_tests.cpp"
+        "${PORTABLEKIT_ROOT}/host/crypto/pgd.cpp"
+        "${PORTABLEKIT_ROOT}/host/save_data/aes128.cpp"
+        "${PORTABLEKIT_ROOT}/host/save_data/savedata_crypto.cpp"
+        "${PORTABLEKIT_ROOT}/tests/pgd_test_keys.cpp"
+        "${PORTABLEKIT_ROOT}/third_party/tiny_aes/aes.c")
+    set_source_files_properties("${PORTABLEKIT_ROOT}/third_party/tiny_aes/aes.c" PROPERTIES LANGUAGE CXX)
+    target_include_directories(portablekit_pgd_tests PRIVATE "${PORTABLEKIT_ROOT}/host" "${PORTABLEKIT_ROOT}/third_party" "${PORTABLEKIT_ROOT}/include")
+    target_link_libraries(portablekit_pgd_tests PRIVATE psprecomp_core)
+    set_target_properties(portablekit_pgd_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME portablekit_pgd_tests COMMAND portablekit_pgd_tests)
+endif()
+
 # Each platform's settings defaults.
 if(PSPRECOMP_BUILD_TESTS)
     add_executable(portablekit_settings_tests

@@ -32,6 +32,8 @@
 #include "text_format.hpp"
 
 #include "app_paths.hpp"
+#include "crypto/pgd.hpp"
+#include "kernel/iso_image.hpp"
 #include "corpus_abi.hpp"
 #include "hle/hle_extensions.hpp"
 #include "install/user_data.hpp"
@@ -40,12 +42,14 @@
 
 #include "psprecomp/interpreter.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -428,7 +432,45 @@ int command_keys(const Arguments &args) {
         }
         return ok ? 0 : kKeysRejected;
     }
-    if (action != "status") return report_error(kUsage, "keys takes import or status");
+    // keys pgd-check <game> <path on the disc> <key, 32 hex digits>: whether
+    // this PGD file (crypto/pgd.hpp) opens with the keys file's keys: its
+    // header MAC matches and its description is valid. The key is the one the
+    // game passes to sceIoIoctl 0x04100001 (<prefix>_TRACE_IO shows it).
+    // Prints the description and how much of the first data block is zero,
+    // never a key.
+    if (action == "pgd-check") {
+        if (args.positional.size() < 5) return report_error(kUsage, "keys pgd-check needs <game> <path on the disc> <key>");
+        const auto game = find_game(args.positional[2]);
+        if (!game) return report_error(kNoSuchGame, "no such game: " + args.positional[2]);
+        std::vector<std::uint8_t> key_bytes;
+        const std::string hex = args.positional[4];
+        for (std::size_t i = 0; i + 1 < hex.size(); i += 2) key_bytes.push_back(static_cast<std::uint8_t>(std::stoul(hex.substr(i, 2), nullptr, 16)));
+        if (key_bytes.size() != 16u) return report_error(kUsage, "the key is 16 bytes, 32 hex digits");
+        pgd::Block vkey{};
+        std::copy(key_bytes.begin(), key_bytes.end(), vkey.begin());
+        IsoImage iso(game->iso);
+        const auto entry = iso.find(args.positional[3]);
+        if (!entry) return report_error(kUsage, "no such file on the disc: " + args.positional[3]);
+        const std::uint64_t base = static_cast<std::uint64_t>(entry->lba) * IsoImage::kSectorSize;
+        std::vector<std::uint8_t> header(pgd::kHeaderSize);
+        iso.read(base, header);
+        std::string error;
+        auto file = pgd::PgdFile::open(header, vkey, entry->size, pgd::player_keys(), error);
+        if (!file) {
+            std::cout << "does not open: " << error << "\n";
+            return 1;
+        }
+        std::vector<std::uint8_t> first(file->desc().block_size);
+        const std::size_t got = file->read(0, first, [&iso, base](std::uint64_t offset, std::span<std::uint8_t> out) {
+            return iso.read(base + offset, out);
+        });
+        first.resize(got);
+        std::cout << "header MAC matches; data size " << file->size() << ", blocks of " << file->desc().block_size
+                  << " from " << file->desc().data_offset << "; first block: "
+                  << std::count(first.begin(), first.end(), std::uint8_t{0}) << " of " << got << " bytes zero\n";
+        return 0;
+    }
+    if (action != "status") return report_error(kUsage, "keys takes import, status or pgd-check");
     const KeysReport &report = active_keys();
     if (g_json) {
         std::vector<Json> problems;
@@ -441,6 +483,7 @@ int command_keys(const Arguments &args) {
         std::cout << Json().field("ok", true).field("path", path_text(report.path)).field("found", report.file_found)
                          .field("executables", report.can_decrypt_executables)
                          .field("saves", report.can_encrypt_saves)
+                         .field("pgd", report.can_decrypt_pgd)
                          .field("tags", static_cast<std::uint64_t>(report.tag_count))
                          .array("problems", problems).array("warnings", warnings)
                          .array("extension_keys", declared).str() << "\n";
@@ -449,6 +492,7 @@ int command_keys(const Arguments &args) {
     std::cout << "Keys file: " << path_text(report.path) << (report.file_found ? "" : " (none)") << "\n"
               << "  decrypt executables: " << (report.can_decrypt_executables ? "yes" : "no") << "\n"
               << "  encrypt saves:       " << (report.can_encrypt_saves ? "yes" : "no (saves are kept unencrypted)") << "\n"
+              << "  decrypt PGD data:    " << (report.can_decrypt_pgd ? "yes" : "no") << "\n"
               << "  tag keys:            " << report.tag_count << "\n";
     for (const std::string &problem : report.problems) std::cout << "  problem: " << problem << "\n";
     for (const std::string &warning : report.warnings) std::cout << "  warning: " << warning << "\n";

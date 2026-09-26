@@ -38,7 +38,32 @@ constexpr Fingerprint kFingerprints[] = {
     {"savedata.5", "9f7bfa1f5136d4dfdd3a8322578dbbe5243bf4eb70428b101f27eb1144027461"},
     {"savedata.6", "b58242561b16a8925126dbae5558dda53d6c275d712ee69f5bebce37c577af2d"},
     {"savedata.7", "a0bf478c1471e4115011e5e0f70d5e2d43c95e5ef2645d164b76ec3cd118ec10"},
+    {"kirk.aes.38", "b5e2a84dbaaf99015874182a8609494d3c8e38f1837755ee29858c78b986ad17"},
+    {"kirk.aes.39", "be3798d2e2a46c0018a4f7e41f5557e6cc2aeb64b0b15ae6b7063a8fa41c8559"},
+    {"kirk.aes.63", "16df5079b5e31b07045b9d117c9db8bf9c45e606dbe4a9c71bb763f12d61be83"},
+    {"amctrl.1CD4", "dbe5dd77c4a5f3b930b30f520ae71064a4b48161ba43d79252351effc0ecb403"},
+    {"amctrl.1CE4", "4aae0892755232421ac3077d844110b0c0334eeadc9cef6093e55a3fb8e56ee4"},
+    {"amctrl.1CF4", "e0942366cf4a2142ac1369df3d404198ac8d9bf9df73ccde6e540f2554dbcf4c"},
+    {"amctrl.dnas.1A90", "3f238f8d5e24ce9402f00be5bb869155d83bcf05457948faa36822a20af04057"},
+    {"amctrl.dnas.1AA0", "47d6a491c1dc0424e79d60b28fd7f9fc9fb6f7be0552cf4e77dfdcbea3260869"},
 };
+
+// The keys the PGD format needs (host/crypto/pgd.hpp), with fingerprints
+// above. The DNAS ones are taken but not used yet: no PGD file of that kind
+// has been checked.
+int amctrl_index(const std::string &name) {
+    if (name == "amctrl.1cd4") return 1;
+    if (name == "amctrl.1ce4") return 2;
+    if (name == "amctrl.1cf4") return 3;
+    if (name == "amctrl.dnas.1a90") return 4;
+    if (name == "amctrl.dnas.1aa0") return 5;
+    return 0;
+}
+
+bool pgd_key_name(const std::string &name) {
+    return name == "kirk.aes.38" || name == "kirk.aes.39" || name == "kirk.aes.63" ||
+           amctrl_index(name) != 0;
+}
 
 const char *expected_fingerprint(const std::string &name) {
     for (const Fingerprint &entry : kFingerprints)
@@ -154,11 +179,11 @@ KeysReport read_keys_file(const std::filesystem::path &path) {
             continue;
         }
         const char *expected = expected_fingerprint(name);
-        if (expected == nullptr) {
+        if (expected == nullptr && !pgd_key_name(name)) {
             report.problems.push_back(raw_name + " is not a key this program uses.");
             continue;
         }
-        if (sha256_of(*bytes) != expected) {
+        if (expected != nullptr && sha256_of(*bytes) != expected) {
             report.problems.push_back(raw_name + " is not the right key: its fingerprint does not match.");
             continue;
         }
@@ -169,6 +194,8 @@ KeysReport read_keys_file(const std::filesystem::path &path) {
             report.keys.kirk_cmd1 = to_key(*bytes);
         } else if (name.starts_with("savedata.")) {
             report.keys.savedata[std::atoi(name.substr(9).c_str())] = to_key(*bytes);
+        } else if (const int index = amctrl_index(name); index != 0) {
+            report.keys.amctrl[index] = to_key(*bytes);
         }
     }
     sort_out_unused_names(report, declared_found);
@@ -180,6 +207,11 @@ KeysReport read_keys_file(const std::filesystem::path &path) {
         if (report.keys.kirk(slot) == nullptr) report.can_encrypt_saves = false;
     for (int index = 2; index <= 7; ++index)
         if (report.keys.savedata_key(index) == nullptr) report.can_encrypt_saves = false;
+    report.can_decrypt_pgd = true;
+    for (const std::uint8_t slot : {0x38, 0x39, 0x63})
+        if (report.keys.kirk(slot) == nullptr) report.can_decrypt_pgd = false;
+    for (int index = 1; index <= 3; ++index)
+        if (report.keys.amctrl.find(index) == report.keys.amctrl.end()) report.can_decrypt_pgd = false;
     return report;
 }
 
@@ -202,7 +234,7 @@ bool import_keys_file(const std::filesystem::path &source, KeysReport &report) {
     if (!report.problems.empty()) return false;
     if (!report.keys.named.empty()) return copy_to_home(source, report);  // keys only modules use
     if (report.keys.kirk_aes.empty() && !report.keys.kirk_cmd1 && report.keys.savedata.empty() &&
-        report.keys.tags.empty()) {
+        report.keys.tags.empty() && report.keys.amctrl.empty()) {
         report.problems.push_back("The file holds no keys.");
         return false;
     }
@@ -225,7 +257,7 @@ const CryptoKeys *crypto_keys() {
     const app::KeysReport &report = app::active_keys();
     if (!report.keys.named.empty()) return &report.keys;
     if (report.keys.kirk_aes.empty() && !report.keys.kirk_cmd1 && report.keys.savedata.empty() &&
-        report.keys.tags.empty())
+        report.keys.tags.empty() && report.keys.amctrl.empty())
         return nullptr;
     return &report.keys;
 }
