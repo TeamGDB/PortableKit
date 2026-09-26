@@ -30,13 +30,47 @@
 #include <cmath>
 #include <cstring>
 #include <array>
+#include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
+#include <utility>
 #include <vector>
 
 namespace portablekit {
 namespace {
+
+// <prefix>_TRACE_PACING=N prints the calls that pace a game's frames -- the
+// flip, the vblank waits, the controller reads and the vcount -- with the
+// emulated time, the vblank count, how far into the vblank period the call
+// came and the calling thread, N lines of them (3000 when N is not a
+// number), from vblank <prefix>_TRACE_PACING_FROM on (0 by default). It is
+// what a question like "how many vblanks does this game's frame take, and
+// which call waits them" is answered with.
+void trace_pacing(const char *call, std::int64_t value = -1) {
+    static const long limit = [] {
+        const char *text = portablekit::env("TRACE_PACING");
+        if (text == nullptr) return 0L;
+        const long n = std::strtol(text, nullptr, 10);
+        return n > 1 ? n : 3000L;
+    }();
+    static const std::uint64_t from = [] {
+        const char *text = portablekit::env("TRACE_PACING_FROM");
+        return text != nullptr ? std::strtoull(text, nullptr, 10) : 0ull;
+    }();
+    static long lines = 0;
+    if (lines >= limit || kernel().vblank_count() < from) return;
+    ++lines;
+    const std::uint64_t now = kernel().now_us();
+    const Thread *thread = kernel().current_thread();
+    std::printf("[pacing] %12.3f ms v%-7llu +%5llu us %-20s %s", static_cast<double>(now) / 1000.0,
+                static_cast<unsigned long long>(kernel().vblank_count()),
+                static_cast<unsigned long long>(now - kernel().last_vblank_us()),
+                thread != nullptr ? thread->name.c_str() : "?", call);
+    if (value >= 0) std::printf(" %lld", static_cast<long long>(value));
+    std::printf("\n");
+    if (lines == limit) std::fflush(stdout);
+}
 
 constexpr std::uint32_t kEdramBase = 0x04000000u;
 constexpr std::uint32_t kEdramSize = 0x00200000u;
@@ -461,6 +495,42 @@ std::uint32_t read_latch(psprecomp::GuestMemory &memory, std::uint32_t address) 
     return samples;
 }
 
+bool ctrl_reads_wait() {
+    static const bool value = portablekit::env("CTRL_READ_WAITS") != nullptr;
+    return value;
+}
+
+// Samples the pad has taken since the game last read the buffer: one a
+// vblank, at most the 64 the PSP's ring holds.
+std::uint32_t &ctrl_unread() {
+    static std::uint32_t unread = 0u;
+    return unread;
+}
+
+// Set while a read waits for the next sample: that sample is the read's.
+bool &ctrl_read_waiting() {
+    static bool waiting = false;
+    return waiting;
+}
+
+// Takes up to `count` of the samples not read yet, and returns how many.
+// Counting starts at the first read, as sampling does on the PSP once a game
+// asks for it; until then a read waits for the next vblank.
+std::uint32_t take_ctrl_samples(std::uint32_t count) {
+    static bool counting = false;
+    if (!counting) {
+        counting = true;
+        kernel().add_vblank_hook([] {
+            if (std::exchange(ctrl_read_waiting(), false)) return;
+            ctrl_unread() = std::min<std::uint32_t>(ctrl_unread() + 1u, 64u);
+        });
+    }
+    if (ctrl_reads_wait()) return 0u;
+    const std::uint32_t taken = std::min(ctrl_unread(), count);
+    ctrl_unread() = 0u;
+    return taken;
+}
+
 void register_display_ctrl(HleRegistrar &hle) {
     hle.add("sceDisplay", "sceDisplaySetMode", [](Runtime &, AllegrexContext &ctx) {
         media().display.mode = arg(ctx, 0);
@@ -473,6 +543,7 @@ void register_display_ctrl(HleRegistrar &hle) {
         media().display.framebuffer = arg(ctx, 0);
         media().display.buffer_width = arg(ctx, 1);
         media().display.pixel_format = arg(ctx, 2);
+        trace_pacing("sceDisplaySetFrameBuf");
         present_frame(rt);
         kernel().finish(ctx, 0u);
     });
@@ -491,10 +562,24 @@ void register_display_ctrl(HleRegistrar &hle) {
             std::cout << "[pad] sceCtrlSetSamplingMode " << media().ctrl_mode << "\n";
         kernel().finish(ctx, previous);
     });
-    // Reading the controller buffer blocks until the next sample (vblank).
+    // Reading the controller buffer returns the samples taken since the last
+    // read, and waits for the next one only when there are none. The PSP
+    // samples the pad once a vblank into a ring the read drains, so a game
+    // that reads once a frame, after a vblank has passed, is not held up by
+    // it: Purun's main loop reads it straight after the flip, and waiting
+    // there cost it a vblank a frame. <prefix>_CTRL_READ_WAITS=1 always
+    // waits for the next vblank, as the framework did before.
     hle.add("sceCtrl", "sceCtrlReadBufferPositive", [](Runtime &rt, AllegrexContext &ctx) {
         const std::uint32_t count = std::clamp<std::uint32_t>(arg(ctx, 1), 1u, 64u);
+        const std::uint32_t unread = take_ctrl_samples(count);
+        trace_pacing("sceCtrlReadBufferPositive", unread);
+        if (unread != 0u) {
+            write_ctrl_buffer(rt.memory(), arg(ctx, 0), unread, sample_ctrl());
+            kernel().finish(ctx, unread);
+            return;
+        }
         write_ctrl_buffer(rt.memory(), arg(ctx, 0), count, sample_ctrl());
+        ctrl_read_waiting() = true;
         WaitState wait{};
         wait.type = WaitType::VBlank;
         kernel().block(ctx, wait, count);
@@ -508,20 +593,35 @@ void register_display_ctrl(HleRegistrar &hle) {
     hle.add("sceCtrl", "sceCtrlPeekLatch", [](Runtime &rt, AllegrexContext &ctx) {
         kernel().finish(ctx, read_latch(rt.memory(), arg(ctx, 0)));
     });
-    // Reading the latch waits for the next sample, like reading the buffer.
+    // Reading the latch returns the edges gathered since the last read and
+    // starts gathering again; unlike reading the buffer it never waits.
+    // Waiting here cost Purun, which reads the latch once a frame after the
+    // buffer, a second vblank a frame (20 frames a second where its loop
+    // allows 60). <prefix>_CTRL_READ_WAITS=1 waits for the next vblank, as
+    // the framework did before.
     hle.add("sceCtrl", "sceCtrlReadLatch", [](Runtime &rt, AllegrexContext &ctx) {
         const std::uint32_t samples = read_latch(rt.memory(), arg(ctx, 0));
+        trace_pacing("sceCtrlReadLatch", samples);
+        if (!ctrl_reads_wait()) {
+            kernel().finish(ctx, samples);
+            return;
+        }
         WaitState wait{};
         wait.type = WaitType::VBlank;
         kernel().block(ctx, wait, std::max(samples, 1u));
     });
 }
 
+// How long the display's vertical blank lasts at the start of each 16.683 ms
+// period: 14 of its 286 lines.
+constexpr std::uint64_t kVBlankDurationUs = kVBlankPeriodUs * 14u / 286u;
+
 // Waiting for the display to start its vertical blank, which is how a game
 // paces its frame loop. Without these the loop spins: a stub returns at once,
 // the game draws again, and nothing else ever gets the processor.
 void register_vblank_waits(HleRegistrar &hle) {
     const auto wait_for_vblank = [](Runtime &, AllegrexContext &ctx) {
+        trace_pacing("sceDisplayWaitVblankStart");
         WaitState wait{};
         wait.type = WaitType::VBlank;
         kernel().block(ctx, wait, 0u);
@@ -542,7 +642,25 @@ void register_vblank_waits(HleRegistrar &hle) {
         wait.type = WaitType::VBlank;
         kernel().block(ctx, wait, 0u);
     });
+    // sceDisplayWaitVblank returns at once while the display is in its
+    // vertical blank, and otherwise waits for the next one to start: unlike
+    // sceDisplayWaitVblankStart, a call made just after the vblank began does
+    // not lose a whole frame. Purun's sound thread sleeps on it, and its main
+    // loop calls it straight after the flip. <prefix>_VBLANK_WAIT_RETURNS=1
+    // returns at once every time, as the logging stub did.
+    hle.add("sceDisplay", "sceDisplayWaitVblank", [](Runtime &, AllegrexContext &ctx) {
+        trace_pacing("sceDisplayWaitVblank");
+        static const bool returns = portablekit::env("VBLANK_WAIT_RETURNS") != nullptr;
+        if (returns || kernel().now_us() - kernel().last_vblank_us() < kVBlankDurationUs) {
+            kernel().finish(ctx, 1u);
+            return;
+        }
+        WaitState wait{};
+        wait.type = WaitType::VBlank;
+        kernel().block(ctx, wait, 0u);
+    });
     hle.add("sceDisplay", "sceDisplayGetVcount", [](Runtime &, AllegrexContext &ctx) {
+        trace_pacing("sceDisplayGetVcount", static_cast<std::int64_t>(kernel().vblank_count()));
         kernel().finish(ctx, static_cast<std::uint32_t>(kernel().vblank_count()));
     });
 }
