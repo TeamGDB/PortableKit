@@ -88,8 +88,22 @@ void set_write_watch(std::uint32_t address, std::uint32_t size) {
               << watch.size << " bytes\n";
 }
 
+namespace {
+// The CPU's scratchpad: 16 KiB of fast RAM at 0x00010000. It lives in the
+// same host buffer as EDRAM, after its 2 MiB, so the header (and with it every
+// generated unit) does not change: the out-of-line paths below that handle
+// EDRAM handle it too.
+constexpr std::uint32_t kScratchpadBase = 0x00010000u;
+constexpr std::uint32_t kScratchpadSize = 16u * 1024u;
+// Where a contiguous run starting at `offset` of the EDRAM buffer must end:
+// EDRAM's own 2 MiB (a run past it wraps, per byte) or the scratchpad's end.
+[[nodiscard]] constexpr std::size_t shared_limit(std::size_t offset) noexcept {
+    return offset < GuestMemory::kVramSize ? GuestMemory::kVramSize : GuestMemory::kVramSize + kScratchpadSize;
+}
+} // namespace
+
 GuestMemory::GuestMemory(std::uint32_t size_bytes)
-    : vram_(kVramSize, 0u), bytes_(size_bytes, 0u), write_watch_enabled_(std::getenv("PSPRECOMP_WATCH_WRITE") != nullptr) {
+    : vram_(kVramSize + kScratchpadSize, 0u), bytes_(size_bytes, 0u), write_watch_enabled_(std::getenv("PSPRECOMP_WATCH_WRITE") != nullptr) {
     if (size_bytes != 32u * 1024u * 1024u && size_bytes != 64u * 1024u * 1024u) {
         throw Error("PSP RAM size must be 32 MiB or 64 MiB");
     }
@@ -102,20 +116,24 @@ GuestMemory::GuestMemory(std::uint32_t size_bytes)
 }
 
 std::uint32_t GuestMemory::size() const noexcept { return static_cast<std::uint32_t>(bytes_.size()); }
-std::uint32_t GuestMemory::vram_size() const noexcept { return static_cast<std::uint32_t>(vram_.size()); }
+std::uint32_t GuestMemory::vram_size() const noexcept { return kVramSize; }
 
+// EDRAM and its mirrors, and the scratchpad, which shares its host buffer.
 bool GuestMemory::is_vram_window(std::uint32_t canonical_address) const noexcept {
-    return canonical_address >= kVramPhysicalBase &&
-           canonical_address < kVramPhysicalBase + kVramAddressSpan;
+    return (canonical_address >= kVramPhysicalBase && canonical_address < kVramPhysicalBase + kVramAddressSpan) ||
+           (canonical_address >= kScratchpadBase && canonical_address < kScratchpadBase + kScratchpadSize);
 }
 
 std::size_t GuestMemory::vram_offset(std::uint32_t canonical_address) const noexcept {
+    if (canonical_address < kVramPhysicalBase)
+        return static_cast<std::size_t>(kVramSize + (canonical_address - kScratchpadBase));
     return static_cast<std::size_t>((canonical_address - kVramPhysicalBase) & (kVramSize - 1u));
 }
 
 bool GuestMemory::contains(std::uint32_t address, std::size_t length) const noexcept {
     const std::uint32_t c = canonical(address);
     const std::uint64_t end = static_cast<std::uint64_t>(c) + static_cast<std::uint64_t>(length);
+    if (c >= kScratchpadBase && end <= static_cast<std::uint64_t>(kScratchpadBase) + kScratchpadSize) return true;
     if (is_vram_window(c) && end <= static_cast<std::uint64_t>(kVramPhysicalBase) + kVramAddressSpan)
         return true;
     if (c >= kPhysicalBase && end <= static_cast<std::uint64_t>(kPhysicalBase) + bytes_.size())
@@ -183,7 +201,7 @@ std::uint16_t GuestMemory::aot_load16_slow(std::uint32_t address) const {
     if (is_vram_window(c)) {
         trace_vram_read(c);
         const std::size_t offset = vram_offset(c);
-        if (offset + 2u <= vram_.size())
+        if (offset + 2u <= shared_limit(offset))
             return static_cast<std::uint16_t>(vram_[offset]) |
                    static_cast<std::uint16_t>(static_cast<std::uint16_t>(vram_[offset + 1u]) << 8u);
     } else if (c >= kPhysicalBase) {
@@ -207,7 +225,7 @@ std::uint32_t GuestMemory::aot_load32_slow(std::uint32_t address) const {
         data = &bytes_;
         offset = static_cast<std::size_t>(c - kPhysicalBase);
     }
-    if (data != nullptr && offset + 4u <= data->size()) {
+    if (data != nullptr && offset + 4u <= (data == &vram_ ? shared_limit(offset) : data->size())) {
         return static_cast<std::uint32_t>((*data)[offset]) |
                (static_cast<std::uint32_t>((*data)[offset + 1u]) << 8u) |
                (static_cast<std::uint32_t>((*data)[offset + 2u]) << 16u) |
@@ -244,7 +262,7 @@ void GuestMemory::aot_store16_slow(std::uint32_t address, std::uint16_t value) {
     std::size_t offset = 0u;
     if (is_vram_window(c)) { data = &vram_; offset = vram_offset(c); }
     else if (c >= kPhysicalBase) { data = &bytes_; offset = static_cast<std::size_t>(c - kPhysicalBase); }
-    if (data != nullptr && offset + 2u <= data->size()) {
+    if (data != nullptr && offset + 2u <= (data == &vram_ ? shared_limit(offset) : data->size())) {
         (*data)[offset] = static_cast<std::uint8_t>(value & 0xFFu);
         (*data)[offset + 1u] = static_cast<std::uint8_t>((value >> 8u) & 0xFFu);
         return;
@@ -258,7 +276,7 @@ void GuestMemory::aot_store32_slow(std::uint32_t address, std::uint32_t value) {
     std::size_t offset = 0u;
     if (is_vram_window(c)) { data = &vram_; offset = vram_offset(c); }
     else if (c >= kPhysicalBase) { data = &bytes_; offset = static_cast<std::size_t>(c - kPhysicalBase); }
-    if (data != nullptr && offset + 4u <= data->size()) {
+    if (data != nullptr && offset + 4u <= (data == &vram_ ? shared_limit(offset) : data->size())) {
         (*data)[offset] = static_cast<std::uint8_t>(value & 0xFFu);
         (*data)[offset + 1u] = static_cast<std::uint8_t>((value >> 8u) & 0xFFu);
         (*data)[offset + 2u] = static_cast<std::uint8_t>((value >> 16u) & 0xFFu);
@@ -344,7 +362,7 @@ const std::uint8_t *GuestMemory::raw_pointer(std::uint32_t address, std::size_t 
         const std::size_t offset = vram_offset(c);
         // A run that would wrap past the end of the 2 MiB EDRAM image is not
         // contiguous in host memory even though it is legal in guest space.
-        if (offset + length <= vram_.size()) return vram_.data() + offset;
+        if (offset + length <= shared_limit(offset)) return vram_.data() + offset;
         return nullptr;
     }
     if (c < kPhysicalBase) return nullptr;
