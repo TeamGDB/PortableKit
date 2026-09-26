@@ -1581,7 +1581,8 @@ int generate_auto(const std::filesystem::path &elf_path,
                   const std::filesystem::path &output_dir,
                   std::uint32_t load_base,
                   std::uint32_t unit_span_bytes,
-                  bool chain_units = true) {
+                  bool chain_units = true,
+                  const std::vector<psprecomp::ExecutableRange> &extra_code_ranges = {}) {
     const auto started = std::chrono::steady_clock::now();
     // Progress goes to stderr and is flushed per line so `tail -f` on a log
     // shows how far a long generation has advanced.
@@ -1598,7 +1599,7 @@ int generate_auto(const std::filesystem::path &elf_path,
     if (const auto module = elf.find_module_info(memory, load_base)) imports = elf.scan_imports(memory, *module);
     std::set<std::uint32_t> import_stubs;
     for (const auto &import : imports) import_stubs.insert(import.stub_address);
-    const auto program = psprecomp::analyze_program(elf, memory, load_base);
+    const auto program = psprecomp::analyze_program(elf, memory, load_base, 131072u, extra_code_ranges);
     if (program.executable_ranges.empty()) throw psprecomp::Error("ELF has no executable ranges");
 
     progress("analysis done: " + std::to_string(program.functions.size()) + " functions, " +
@@ -1798,12 +1799,23 @@ int main(int argc, char **argv) {
     try {
         if (argc >= 4 && std::string_view(argv[2]) == "--auto") {
             std::vector<std::string> positional;
+            std::vector<psprecomp::ExecutableRange> extra_code;
             for (int i = 4; i < argc; ++i) {
                 const std::string_view option(argv[i]);
                 // A prefixed corpus (an overlay) gets its own symbol names and
                 // stays out of the main executable's fast unit table.
                 if (option == "--prefix" && i + 1 < argc) {
                     g_symbol_prefix = argv[++i];
+                    continue;
+                }
+                // Code outside the executable sections, as START-END (end
+                // exclusive), for an executable whose linker put code in data.
+                if (option == "--code" && i + 1 < argc) {
+                    const std::string range(argv[++i]);
+                    const auto dash = range.find('-');
+                    if (dash == std::string::npos) throw psprecomp::Error("--code takes START-END");
+                    extra_code.push_back({static_cast<std::uint32_t>(std::stoul(range.substr(0, dash), nullptr, 0)),
+                                          static_cast<std::uint32_t>(std::stoul(range.substr(dash + 1), nullptr, 0))});
                     continue;
                 }
                 positional.emplace_back(option);
@@ -1816,17 +1828,17 @@ int main(int argc, char **argv) {
                 : 0x4000u;
             if (positional.size() > 2u) {
                 std::cerr << "Usage: psp_recomp <ELF> --auto <generated_dir> [load_base_hex] [unit_span_bytes]"
-                          << " [--prefix <symbol_prefix>]\n";
+                          << " [--prefix <symbol_prefix>] [--code START-END ...]\n";
                 return 2;
             }
             if (unit_span == 0u || (unit_span & 3u) != 0u) throw psprecomp::Error("unit_span_bytes must be non-zero and 4-byte aligned");
-            return generate_auto(argv[1], argv[3], load_base, unit_span, g_symbol_prefix == "recomp");
+            return generate_auto(argv[1], argv[3], load_base, unit_span, g_symbol_prefix == "recomp", extra_code);
         }
         if (argc == 4) return generate_manual(argv[1], argv[2], argv[3]);
         std::cerr << "Usage:\n"
                   << "  psp_recomp <ELF> <functions.csv> <generated_manifest.cpp>\n"
                   << "  psp_recomp <ELF> --auto <generated_dir> [load_base_hex] [unit_span_bytes]"
-                  << " [--prefix <symbol_prefix>]\n";
+                  << " [--prefix <symbol_prefix>] [--code START-END ...]\n";
         return 2;
     } catch (const std::exception &e) {
         std::cerr << "psp_recomp error: " << e.what() << "\n";
