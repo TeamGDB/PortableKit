@@ -30,6 +30,7 @@
 #include <cmath>
 #include <cstring>
 #include <array>
+#include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
@@ -37,6 +38,38 @@
 
 namespace portablekit {
 namespace {
+
+// <prefix>_TRACE_PACING=N prints the calls that pace a game's frames -- the
+// flip, the vblank waits, the controller reads and the vcount -- with the
+// emulated time, the vblank count, how far into the vblank period the call
+// came and the calling thread, N lines of them (3000 when N is not a
+// number), from vblank <prefix>_TRACE_PACING_FROM on (0 by default). It is
+// what a question like "how many vblanks does this game's frame take, and
+// which call waits them" is answered with.
+void trace_pacing(const char *call, std::int64_t value = -1) {
+    static const long limit = [] {
+        const char *text = portablekit::env("TRACE_PACING");
+        if (text == nullptr) return 0L;
+        const long n = std::strtol(text, nullptr, 10);
+        return n > 1 ? n : 3000L;
+    }();
+    static const std::uint64_t from = [] {
+        const char *text = portablekit::env("TRACE_PACING_FROM");
+        return text != nullptr ? std::strtoull(text, nullptr, 10) : 0ull;
+    }();
+    static long lines = 0;
+    if (lines >= limit || kernel().vblank_count() < from) return;
+    ++lines;
+    const std::uint64_t now = kernel().now_us();
+    const Thread *thread = kernel().current_thread();
+    std::printf("[pacing] %12.3f ms v%-7llu +%5llu us %-20s %s", static_cast<double>(now) / 1000.0,
+                static_cast<unsigned long long>(kernel().vblank_count()),
+                static_cast<unsigned long long>(now - kernel().last_vblank_us()),
+                thread != nullptr ? thread->name.c_str() : "?", call);
+    if (value >= 0) std::printf(" %lld", static_cast<long long>(value));
+    std::printf("\n");
+    if (lines == limit) std::fflush(stdout);
+}
 
 constexpr std::uint32_t kEdramBase = 0x04000000u;
 constexpr std::uint32_t kEdramSize = 0x00200000u;
@@ -473,6 +506,7 @@ void register_display_ctrl(HleRegistrar &hle) {
         media().display.framebuffer = arg(ctx, 0);
         media().display.buffer_width = arg(ctx, 1);
         media().display.pixel_format = arg(ctx, 2);
+        trace_pacing("sceDisplaySetFrameBuf");
         present_frame(rt);
         kernel().finish(ctx, 0u);
     });
@@ -494,6 +528,7 @@ void register_display_ctrl(HleRegistrar &hle) {
     // Reading the controller buffer blocks until the next sample (vblank).
     hle.add("sceCtrl", "sceCtrlReadBufferPositive", [](Runtime &rt, AllegrexContext &ctx) {
         const std::uint32_t count = std::clamp<std::uint32_t>(arg(ctx, 1), 1u, 64u);
+        trace_pacing("sceCtrlReadBufferPositive", count);
         write_ctrl_buffer(rt.memory(), arg(ctx, 0), count, sample_ctrl());
         WaitState wait{};
         wait.type = WaitType::VBlank;
@@ -511,6 +546,7 @@ void register_display_ctrl(HleRegistrar &hle) {
     // Reading the latch waits for the next sample, like reading the buffer.
     hle.add("sceCtrl", "sceCtrlReadLatch", [](Runtime &rt, AllegrexContext &ctx) {
         const std::uint32_t samples = read_latch(rt.memory(), arg(ctx, 0));
+        trace_pacing("sceCtrlReadLatch", samples);
         WaitState wait{};
         wait.type = WaitType::VBlank;
         kernel().block(ctx, wait, std::max(samples, 1u));
@@ -522,6 +558,7 @@ void register_display_ctrl(HleRegistrar &hle) {
 // the game draws again, and nothing else ever gets the processor.
 void register_vblank_waits(HleRegistrar &hle) {
     const auto wait_for_vblank = [](Runtime &, AllegrexContext &ctx) {
+        trace_pacing("sceDisplayWaitVblankStart");
         WaitState wait{};
         wait.type = WaitType::VBlank;
         kernel().block(ctx, wait, 0u);
@@ -542,7 +579,12 @@ void register_vblank_waits(HleRegistrar &hle) {
         wait.type = WaitType::VBlank;
         kernel().block(ctx, wait, 0u);
     });
+    hle.add("sceDisplay", "sceDisplayWaitVblank", [](Runtime &, AllegrexContext &ctx) {
+        trace_pacing("sceDisplayWaitVblank");
+        kernel().finish(ctx, 0u);
+    });
     hle.add("sceDisplay", "sceDisplayGetVcount", [](Runtime &, AllegrexContext &ctx) {
+        trace_pacing("sceDisplayGetVcount", static_cast<std::int64_t>(kernel().vblank_count()));
         kernel().finish(ctx, static_cast<std::uint32_t>(kernel().vblank_count()));
     });
 }
