@@ -76,6 +76,7 @@ Every one of these takes the profile's own prefix, so `TENKAWA_TRACE_KERNEL` for
 | --- | --- |
 | `<PREFIX>_NO_RENDER`, `<PREFIX>_NO_AUDIO` | No window, no sound: a boot check that runs anywhere |
 | `<PREFIX>_LIST_STUBS` | Name every import nothing implements, at start-up |
+| `<PREFIX>_NO_HLE_EXTENSIONS` | Ignore the [HLE extension modules](HLE_EXTENSIONS.md) the build links, for comparing with the framework's own HLE |
 | `<PREFIX>_STRICT_HLE` | Do not bind logging stubs for unimplemented imports, so the game stops at the first one instead of carrying on with a wrong answer |
 | `<PREFIX>_TRACE_KERNEL`, `_TRACE_IO`, `_TRACE_GE`, `_TRACE_SAVEDATA`, … | One subsystem each |
 | `<PREFIX>_TRACE_SYNC` | Every kernel object a thread waits on, which is how a deadlock is read |

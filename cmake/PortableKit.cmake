@@ -63,6 +63,8 @@ set(PORTABLEKIT_HOST_SOURCES
     host/hle/hle_utility.cpp
     host/hle/hle_savedata.cpp
     host/hle/hle_adhoc.cpp
+    host/hle/hle_extensions.cpp
+    host/hle/hle_extension_host.cpp
     host/adhoc/client.cpp
     host/adhoc/discovery.cpp
     host/adhoc/host.cpp
@@ -140,6 +142,101 @@ function(_portablekit_inherit_settings target)
             INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON
             INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL ON)
     endif()
+endfunction()
+
+# portablekit_add_hle_extension(<name> LICENSE <licence> SOURCES ...
+#                               [TITLE <title>] [VERSION <version>]
+#                               [INCLUDE_DIRECTORIES ...] [LINK_LIBRARIES ...]
+#                               [COMPILE_DEFINITIONS ...])
+# declares an HLE extension module (docs/HLE_EXTENSIONS.md): a static library,
+# built from SOURCES against include/portablekit/hle_extension.hpp, that
+# defines PORTABLEKIT_HLE_EXTENSION(<name>). LICENSE is the licence the module
+# states (an SPDX identifier such as "MIT" where there is one), and it, TITLE
+# and VERSION are printed at startup and by --version. Every program portablekit_add_game()
+# makes afterwards links it and calls that entry at startup. <name> is a C
+# identifier and unique in the build. A module's directory is usually handed
+# to the build in PORTABLEKIT_HLE_EXTENSION_DIRS, and its CMakeLists.txt is
+# this one call; a port may also call it itself before portablekit_add_game().
+function(portablekit_add_hle_extension name)
+    cmake_parse_arguments(EXT "" "LICENSE;TITLE;VERSION"
+        "SOURCES;INCLUDE_DIRECTORIES;LINK_LIBRARIES;COMPILE_DEFINITIONS" ${ARGN})
+    if(NOT name MATCHES "^[A-Za-z_][A-Za-z0-9_]*$")
+        message(FATAL_ERROR "portablekit_add_hle_extension: '${name}' is not a C identifier")
+    endif()
+    if(NOT EXT_SOURCES)
+        message(FATAL_ERROR "portablekit_add_hle_extension(${name}): no SOURCES")
+    endif()
+    if(NOT EXT_LICENSE)
+        message(FATAL_ERROR "portablekit_add_hle_extension(${name}): no LICENSE")
+    endif()
+    if(NOT EXT_TITLE)
+        set(EXT_TITLE "${name}")
+    endif()
+    foreach(field IN ITEMS LICENSE TITLE VERSION)
+        string(FIND "${EXT_${field}}" "\"" quote)
+        string(FIND "${EXT_${field}}" "\\" backslash)
+        string(FIND "${EXT_${field}}" "\n" newline)
+        if(NOT quote EQUAL -1 OR NOT backslash EQUAL -1 OR NOT newline EQUAL -1)
+            message(FATAL_ERROR "portablekit_add_hle_extension(${name}): ${field} may not contain quotes, backslashes or new lines")
+        endif()
+    endforeach()
+    get_property(known GLOBAL PROPERTY PORTABLEKIT_HLE_EXTENSIONS)
+    if(name IN_LIST known)
+        message(FATAL_ERROR "portablekit_add_hle_extension: a module named '${name}' was already added")
+    endif()
+    set(target "portablekit_hle_extension_${name}")
+    add_library(${target} STATIC ${EXT_SOURCES})
+    target_compile_features(${target} PRIVATE cxx_std_20)
+    _portablekit_inherit_settings(${target})
+    # Headers only, as for an overlay module: the runtime's objects belong to
+    # the program the module is linked into. host/ is there for a module that
+    # reaches past the stable interface, at its own risk.
+    target_include_directories(${target} PRIVATE
+        "${PORTABLEKIT_ROOT}/include" "${PORTABLEKIT_ROOT}/host" ${EXT_INCLUDE_DIRECTORIES})
+    if(EXT_COMPILE_DEFINITIONS)
+        target_compile_definitions(${target} PRIVATE ${EXT_COMPILE_DEFINITIONS})
+    endif()
+    if(EXT_LINK_LIBRARIES)
+        target_link_libraries(${target} PRIVATE ${EXT_LINK_LIBRARIES})
+    endif()
+    set_property(GLOBAL APPEND PROPERTY PORTABLEKIT_HLE_EXTENSIONS "${name}")
+    set_property(GLOBAL PROPERTY PORTABLEKIT_HLE_EXTENSION_${name}_INFO
+        "\"${name}\", \"${EXT_TITLE}\", \"${EXT_VERSION}\", \"${EXT_LICENSE}\"")
+    message(STATUS "HLE extension module: ${EXT_TITLE} ${EXT_VERSION} (${EXT_LICENSE})")
+endfunction()
+
+# Links every HLE extension module added so far into <target> and generates
+# the list host/hle/hle_extensions.hpp's linked_hle_extensions() returns.
+function(_portablekit_link_hle_extensions target)
+    get_property(modules GLOBAL PROPERTY PORTABLEKIT_HLE_EXTENSIONS)
+    set(declarations "")
+    set(entries "")
+    foreach(module IN LISTS modules)
+        string(APPEND declarations "void portablekit_hle_extension_${module}(::portablekit::hle_extension::Registry &);\n")
+        get_property(info GLOBAL PROPERTY PORTABLEKIT_HLE_EXTENSION_${module}_INFO)
+        string(APPEND entries "        {${info}, &portablekit_hle_extension_${module}},\n")
+        target_link_libraries(${target} PRIVATE "portablekit_hle_extension_${module}")
+    endforeach()
+    if(modules)
+        set(body "    static const HleExtensionModule modules[] = {\n${entries}    };\n    return modules;")
+    else()
+        set(body "    return {};")
+    endif()
+    set(list_source "${CMAKE_CURRENT_BINARY_DIR}/generated_hle_extensions/${target}_hle_extensions.cpp")
+    file(CONFIGURE OUTPUT "${list_source}" CONTENT
+"// Generated by cmake/PortableKit.cmake: the HLE extension modules linked into ${target}.
+#include \"hle/hle_extensions.hpp\"
+
+${declarations}
+namespace portablekit {
+
+std::span<const HleExtensionModule> linked_hle_extensions() {
+${body}
+}
+
+} // namespace portablekit
+")
+    target_sources(${target} PRIVATE "${list_source}")
 endfunction()
 
 function(portablekit_add_game target)
@@ -324,6 +421,7 @@ function(portablekit_add_game target)
         "${GAME_PROFILE_DIR}/host"
         "${GAME_PROFILE_DIR}/generated")
     target_link_libraries(${target} PRIVATE psprecomp_core ${CMAKE_DL_LIBS})
+    _portablekit_link_hle_extensions(${target})
     if(WIN32)
         # The ad hoc client's and server's sockets, and the list of interfaces.
         target_link_libraries(${target} PRIVATE ws2_32 iphlpapi)

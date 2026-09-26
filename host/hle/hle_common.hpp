@@ -42,6 +42,8 @@ public:
     void add(std::string_view library, std::string_view name, HleFunction function);
     // Binds `function` if the name is known; returns false otherwise.
     bool try_add(std::string_view library, std::string_view name, HleFunction function);
+    // Binds `function` by NID, replacing whatever was bound to it before.
+    void bind(const std::string &library, std::uint32_t nid, HleFunction function);
     [[nodiscard]] bool bound(const std::string &library, std::uint32_t nid) const;
     [[nodiscard]] std::size_t count() const noexcept { return bound_.size(); }
 

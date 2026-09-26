@@ -127,6 +127,25 @@ if(PSPRECOMP_LTO AND PSPRECOMP_LTO_SUPPORTED)
     set_property(GLOBAL PROPERTY PORTABLEKIT_IPO ON)
 endif()
 
+# HLE extension modules (docs/HLE_EXTENSIONS.md): directories built apart from
+# the framework, each with a CMakeLists.txt that calls
+# portablekit_add_hle_extension(). Every program built here links them all.
+# Empty, the default, builds exactly what the framework is on its own.
+set(PORTABLEKIT_HLE_EXTENSION_DIRS "" CACHE STRING
+    "Directories of HLE extension modules to build into every program (a list)")
+set(_portablekit_extension_index 0)
+foreach(_extension_dir IN LISTS PORTABLEKIT_HLE_EXTENSION_DIRS)
+    get_filename_component(_extension_dir "${_extension_dir}" ABSOLUTE BASE_DIR "${CMAKE_SOURCE_DIR}")
+    if(NOT EXISTS "${_extension_dir}/CMakeLists.txt")
+        message(FATAL_ERROR "PORTABLEKIT_HLE_EXTENSION_DIRS: ${_extension_dir} has no CMakeLists.txt")
+    endif()
+    get_filename_component(_extension_leaf "${_extension_dir}" NAME)
+    string(MAKE_C_IDENTIFIER "${_extension_leaf}" _extension_leaf)
+    add_subdirectory("${_extension_dir}"
+        "${CMAKE_CURRENT_BINARY_DIR}/hle_extensions/${_portablekit_extension_index}_${_extension_leaf}")
+    math(EXPR _portablekit_extension_index "${_portablekit_extension_index} + 1")
+endforeach()
+
 # Keep the runtime as an object library so profile executables own its objects.
 # On Windows this also lets WINDOWS_EXPORT_ALL_SYMBOLS include runtime symbols
 # in the executable's import library for separately linked overlay modules.
@@ -333,6 +352,20 @@ if(PSPRECOMP_BUILD_TESTS)
     add_test(NAME portablekit_fast_loading_tests COMMAND portablekit_fast_loading_tests)
 endif()
 
+# HLE extension modules: filling in and overriding against a runtime with no
+# kernel, with the example module in examples/hle_extension/.
+if(PSPRECOMP_BUILD_TESTS)
+    add_executable(portablekit_hle_extension_tests
+        "${PORTABLEKIT_ROOT}/tests/hle_extension_tests.cpp"
+        "${PORTABLEKIT_ROOT}/tests/hle_extension_test_host.cpp"
+        "${PORTABLEKIT_ROOT}/host/hle/hle_extensions.cpp"
+        "${PORTABLEKIT_ROOT}/examples/hle_extension/example_extension.cpp")
+    target_include_directories(portablekit_hle_extension_tests PRIVATE "${PORTABLEKIT_ROOT}/host")
+    target_link_libraries(portablekit_hle_extension_tests PRIVATE psprecomp_core)
+    set_target_properties(portablekit_hle_extension_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME portablekit_hle_extension_tests COMMAND portablekit_hle_extension_tests)
+endif()
+
 # The system layer belongs to a game's target, so nothing above compiles
 # host/main.cpp or most of host/. That let two compile errors through until a
 # second game was built. This target builds the whole backend-independent
@@ -366,6 +399,7 @@ if(PSPRECOMP_BUILD_TESTS)
         "${PORTABLEKIT_ROOT}/host" "${PORTABLEKIT_ROOT}/third_party"
         "${CMAKE_CURRENT_BINARY_DIR}/host_check_nids")
     target_link_libraries(portablekit_host_check PRIVATE psprecomp_core ${CMAKE_DL_LIBS})
+    _portablekit_link_hle_extensions(portablekit_host_check)
     find_package(Threads REQUIRED)
     target_link_libraries(portablekit_host_check PRIVATE Threads::Threads)
     if(WIN32)
