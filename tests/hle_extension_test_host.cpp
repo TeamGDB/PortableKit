@@ -51,5 +51,11 @@ void queue_guest_call(std::uint32_t function, std::span<const std::uint32_t> arg
     call.argument_count = count;
 }
 std::int32_t current_thread_id() { return 0; }
+// Keys and files are not what these tests exercise through the host.
+std::optional<std::vector<std::uint8_t>> key_bytes(std::string_view) { return std::nullopt; }
+std::optional<Key16> key(std::string_view) { return std::nullopt; }
+std::optional<Key16> kirk_key(std::uint8_t) { return std::nullopt; }
+std::size_t read_open_file(std::uint32_t, std::uint64_t, std::span<std::uint8_t>) { return 0u; }
+bool set_file_filter(std::uint32_t, std::shared_ptr<FileFilter>) { return false; }
 
 } // namespace portablekit::hle_extension

@@ -33,4 +33,6 @@ const CryptoKeys *crypto_keys() {
     return &keys;
 }
 
+bool keys_come_from_keys_file() { return false; }
+
 } // namespace portablekit

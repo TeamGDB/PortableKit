@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace portablekit {
@@ -29,6 +30,9 @@ struct CryptoKeys {
     // The AES key of KIRK command 1 (signed and encrypted blocks), which wraps
     // an executable's payload key.
     std::optional<Key16> kirk_cmd1;
+    // Keys HLE extension modules declare (extension_keys.hpp), by their
+    // keys-file name in lower case, of any length.
+    std::map<std::string, std::vector<std::uint8_t>> named;
     // Save-data keys 2 to 7, in the order they are usually published.
     std::map<int, Key16> savedata;
     // What an executable's "~PSP" tag selects: a 16-byte key for the newer
@@ -53,6 +57,11 @@ struct CryptoKeys {
 // The keys this program has; null when it has none. Defined exactly once:
 // by crypto_keys_builtin.cpp, or by a program that loads them from a file.
 [[nodiscard]] const CryptoKeys *crypto_keys();
+
+// True when the keys come from the player's keys file (the desktop app)
+// rather than being compiled in (a port, which then reads keys HLE extension
+// modules declare from a keys file of its own). Defined next to crypto_keys().
+[[nodiscard]] bool keys_come_from_keys_file();
 
 // True when every key save-data encryption needs is present.
 [[nodiscard]] bool savedata_keys_available();
