@@ -132,6 +132,7 @@ endif()
 # in the executable's import library for separately linked overlay modules.
 add_library(psprecomp_core OBJECT
     "${PORTABLEKIT_ROOT}/src/decoder.cpp"
+    "${PORTABLEKIT_ROOT}/src/extra_instructions.cpp"
     "${PORTABLEKIT_ROOT}/src/deflate.cpp"
     "${PORTABLEKIT_ROOT}/src/elf32.cpp"
     "${PORTABLEKIT_ROOT}/src/guest_memory.cpp"

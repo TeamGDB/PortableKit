@@ -710,6 +710,12 @@ std::string emit_regular(const psprecomp::DecodedInstruction &d, std::uint32_t p
             << target << "u, " << length << "u);\n";
         break;
     }
+    case psprecomp::OpcodeKind::Extra:
+        // UNVERIFIED: not yet exercised by a real game (docs/INSTRUCTION_COVERAGE.md).
+        // The interpreter runs the same function, so the two agree.
+        out << "    execute_extra_instruction(rt, ctx, " << psprecomp::hex32(pc) << "u, "
+            << psprecomp::hex32(d.word) << "u);\n";
+        break;
     case psprecomp::OpcodeKind::Vcrs: {
         // VCRS.T: (s.y*t.z, s.z*t.x, s.x*t.y), with the usual prefixes.
         const std::uint32_t destination = d.word & 0x7Fu;
@@ -1316,7 +1322,10 @@ int generate_manual(const std::filesystem::path &elf_path,
             const auto decoded = psprecomp::decode_allegrex(memory.load32(pc));
             pc += decoded.has_delay_slot() ? 8u : 4u;
         }
-        out << emit_function_source(input, memory, safe_name(input.name, input.address));
+        const std::string function_source = emit_function_source(input, memory, safe_name(input.name, input.address));
+        if (function_source.find("execute_extra_instruction(") != std::string::npos)
+            out << "void execute_extra_instruction(Runtime &, AllegrexContext &, std::uint32_t, std::uint32_t);\n";
+        out << function_source;
         generated.push_back(std::move(input));
     }
 
@@ -1352,6 +1361,14 @@ int generate_manual(const std::filesystem::path &elf_path,
 // fault/side effect) while discarding only the architectural write to $zero.
 // This pass is deliberately limited to --auto output; manual fixtures retain the
 // readable helper form used by their source-level tests.
+// Units that run an extra instruction declare the one function they call,
+// instead of every unit including extra_instructions.hpp: a unit's text then
+// changes only when it uses one.
+std::string extra_instruction_declaration(const std::string &source) {
+    if (source.find("execute_extra_instruction(") == std::string::npos) return {};
+    return "void execute_extra_instruction(Runtime &, AllegrexContext &, std::uint32_t, std::uint32_t);\n";
+}
+
 std::string lower_constant_gpr_writes(std::string text) {
     constexpr std::string_view needle = "ctx.set_gpr(";
     std::size_t search = 0u;
@@ -1717,7 +1734,8 @@ int generate_auto(const std::filesystem::path &elf_path,
         progress(unit_label + " lowering memory accesses");
         source = lower_aot_memory_accesses(source);
         progress(unit_label + " lowering VFPU accesses");
-        out << lower_constant_vfpu_accesses(source);
+        source = lower_constant_vfpu_accesses(source);
+        out << extra_instruction_declaration(source) << source;
         out << "void register_" << g_symbol_prefix << "_unit_" << unit.bucket << "(Runtime &runtime) {\n";
         // The fast unit table describes one contiguous corpus, so only the main
         // executable installs itself there; overlay corpora rely on per-address
