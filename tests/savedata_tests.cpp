@@ -148,11 +148,15 @@ void test_store() {
     check(loaded.status == LoadStatus::Ok && loaded.contents.data == contents.data, "the save loads back");
     check(loaded.contents.title == "Title" && loaded.contents.detail == "Detail", "the titles load back");
 
-    // A changed data file must be reported as broken.
+    // A changed data file must be reported as broken. Flip the byte: the
+    // encrypted data is different every run, so writing a fixed value can
+    // leave it unchanged.
     {
         std::fstream data(folder / "DATA.BIN", std::ios::binary | std::ios::in | std::ios::out);
+        data.seekg(100);
+        const int original = data.get();
         data.seekp(100);
-        data.put('\x7f');
+        data.put(static_cast<char>(original ^ 0xFF));
     }
     check(load_save(root, files).status == LoadStatus::Broken, "a modified data file is rejected");
     SaveFiles missing = files;
