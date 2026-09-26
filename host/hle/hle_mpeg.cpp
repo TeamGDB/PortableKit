@@ -97,6 +97,11 @@ struct MpegState {
     std::optional<movie::AccessUnit> audio_unit;
     movie::Picture picture;
     std::uint64_t pictures{};
+    // For sceMpegAvcDecode: the frame width sceMpegCreate was given, used when
+    // a decode call passes 0, and the pixel format sceMpegAvcDecodeMode sets
+    // (the GE's colour formats: 0 5650, 1 5551, 2 4444, 3 8888).
+    std::uint32_t default_frame_width{};
+    std::uint32_t pixel_mode{3u};
 };
 
 struct MpegModule {
@@ -291,6 +296,7 @@ void register_library(HleRegistrar &hle) {
         state->mpeg = mpeg;
         state->work = work;
         state->ringbuffer = arg(ctx, 3);
+        state->default_frame_width = arg(ctx, 4);
         state->stream_packets = module().pending_stream_packets;
         memory.store32(mpeg, work + kHandleOffset);
         if (state->ringbuffer != 0u) memory.store32(state->ringbuffer + ring::kMpeg, mpeg);
@@ -432,7 +438,109 @@ void store_picture(psprecomp::GuestMemory &memory, std::uint32_t buffer, const m
     module().ycbcr[buffer] = picture;
 }
 
+// One row of a YCbCr picture as 8-bit R, G, B, A: BT.601, with limited-range
+// luma stretched to full range.
+void picture_row_to_rgba(const movie::Picture &picture, std::uint32_t row, std::uint32_t columns, std::uint8_t *out) {
+    const std::uint32_t chroma_width = (picture.width + 1u) / 2u;
+    for (std::uint32_t column = 0; column < columns; ++column) {
+        int y = picture.y[static_cast<std::size_t>(row) * picture.width + column];
+        const std::size_t chroma = static_cast<std::size_t>(row / 2u) * chroma_width + column / 2u;
+        const int cb = picture.cb[chroma] - 128;
+        const int cr = picture.cr[chroma] - 128;
+        int scale = 1 << 16;
+        if (!picture.full_range) {
+            y -= 16;
+            scale = 76309;  // 255/219
+        }
+        const int luma = y * scale;
+        std::uint8_t *pixel = out + static_cast<std::size_t>(column) * 4u;
+        pixel[0] = static_cast<std::uint8_t>(std::clamp((luma + 91881 * cr) >> 16, 0, 255));
+        pixel[1] = static_cast<std::uint8_t>(std::clamp((luma - 22554 * cb - 46802 * cr) >> 16, 0, 255));
+        pixel[2] = static_cast<std::uint8_t>(std::clamp((luma + 116130 * cb) >> 16, 0, 255));
+        pixel[3] = 0xFFu;
+    }
+}
+
+// A decoded picture straight into the game's buffer, as sceMpegAvcDecode
+// writes it: `stride` pixels a row, in one of the GE's colour formats.
+void store_pixels(psprecomp::GuestMemory &memory, std::uint32_t buffer, std::uint32_t stride, std::uint32_t mode,
+                  const movie::Picture &picture) {
+    const std::uint32_t columns = std::min(stride, picture.width);
+    const std::uint32_t bytes_per_pixel = mode == 3u ? 4u : 2u;
+    std::vector<std::uint8_t> rgba(static_cast<std::size_t>(columns) * 4u);
+    std::vector<std::uint8_t> line(static_cast<std::size_t>(columns) * bytes_per_pixel);
+    for (std::uint32_t row = 0; row < picture.height; ++row) {
+        picture_row_to_rgba(picture, row, columns, rgba.data());
+        if (mode == 3u) {
+            line = rgba;
+        } else {
+            for (std::uint32_t column = 0; column < columns; ++column) {
+                const std::uint8_t *p = &rgba[static_cast<std::size_t>(column) * 4u];
+                std::uint16_t value = 0u;
+                if (mode == 0u) value = static_cast<std::uint16_t>((p[0] >> 3u) | ((p[1] >> 2u) << 5u) | ((p[2] >> 3u) << 11u));
+                else if (mode == 1u) value = static_cast<std::uint16_t>((p[0] >> 3u) | ((p[1] >> 3u) << 5u) | ((p[2] >> 3u) << 10u) | 0x8000u);
+                else value = static_cast<std::uint16_t>((p[0] >> 4u) | ((p[1] >> 4u) << 4u) | ((p[2] >> 4u) << 8u) | 0xF000u);
+                line[static_cast<std::size_t>(column) * 2u] = static_cast<std::uint8_t>(value);
+                line[static_cast<std::size_t>(column) * 2u + 1u] = static_cast<std::uint8_t>(value >> 8u);
+            }
+        }
+        memory.copy_in(buffer + row * stride * bytes_per_pixel, line);
+    }
+}
+
 void register_decoding(HleRegistrar &hle) {
+    // sceMpegAvcDecodeMode(mpeg, mode): the word at mode + 4 is the pixel
+    // format sceMpegAvcDecode writes.
+    hle.add("sceMpeg", "sceMpegAvcDecodeMode", [](Runtime &rt, AllegrexContext &ctx) {
+        MpegState *state = find_mpeg(arg(ctx, 0));
+        if (state == nullptr || arg(ctx, 1) == 0u) {
+            finish_traced(ctx, "sceMpegAvcDecodeMode", 0xFFFFFFFFu, {}, 2u);
+            return;
+        }
+        const std::uint32_t mode = rt.memory().load32(arg(ctx, 1) + 4u);
+        if (mode <= 3u) state->pixel_mode = mode;
+        finish_traced(ctx, "sceMpegAvcDecodeMode", 0u, "pixel mode " + std::to_string(mode), 2u);
+    });
+    // sceMpegAvcDecode(mpeg, au, frameWidth, bufferPointer, outInit): the
+    // picture as pixels, into the buffer `bufferPointer` points at, frameWidth
+    // pixels a row (0: the width sceMpegCreate was given, or the picture's).
+    // outInit says whether a picture came out.
+    hle.add("sceMpeg", "sceMpegAvcDecode", [](Runtime &rt, AllegrexContext &ctx) {
+        MpegState *state = find_mpeg(arg(ctx, 0));
+        if (state == nullptr) {
+            finish_traced(ctx, "sceMpegAvcDecode", mpeg_error::kInvalidValue, {}, 5u);
+            return;
+        }
+        auto &memory = rt.memory();
+        bool produced = false;
+        if (state->video_unit) {
+            produced = state->video.decode(state->video_unit->data, state->picture);
+            state->video_unit.reset();
+        }
+        std::uint32_t width = arg(ctx, 2);
+        if (width == 0u) width = state->default_frame_width != 0u ? state->default_frame_width : state->picture.width;
+        if (produced) {
+            ++state->pictures;
+            store_pixels(memory, memory.load32(arg(ctx, 3)), width, state->pixel_mode, state->picture);
+        }
+        if (arg(ctx, 4) != 0u) memory.store32(arg(ctx, 4), produced ? 1u : 0u);
+        finish_traced(ctx, "sceMpegAvcDecode", 0u,
+                      produced ? "picture " + std::to_string(state->pictures) + " width " + std::to_string(width) : "none", 5u);
+    });
+    // sceMpegAvcDecodeStop(mpeg, frameWidth, bufferPointer, outStatus): a
+    // picture the decoder still holds at the end of the stream.
+    hle.add("sceMpeg", "sceMpegAvcDecodeStop", [](Runtime &rt, AllegrexContext &ctx) {
+        MpegState *state = find_mpeg(arg(ctx, 0));
+        bool produced = false;
+        if (state != nullptr && state->video.drain(state->picture)) {
+            produced = true;
+            std::uint32_t width = arg(ctx, 1);
+            if (width == 0u) width = state->default_frame_width != 0u ? state->default_frame_width : state->picture.width;
+            store_pixels(rt.memory(), rt.memory().load32(arg(ctx, 2)), width, state->pixel_mode, state->picture);
+        }
+        if (arg(ctx, 3) != 0u) rt.memory().store32(arg(ctx, 3), produced ? 1u : 0u);
+        finish_traced(ctx, "sceMpegAvcDecodeStop", 0u, {}, 4u);
+    });
     // sceMpegAvcQueryYCbCrSize(mpeg, mode, width, height, outSize)
     hle.add("sceMpeg", "sceMpegAvcQueryYCbCrSize", [](Runtime &rt, AllegrexContext &ctx) {
         const std::uint32_t width = arg(ctx, 2);
@@ -550,30 +658,9 @@ void register_jpeg(HleRegistrar &hle) {
         const movie::Picture &picture = found->second;
         const std::uint32_t rows = std::min(height, picture.height);
         const std::uint32_t columns = std::min(width, picture.width);
-        const std::uint32_t chroma_width = (picture.width + 1u) / 2u;
         std::vector<std::uint8_t> line(static_cast<std::size_t>(columns) * 4u);
         for (std::uint32_t row = 0; row < rows; ++row) {
-            for (std::uint32_t column = 0; column < columns; ++column) {
-                // BT.601; limited-range luma is stretched to full range.
-                int y = picture.y[static_cast<std::size_t>(row) * picture.width + column];
-                const std::size_t chroma = static_cast<std::size_t>(row / 2u) * chroma_width + column / 2u;
-                const int cb = picture.cb[chroma] - 128;
-                const int cr = picture.cr[chroma] - 128;
-                int scale = 1 << 16;
-                if (!picture.full_range) {
-                    y -= 16;
-                    scale = 76309;  // 255/219
-                }
-                const int luma = y * scale;
-                const int red = (luma + 91881 * cr) >> 16;
-                const int green = (luma - 22554 * cb - 46802 * cr) >> 16;
-                const int blue = (luma + 116130 * cb) >> 16;
-                std::uint8_t *pixel = &line[static_cast<std::size_t>(column) * 4u];
-                pixel[0] = static_cast<std::uint8_t>(std::clamp(red, 0, 255));
-                pixel[1] = static_cast<std::uint8_t>(std::clamp(green, 0, 255));
-                pixel[2] = static_cast<std::uint8_t>(std::clamp(blue, 0, 255));
-                pixel[3] = 0xFFu;
-            }
+            picture_row_to_rgba(picture, row, columns, line.data());
             memory.copy_in(image + row * stride * 4u, line);
         }
         finish_traced(ctx, "sceJpegCsc", 0u, {}, 5u);
@@ -591,10 +678,11 @@ void register_movie_skip(HleRegistrar &hle) {
     };
     for (const char *name : {"sceMpegInit", "sceMpegFinish", "sceMpegDelete", "sceMpegRegistStream",
                              "sceMpegUnRegistStream", "sceMpegFlushAllStream", "sceMpegInitAu",
-                             "sceMpegAvcInitYCbCr", "sceMpegRingbufferDestruct", "sceMpegFreeAvcEsBuf"})
+                             "sceMpegAvcInitYCbCr", "sceMpegRingbufferDestruct", "sceMpegFreeAvcEsBuf",
+                             "sceMpegAvcDecodeMode"})
         hle.try_add("sceMpeg", name, succeed);
     for (const char *name : {"sceMpegGetAvcAu", "sceMpegGetAtracAu", "sceMpegAvcDecode", "sceMpegAtracDecode",
-                             "sceMpegAvcDecodeYCbCr", "sceMpegAvcDecodeStopYCbCr", "sceMpegAvcDecodeDetail",
+                             "sceMpegAvcDecodeYCbCr", "sceMpegAvcDecodeStopYCbCr", "sceMpegAvcDecodeDetail", "sceMpegAvcDecodeStop",
                              "sceMpegAvcConvertToYuv420"})
         hle.try_add("sceMpeg", name, no_data);
 }
