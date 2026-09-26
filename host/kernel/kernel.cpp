@@ -322,6 +322,7 @@ void Kernel::switch_to(AllegrexContext &ctx, Thread &thread) {
 void Kernel::finish(AllegrexContext &ctx, std::uint32_t result) {
     ctx.set_gpr(2, result);
     if (interrupt_active_ || current_thread() == nullptr) return;
+    charge_busy_time();
 
     if (interrupts_enabled_ && !pending_interrupts_.empty()) {
         interrupted_context_ = ctx;
@@ -352,6 +353,7 @@ void Kernel::block(AllegrexContext &ctx, const WaitState &wait, std::uint32_t re
         ctx.set_gpr(2, error::kCanNotWait);
         return;
     }
+    ++waits_begun_;
     thread->wait = wait;
     if (wait.timeout_address != 0u)
         thread->wait.deadline_us = now_us_ + runtime_->memory().load32(wait.timeout_address);
@@ -631,6 +633,27 @@ std::string Kernel::describe_threads() const {
         if (thread->status != ThreadStatus::Dormant) report += " pc=" + psprecomp::hex32(thread->context.pc);
     }
     return report;
+}
+
+void Kernel::charge_busy_time() {
+    static const bool off = portablekit::env("NO_BUSY_CLOCK") != nullptr;
+    if (off || interrupt_active_ || current_thread() == nullptr) return;
+    // A frame that computes and then waits for the vblank never gets here:
+    // only a thread that has gone this long without any wait is charged.
+    constexpr std::int64_t kBusyChargeMinUs = 100000;
+    constexpr std::int64_t kBusyChargeMaxUs = 250000;
+    const auto now = std::chrono::steady_clock::now();
+    if (busy_thread_ != current_uid_ || busy_waits_ != waits_begun_) {
+        busy_thread_ = current_uid_;
+        busy_waits_ = waits_begun_;
+        busy_since_ = now;
+        return;
+    }
+    const std::int64_t ran_us = std::chrono::duration_cast<std::chrono::microseconds>(now - busy_since_).count();
+    if (ran_us < kBusyChargeMinUs) return;
+    busy_since_ = now;
+    advance_clock(now_us_ + static_cast<std::uint64_t>(std::min(ran_us, kBusyChargeMaxUs)));
+    process_timers();
 }
 
 void Kernel::on_starvation(AllegrexContext &ctx) {

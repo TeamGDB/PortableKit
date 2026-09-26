@@ -154,6 +154,7 @@ struct EventFlag {
     std::uint32_t attributes{};
     std::uint32_t pattern{};
     std::deque<SceUID> waiters;
+    std::uint32_t initial_pattern{};  // for sceKernelReferEventFlagStatus
 };
 
 struct Mutex {
@@ -361,6 +362,15 @@ public:
 
     // Periodic hook from the runtime's starvation boundary.
     void on_starvation(AllegrexContext &ctx);
+    // A thread that calls into the system again and again without ever
+    // waiting is using CPU time the clock should show: a PSP's loop that
+    // draws and reads the time, or polls a ring buffer, sees it move. Called
+    // as every import finishes, this moves emulated time on by the real time
+    // the thread has run since it last waited or was charged (at most
+    // kBusyChargeMaxUs at a time), once that is at least kBusyChargeMinUs
+    // (100 ms: longer than any frame of a game that waits for the vblank).
+    // <prefix>_NO_BUSY_CLOCK turns it off.
+    void charge_busy_time();
 
     // Guest entry stubs.
     void thread_exit_stub(AllegrexContext &ctx);
@@ -401,6 +411,10 @@ private:
     std::uint64_t next_ready_sequence_{1u};
     std::map<SceUID, std::unique_ptr<Thread>> threads_;
     std::uint64_t now_us_{};
+    std::uint64_t waits_begun_{};  // waits begun, so a busy thread can tell it has not waited
+    SceUID busy_thread_{};
+    std::uint64_t busy_waits_{};
+    std::chrono::steady_clock::time_point busy_since_{};
     bool pacing_started_{};
     bool pacing_fast_{};  // the hold lets emulated time run ahead: a load runs fast
     std::chrono::steady_clock::time_point pacing_real_base_{};

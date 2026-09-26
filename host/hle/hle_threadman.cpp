@@ -3,10 +3,12 @@
 #include "hle_common.hpp"
 
 #include "kernel/fixed_pool.hpp"
+#include "kernel/message_pipe.hpp"
 
 #include "psprecomp/common.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <map>
 #include <optional>
@@ -129,6 +131,25 @@ void register_threads(HleRegistrar &hle) {
     };
     hle.add("ThreadManForUser", "sceKernelSleepThread", sleep);
     hle.add("ThreadManForUser", "sceKernelSleepThreadCB", sleep_cb);
+    // sceKernelReleaseWaitThread(uid): a waiting thread stops waiting, its
+    // call answering SCE_KERNEL_ERROR_RELEASE_WAIT. Phantasy Star Portable 2
+    // Infinity (NPJH50332) calls it.
+    hle.add("ThreadManForUser", "sceKernelReleaseWaitThread", [](Runtime &, AllegrexContext &ctx) {
+        constexpr std::uint32_t kReleaseWait = 0x800201AAu;
+        constexpr std::uint32_t kNotWait = 0x800201A6u;
+        Thread *thread = kernel().find_thread(as_signed(arg(ctx, 0)));
+        if (thread == nullptr) {
+            kernel().finish(ctx, error::kUnknownThid);
+            return;
+        }
+        if (thread->status != ThreadStatus::Waiting) {
+            kernel().finish(ctx, kNotWait);
+            return;
+        }
+        if (trace_sync()) log_sync("ReleaseWaitThread " + std::to_string(thread->uid) + " " + thread->name);
+        kernel().wake(*thread, kReleaseWait);
+        kernel().finish(ctx, 0u);
+    });
     hle.add("ThreadManForUser", "sceKernelWakeupThread", [](Runtime &, AllegrexContext &ctx) {
         Thread *thread = kernel().find_thread(as_signed(arg(ctx, 0)));
         if (thread == nullptr) {
@@ -183,6 +204,68 @@ void register_threads(HleRegistrar &hle) {
         thread->suspended = false;
         if (trace_sync()) log_sync("ResumeThread " + std::to_string(thread->uid) + " " + thread->name);
         kernel().finish(ctx, 0u);  // which runs it now if it outranks this thread
+    });
+    // sceKernelReferThreadStatus(uid, SceKernelThreadInfo *info), uid 0 the
+    // calling thread. The info's layout is pspthreadman.h's: size, name[32],
+    // attr, status, entry, stack, stackSize, gpReg, initPriority,
+    // currentPriority, waitType, waitId, wakeupCount, exitStatus, runClocks
+    // (8 bytes), three counters; written up to the size the game gives.
+    // God of War (UCES00842) polls it with DelayThread until a loader
+    // thread is done.
+    hle.add("ThreadManForUser", "sceKernelReferThreadStatus", [](Runtime &rt, AllegrexContext &ctx) {
+        const SceUID uid = as_signed(arg(ctx, 0));
+        const Thread *thread = kernel().find_thread(uid == 0 ? kernel().current_uid() : uid);
+        if (thread == nullptr) {
+            kernel().finish(ctx, error::kUnknownThid);
+            return;
+        }
+        auto &memory = rt.memory();
+        const std::uint32_t info = arg(ctx, 1);
+        const std::uint32_t size = info != 0u ? memory.load32(info) : 0u;
+        std::uint32_t status = 0u;
+        switch (thread->status) {
+        case ThreadStatus::Running: status = 1u; break;
+        case ThreadStatus::Ready: status = 2u; break;
+        case ThreadStatus::Waiting: status = 4u; break;
+        case ThreadStatus::Dormant: status = 16u; break;
+        case ThreadStatus::Dead: status = 32u; break;
+        }
+        if (thread->uid == kernel().current_uid()) status = 1u;
+        if (thread->suspended) status |= 8u;
+        std::uint32_t wait_type = 0u;
+        if (thread->status == ThreadStatus::Waiting) {
+            switch (thread->wait.type) {
+            case WaitType::Sleep: wait_type = 1u; break;
+            case WaitType::Delay: wait_type = 2u; break;
+            case WaitType::Semaphore: wait_type = 3u; break;
+            case WaitType::EventFlag: wait_type = 4u; break;
+            case WaitType::Mailbox: wait_type = 5u; break;
+            case WaitType::ThreadEnd: wait_type = 9u; break;
+            case WaitType::Mutex: wait_type = 12u; break;
+            default: wait_type = 0u; break;
+            }
+        }
+        std::array<std::uint8_t, 0x68> bytes{};
+        const auto put = [&bytes](std::size_t at, std::uint32_t value) {
+            for (std::size_t i = 0; i < 4u; ++i) bytes[at + i] = static_cast<std::uint8_t>(value >> (8u * i));
+        };
+        put(0u, size);
+        for (std::size_t i = 0; i < 31u && i < thread->name.size(); ++i) bytes[4u + i] = static_cast<std::uint8_t>(thread->name[i]);
+        put(36u, thread->attributes);
+        put(40u, status);
+        put(44u, thread->entry);
+        put(48u, thread->stack_bottom);
+        put(52u, thread->stack_size);
+        put(56u, thread->gp);
+        put(60u, thread->initial_priority);
+        put(64u, thread->priority);
+        put(68u, wait_type);
+        put(72u, thread->status == ThreadStatus::Waiting ? as_unsigned(thread->wait.object) : 0u);
+        put(76u, thread->wakeup_count);
+        put(80u, as_unsigned(thread->exit_status));
+        for (std::uint32_t i = 0; i < std::min<std::uint32_t>(size, static_cast<std::uint32_t>(bytes.size())); ++i)
+            memory.store8(info + i, bytes[i]);
+        kernel().finish(ctx, 0u);
     });
     // Runs the thread's notified callbacks now: 1 when there were any.
     hle.add("ThreadManForUser", "sceKernelCheckCallback", [](Runtime &, AllegrexContext &ctx) {
@@ -325,9 +408,37 @@ void register_semaphores(HleRegistrar &hle) {
 void register_event_flags(HleRegistrar &hle) {
     hle.add("ThreadManForUser", "sceKernelCreateEventFlag", [](Runtime &rt, AllegrexContext &ctx) {
         const SceUID uid = kernel().allocate_uid();
-        kernel().event_flags[uid] = EventFlag{read_cstring(rt.memory(), arg(ctx, 0), 32u), arg(ctx, 1), arg(ctx, 2), {}};
+        kernel().event_flags[uid] = EventFlag{read_cstring(rt.memory(), arg(ctx, 0), 32u), arg(ctx, 1), arg(ctx, 2), {}, arg(ctx, 2)};
         if (trace_sync()) log_sync("CreateEventFlag " + std::to_string(uid) + " " + kernel().event_flags[uid].name);
         kernel().finish(ctx, as_unsigned(uid));
+    });
+    // sceKernelReferEventFlagStatus(uid, SceKernelEventFlagInfo *info): size,
+    // name[32], attr, initPattern, currentPattern, numWaitThreads, as in
+    // pspthreadman.h; written up to the size the game gives. God of War
+    // (UCES00842) and Patapon (UCES00995) read the current pattern.
+    hle.add("ThreadManForUser", "sceKernelReferEventFlagStatus", [](Runtime &rt, AllegrexContext &ctx) {
+        const auto found = kernel().event_flags.find(as_signed(arg(ctx, 0)));
+        if (found == kernel().event_flags.end()) {
+            kernel().finish(ctx, error::kUnknownEvfid);
+            return;
+        }
+        const EventFlag &flag = found->second;
+        auto &memory = rt.memory();
+        const std::uint32_t info = arg(ctx, 1);
+        const std::uint32_t size = info != 0u ? memory.load32(info) : 0u;
+        std::array<std::uint8_t, 52> bytes{};
+        const auto put = [&bytes](std::size_t at, std::uint32_t value) {
+            for (std::size_t i = 0; i < 4u; ++i) bytes[at + i] = static_cast<std::uint8_t>(value >> (8u * i));
+        };
+        put(0u, size);
+        for (std::size_t i = 0; i < 31u && i < flag.name.size(); ++i) bytes[4u + i] = static_cast<std::uint8_t>(flag.name[i]);
+        put(36u, flag.attributes);
+        put(40u, flag.initial_pattern);
+        put(44u, flag.pattern);
+        put(48u, static_cast<std::uint32_t>(flag.waiters.size()));
+        for (std::uint32_t i = 0; i < std::min<std::uint32_t>(size, static_cast<std::uint32_t>(bytes.size())); ++i)
+            memory.store8(info + i, bytes[i]);
+        kernel().finish(ctx, 0u);
     });
     hle.add("ThreadManForUser", "sceKernelDeleteEventFlag", [](Runtime &, AllegrexContext &ctx) {
         auto found = kernel().event_flags.find(as_signed(arg(ctx, 0)));
@@ -845,6 +956,40 @@ void register_kernel_library(HleRegistrar &hle) {
     // Bytes left on the current thread's stack, which a game checks before it
     // recurses. A stub returning 0 says the stack is exhausted, and the game
     // believes it.
+    // sceKernelGetThreadStackFreeSize(uid), 0 the calling thread: the space
+    // between the stack's bottom and where the thread's stack pointer is.
+    // A PSP measures the part never written (its fill pattern); this is the
+    // part not in use now, never less. Patapon and Chinatown Wars import it.
+    hle.add("ThreadManForUser", "sceKernelGetThreadStackFreeSize", [](Runtime &, AllegrexContext &ctx) {
+        log_once("thread-stack-free", "[kernel] sceKernelGetThreadStackFreeSize (UNVERIFIED: no game traced yet)");
+        const SceUID uid = as_signed(arg(ctx, 0));
+        const Thread *thread = kernel().find_thread(uid == 0 ? kernel().current_uid() : uid);
+        if (thread == nullptr) {
+            kernel().finish(ctx, error::kUnknownThid);
+            return;
+        }
+        const std::uint32_t sp = thread->uid == kernel().current_uid() ? ctx.gpr[29] : thread->context.gpr[29];
+        kernel().finish(ctx, sp > thread->stack_bottom ? sp - thread->stack_bottom : 0u);
+    });
+    // sceKernelReferThreadProfiler(regs) and sceKernelReferGlobalProfiler(regs):
+    // the hardware profiler's counters, PspDebugProfilerRegs in pspsdk's
+    // pspdebug.h (20 words, `enable` first). A retail PSP has the profiler
+    // off; here it reads as off with every counter 0. Vice City Stories and
+    // PSP2i import them.
+    for (const char *name : {"sceKernelReferThreadProfiler", "sceKernelReferGlobalProfiler"}) {
+        hle.add("ThreadManForUser", name, [name](Runtime &rt, AllegrexContext &ctx) {
+            log_once(std::string("profiler-") + name, std::string("[kernel] ") + name + " (UNVERIFIED: no game traced yet)");
+            constexpr std::uint32_t kProfilerRegsBytes = 20u * 4u;
+            if (const std::uint32_t regs = arg(ctx, 0); regs != 0u)
+                for (std::uint32_t at = 0; at < kProfilerRegsBytes; at += 4u) rt.memory().store32(regs + at, 0u);
+            kernel().finish(ctx, 0u);
+        });
+    }
+    hle.add("ThreadManForUser", "sceKernelCheckThreadStack", [](Runtime &, AllegrexContext &ctx) {
+        const Thread *thread = kernel().current_thread();
+        const std::uint32_t sp = ctx.gpr[29];
+        kernel().finish(ctx, thread != nullptr && sp > thread->stack_bottom ? sp - thread->stack_bottom : 0u);
+    });
     hle.add("Kernel_Library", "sceKernelCheckThreadStack", [](Runtime &, AllegrexContext &ctx) {
         const Thread *thread = kernel().current_thread();
         if (thread == nullptr) {
@@ -875,6 +1020,12 @@ void register_kernel_library(HleRegistrar &hle) {
         kernel().finish(ctx, 0u);
     };
     hle.add("Kernel_Library", "sceKernelCpuResumeIntr", resume_interrupts);
+    // sceKernelIsCpuIntrEnable() -> 1 while interrupts are enabled. God of
+    // War (UCES00842) asks it at start-up and, given 0, stops in a loop that
+    // never ends.
+    hle.add("Kernel_Library", "sceKernelIsCpuIntrEnable", [](Runtime &, AllegrexContext &ctx) {
+        kernel().finish(ctx, kernel().interrupts_enabled() ? 1u : 0u);
+    });
     // With a pipeline sync on a PSP, which has nothing to wait for here.
     hle.add("Kernel_Library", "sceKernelCpuResumeIntrWithSync", resume_interrupts);
     hle.add("Kernel_Library", "sceKernelMemset", [](Runtime &rt, AllegrexContext &ctx) {
@@ -1305,6 +1456,215 @@ void register_fpls(HleRegistrar &hle) {
     });
 }
 
+
+// Message pipes: a byte stream between threads, through a buffer of partition
+// memory (kernel/message_pipe.hpp keeps the books; the bytes themselves are
+// kept on the host). The calls follow the SDK's pspthreadman.h and uOFW's
+// names for the arguments it leaves unnamed: send and receive take (uid,
+// message, size, wait mode, int *result, unsigned *timeout), wait mode 0 for
+// all of `size` and 1 for as much as there is, and *result gets the byte
+// count. Patapon (UCES00995) passes messages to a worker thread this way when
+// a new game starts.
+constexpr std::uint32_t kUnknownMppid = 0x8002019Eu;
+constexpr std::uint32_t kMppFull = 0x800201B3u;
+constexpr std::uint32_t kMppEmpty = 0x800201B4u;
+constexpr std::uint32_t kMppAttrHighMemory = 0x4000u;
+
+struct MsgPipe {
+    std::string name;
+    std::uint32_t attributes{};
+    SceUID block{-1};
+    kernel_pipes::MessagePipe pipe;
+};
+
+std::map<SceUID, MsgPipe> &msg_pipes() {
+    static std::map<SceUID, MsgPipe> pipes;
+    return pipes;
+}
+
+std::vector<std::uint8_t> read_bytes(const psprecomp::GuestMemory &memory, std::uint32_t address, std::uint32_t size) {
+    std::vector<std::uint8_t> bytes(size);
+    if (size != 0u && memory.contains(address, size)) memory.copy_out(address, bytes);
+    return bytes;
+}
+
+void write_bytes(psprecomp::GuestMemory &memory, std::uint32_t address, const std::vector<std::uint8_t> &bytes) {
+    for (std::size_t i = 0; i < bytes.size(); ++i) memory.store8(address + static_cast<std::uint32_t>(i), bytes[i]);
+}
+
+void register_msg_pipes(HleRegistrar &hle) {
+    // sceKernelCreateMsgPipe(name, partition, attr, buffer size, option)
+    hle.add("ThreadManForUser", "sceKernelCreateMsgPipe", [](Runtime &rt, AllegrexContext &ctx) {
+        MsgPipe pipe;
+        pipe.name = read_cstring(rt.memory(), arg(ctx, 0), 32u);
+        pipe.attributes = arg(ctx, 2);
+        const std::uint32_t size = arg(ctx, 3);
+        if (size != 0u) {
+            const std::uint32_t type = (pipe.attributes & kMppAttrHighMemory) != 0u ? 1u : 0u;
+            pipe.block = kernel().allocate_block("MsgPipe", type, size, 0u);
+            if (pipe.block < 0) {
+                kernel().finish(ctx, error::kNoMemory);
+                return;
+            }
+        }
+        pipe.pipe = kernel_pipes::MessagePipe(size);
+        if (trace_sync())
+            log_sync("[kernel] CreateMsgPipe \"" + pipe.name + "\" size=" + std::to_string(size) +
+                     " attr=" + psprecomp::hex32(pipe.attributes));
+        const SceUID uid = kernel().allocate_uid();
+        msg_pipes()[uid] = std::move(pipe);
+        kernel().finish(ctx, as_unsigned(uid));
+    });
+    hle.add("ThreadManForUser", "sceKernelDeleteMsgPipe", [](Runtime &, AllegrexContext &ctx) {
+        const auto found = msg_pipes().find(as_signed(arg(ctx, 0)));
+        if (found == msg_pipes().end()) {
+            kernel().finish(ctx, kUnknownMppid);
+            return;
+        }
+        if (found->second.block >= 0) (void)kernel().free_block(found->second.block);
+        msg_pipes().erase(found);  // waiters see it gone and end with WAIT_DELETE
+        kernel().finish(ctx, 0u);
+    });
+
+    const auto send = [](bool may_wait) {
+        return [may_wait](Runtime &rt, AllegrexContext &ctx) {
+            const SceUID uid = as_signed(arg(ctx, 0));
+            const auto found = msg_pipes().find(uid);
+            if (found == msg_pipes().end()) {
+                kernel().finish(ctx, kUnknownMppid);
+                return;
+            }
+            auto &memory = rt.memory();
+            const std::uint32_t size = arg(ctx, 2);
+            const bool whole = arg(ctx, 3) == 0u;
+            const std::uint32_t result_address = ctx.gpr[8];   // t0
+            const std::uint32_t timeout_address = ctx.gpr[9];  // t1
+            std::vector<std::uint8_t> bytes = read_bytes(memory, arg(ctx, 1), size);
+            kernel_pipes::MessagePipe &pipe = found->second.pipe;
+            if (!may_wait) {
+                const auto sent = pipe.try_send(bytes, whole);
+                if (result_address != 0u && sent) memory.store32(result_address, *sent);
+                kernel().finish(ctx, sent ? 0u : kMppFull);
+                return;
+            }
+            const auto ticket = pipe.send(std::move(bytes), whole);
+            const std::uint64_t generation = pipe.cancel_generation();
+            std::optional<std::uint64_t> timeout;
+            if (timeout_address != 0u) timeout = memory.load32(timeout_address);
+            kernel().wait_host(ctx, timeout, [uid, ticket, generation, result_address, timeout_address, &memory](
+                                                 bool timed_out) -> std::optional<std::uint32_t> {
+                const auto pipe = msg_pipes().find(uid);
+                if (pipe == msg_pipes().end()) return error::kWaitDelete;
+                kernel_pipes::MessagePipe &waited = pipe->second.pipe;
+                if (waited.cancel_generation() != generation) return kWaitCancel;
+                if (const auto sent = waited.sent(ticket)) {
+                    if (result_address != 0u) memory.store32(result_address, *sent);
+                    return 0u;
+                }
+                if (!timed_out) return std::nullopt;
+                const std::uint32_t sent = waited.withdraw(ticket);
+                if (result_address != 0u) memory.store32(result_address, sent);
+                if (timeout_address != 0u) memory.store32(timeout_address, 0u);
+                return error::kWaitTimeout;
+            });
+        };
+    };
+    hle.add("ThreadManForUser", "sceKernelSendMsgPipe", send(true));
+    hle.add("ThreadManForUser", "sceKernelSendMsgPipeCB", send(true));
+    hle.add("ThreadManForUser", "sceKernelTrySendMsgPipe", send(false));
+
+    const auto receive = [](bool may_wait) {
+        return [may_wait](Runtime &rt, AllegrexContext &ctx) {
+            const SceUID uid = as_signed(arg(ctx, 0));
+            const auto found = msg_pipes().find(uid);
+            if (found == msg_pipes().end()) {
+                kernel().finish(ctx, kUnknownMppid);
+                return;
+            }
+            auto &memory = rt.memory();
+            const std::uint32_t address = arg(ctx, 1);
+            const std::uint32_t size = arg(ctx, 2);
+            const bool whole = arg(ctx, 3) == 0u;
+            const std::uint32_t result_address = ctx.gpr[8];   // t0
+            const std::uint32_t timeout_address = ctx.gpr[9];  // t1
+            kernel_pipes::MessagePipe &pipe = found->second.pipe;
+            if (!may_wait) {
+                const auto got = pipe.try_receive(size, whole);
+                if (got) write_bytes(memory, address, *got);
+                if (result_address != 0u && got) memory.store32(result_address, static_cast<std::uint32_t>(got->size()));
+                kernel().finish(ctx, got ? 0u : kMppEmpty);
+                return;
+            }
+            const auto ticket = pipe.receive(size, whole);
+            const std::uint64_t generation = pipe.cancel_generation();
+            std::optional<std::uint64_t> timeout;
+            if (timeout_address != 0u) timeout = memory.load32(timeout_address);
+            kernel().wait_host(ctx, timeout, [uid, ticket, generation, address, result_address, timeout_address,
+                                              &memory](bool timed_out) -> std::optional<std::uint32_t> {
+                const auto pipe = msg_pipes().find(uid);
+                if (pipe == msg_pipes().end()) return error::kWaitDelete;
+                kernel_pipes::MessagePipe &waited = pipe->second.pipe;
+                if (waited.cancel_generation() != generation) return kWaitCancel;
+                if (const auto got = waited.received(ticket)) {
+                    write_bytes(memory, address, *got);
+                    if (result_address != 0u) memory.store32(result_address, static_cast<std::uint32_t>(got->size()));
+                    return 0u;
+                }
+                if (!timed_out) return std::nullopt;
+                (void)waited.withdraw(ticket);
+                if (result_address != 0u) memory.store32(result_address, 0u);
+                if (timeout_address != 0u) memory.store32(timeout_address, 0u);
+                return error::kWaitTimeout;
+            });
+        };
+    };
+    hle.add("ThreadManForUser", "sceKernelReceiveMsgPipe", receive(true));
+    hle.add("ThreadManForUser", "sceKernelReceiveMsgPipeCB", receive(true));
+    hle.add("ThreadManForUser", "sceKernelTryReceiveMsgPipe", receive(false));
+
+    // sceKernelCancelMsgPipe(uid, int *senders, int *receivers): every waiter
+    // ends with WAIT_CANCEL, and the pipe is emptied.
+    hle.add("ThreadManForUser", "sceKernelCancelMsgPipe", [](Runtime &rt, AllegrexContext &ctx) {
+        const auto found = msg_pipes().find(as_signed(arg(ctx, 0)));
+        if (found == msg_pipes().end()) {
+            kernel().finish(ctx, kUnknownMppid);
+            return;
+        }
+        log_once("mpp-cancel", "[kernel] sceKernelCancelMsgPipe (UNVERIFIED: no game traced yet)");
+        kernel_pipes::MessagePipe &pipe = found->second.pipe;
+        const std::uint32_t senders = pipe.waiting_senders();
+        const std::uint32_t receivers = pipe.waiting_receivers();
+        (void)pipe.cancel();
+        pipe.clear();
+        auto &memory = rt.memory();
+        if (arg(ctx, 1) != 0u) memory.store32(arg(ctx, 1), senders);
+        if (arg(ctx, 2) != 0u) memory.store32(arg(ctx, 2), receivers);
+        kernel().finish(ctx, 0u);
+    });
+    // SceKernelMppInfo: size, name[32], attr, bufSize, freeSize,
+    // numSendWaitThreads, numReceiveWaitThreads.
+    hle.add("ThreadManForUser", "sceKernelReferMsgPipeStatus", [](Runtime &rt, AllegrexContext &ctx) {
+        const auto found = msg_pipes().find(as_signed(arg(ctx, 0)));
+        if (found == msg_pipes().end()) {
+            kernel().finish(ctx, kUnknownMppid);
+            return;
+        }
+        log_once("mpp-refer", "[kernel] sceKernelReferMsgPipeStatus (UNVERIFIED: no game traced yet)");
+        const MsgPipe &pipe = found->second;
+        auto &memory = rt.memory();
+        const std::uint32_t info = arg(ctx, 1);
+        if (info != 0u && memory.load32(info) >= 56u) {
+            for (std::uint32_t i = 0; i < 32u; ++i)
+                memory.store8(info + 4u + i, i < pipe.name.size() ? static_cast<std::uint8_t>(pipe.name[i]) : 0u);
+            memory.store32(info + 36u, pipe.attributes);
+            memory.store32(info + 40u, pipe.pipe.capacity());
+            memory.store32(info + 44u, pipe.pipe.free_space());
+            memory.store32(info + 48u, pipe.pipe.waiting_senders());
+            memory.store32(info + 52u, pipe.pipe.waiting_receivers());
+        }
+        kernel().finish(ctx, 0u);
+    });
+}
 } // namespace
 
 void register_threadman(HleRegistrar &hle) {
@@ -1318,6 +1678,7 @@ void register_threadman(HleRegistrar &hle) {
     register_mailboxes(hle);
     register_vpls(hle);
     register_fpls(hle);
+    register_msg_pipes(hle);
     register_callbacks_and_timers(hle);
     register_kernel_library(hle);
 }

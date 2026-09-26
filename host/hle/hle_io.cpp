@@ -19,6 +19,7 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <set>
 #include <vector>
 
 namespace portablekit {
@@ -122,6 +123,9 @@ struct IoState {
     std::uint32_t next_fd{3u};
     std::map<std::uint32_t, DiscReadAhead> read_ahead;
     std::uint32_t next_read_ahead{1u};
+    // sceIoChdir's directory ("device:/path"), which a path without a device
+    // is relative to; empty until a game sets one, and then the disc's root.
+    std::string current_directory;
 };
 
 IoState &io() {
@@ -149,8 +153,16 @@ struct SplitPath {
     std::string path;  // without device, '/' separated, no leading '/'
 };
 
-SplitPath split_path(const std::string &full) {
+SplitPath split_path(const std::string &given) {
     SplitPath result;
+    std::string full = given;
+    if (full.find(':') == std::string::npos && !io().current_directory.empty()) {
+        const std::string &current = io().current_directory;
+        if (!full.empty() && (full[0] == '/' || full[0] == '\\'))
+            full = current.substr(0, current.find(':') + 1u) + full;
+        else
+            full = current + "/" + full;
+    }
     const auto colon = full.find(':');
     std::string device = colon == std::string::npos ? "disc0" : full.substr(0, colon);
     std::transform(device.begin(), device.end(), device.begin(), [](unsigned char c) { return std::tolower(c); });
@@ -214,7 +226,9 @@ std::int64_t open_file(const std::string &full_path, std::uint32_t flags) {
     file.path = full_path;
     if (split.device == Device::Disc) {
         if (!io().disc) return static_cast<std::int32_t>(io_error::kDeviceNotFound);
-        if ((flags & kOpenWrite) != 0u) return static_cast<std::int32_t>(io_error::kReadOnly);
+        // Write access is not refused at the open: God of War (UCES00842)
+        // opens its disc archives read-write (flags 0x3) and cannot go on
+        // without them. Writes to a disc file are what fail.
         if (split.path.empty()) {
             // The device itself, with no path: the whole image as a stream of
             // sectors, which is how a game reads the disc without going
@@ -708,6 +722,29 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
         kernel().finish(ctx, static_cast<std::uint32_t>(lseek_op(arg(ctx, 0), offset, arg(ctx, 2))));
     });
     register_async_io(hle);
+    // sceIoChdir(path): the directory later paths without a device are
+    // relative to. God of War (UCES00842) sets it at start-up.
+    hle.add("IoFileMgrForUser", "sceIoChdir", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::string path = read_cstring(rt.memory(), arg(ctx, 0), 256u);
+        const SplitPath split = split_path(path);
+        std::uint32_t result = 0u;
+        if (split.device == Device::Disc) {
+            std::optional<IsoImage::Entry> entry;
+            if (io().disc) entry = io().disc->find(split.path);
+            if (!split.path.empty() && (!entry || !entry->directory)) result = io_error::kFileNotFound;
+        } else if (split.device == Device::MemoryStick) {
+            std::error_code ec;
+            if (!std::filesystem::is_directory(host_path(split.path), ec)) result = io_error::kFileNotFound;
+        } else {
+            result = io_error::kDeviceNotFound;
+        }
+        if (result == 0u) {
+            const std::string device = split.device == Device::Disc ? "disc0:" : "ms0:";
+            io().current_directory = device + "/" + split.path;
+        }
+        if (trace_io()) std::cerr << "[io] chdir " << path << " -> " << psprecomp::hex32(result) << "\n";
+        kernel().finish(ctx, result);
+    });
     hle.add("IoFileMgrForUser", "sceIoGetstat", [](Runtime &rt, AllegrexContext &ctx) {
         const std::string path = read_cstring(rt.memory(), arg(ctx, 0), 256u);
         const SplitPath split = split_path(path);
@@ -795,12 +832,42 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
         write_stat(memory, dirent, entry.directory, entry.size, entry.lba);
         for (std::uint32_t i = 0; i < 256u; ++i)
             memory.store8(dirent + 88u + i, i < entry.name.size() ? static_cast<std::uint8_t>(entry.name[i]) : 0u);
-        if (trace_io()) std::cerr << "[io] dread " << directory.path << " -> " << entry.name << "\n";
+        if (trace_io())
+            std::cerr << "[io] dread " << directory.path << " -> " << entry.name << " lba=" << entry.lba
+                      << " size=" << entry.size << "\n";
         kernel().finish(ctx, 1u);
     });
     hle.add("IoFileMgrForUser", "sceIoDclose", [](Runtime &, AllegrexContext &ctx) {
         kernel().finish(ctx, io().files.erase(arg(ctx, 0)) != 0u ? 0u : io_error::kBadFileDescriptor);
     });
+    // sceIoMkdir(path, mode), sceIoRmdir(path), sceIoRemove(path): on the
+    // memory stick, which is a host folder; the disc is read-only. God of
+    // War and Vice City Stories import them; no game has been seen calling
+    // them yet.
+    const auto stick_op = [](const char *name, int op) {
+        return [name, op](Runtime &rt, AllegrexContext &ctx) {
+            static std::set<std::string> said;
+            if (said.insert(name).second) std::cerr << "[io] " << name << " (UNVERIFIED: no game traced yet)\n";
+            const std::string path = read_cstring(rt.memory(), arg(ctx, 0), 256u);
+            const SplitPath split = split_path(path);
+            if (split.device != Device::MemoryStick) {
+                kernel().finish(ctx, split.device == Device::Disc ? io_error::kReadOnly : io_error::kDeviceNotFound);
+                return;
+            }
+            std::error_code ec;
+            const auto host = host_path(split.path);
+            bool ok = false;
+            if (op == 0) ok = std::filesystem::create_directory(host, ec) && !ec;
+            else if (op == 1) ok = std::filesystem::is_directory(host, ec) && std::filesystem::is_empty(host, ec) &&
+                                   std::filesystem::remove(host, ec);
+            else ok = std::filesystem::is_regular_file(host, ec) && std::filesystem::remove(host, ec);
+            if (trace_io()) std::cerr << "[io] " << name << " " << path << (ok ? " ok" : " failed") << "\n";
+            kernel().finish(ctx, ok ? 0u : io_error::kFileNotFound);
+        };
+    };
+    hle.add("IoFileMgrForUser", "sceIoMkdir", stick_op("sceIoMkdir", 0));
+    hle.add("IoFileMgrForUser", "sceIoRmdir", stick_op("sceIoRmdir", 1));
+    hle.add("IoFileMgrForUser", "sceIoRemove", stick_op("sceIoRemove", 2));
     hle.add("IoFileMgrForUser", "sceIoRename", [](Runtime &rt, AllegrexContext &ctx) {
         const SplitPath from = split_path(read_cstring(rt.memory(), arg(ctx, 0), 256u));
         const SplitPath to = split_path(read_cstring(rt.memory(), arg(ctx, 1), 256u));
@@ -932,6 +999,8 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
     });
 
     hle.add("sceUmdUser", "sceUmdActivate", [](Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, 0u); });
+    // The disc is never taken away, so letting go of it changes nothing.
+    hle.add("sceUmdUser", "sceUmdDeactivate", [](Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, 0u); });
     hle.add("sceUmdUser", "sceUmdGetDriveStat",
             [](Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, drive_status()); });
     hle.add("sceUmdUser", "sceUmdGetErrorStat", [](Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, 0u); });
