@@ -1310,7 +1310,7 @@ int generate_manual(const std::filesystem::path &elf_path,
 
     std::ofstream out(output_path);
     if (!out) throw psprecomp::Error("Cannot create generated source");
-    out << "#include \"psprecomp/corpus_abi.hpp\"\n#include <bit>\n#include <cmath>\n#include <cstdint>\n#include <limits>\n\nnamespace psprecomp {\n";
+    out << "#include \"psprecomp/corpus_abi.hpp\"\n#include <atomic>\n#include <bit>\n#include <cmath>\n#include <cstdint>\n#include <limits>\n\nnamespace psprecomp {\n";
 
     std::vector<GeneratedFunctionInput> generated;
     for (const auto &function : functions) {
@@ -1715,7 +1715,7 @@ int generate_auto(const std::filesystem::path &elf_path,
                  path.filename().string() + ": " + std::to_string(unit.instructions.size()) +
                  " instructions, " + std::to_string(unit.entries.size()) + " entries");
         std::ostringstream out;
-        out << "#include \"psprecomp/corpus_abi.hpp\"\n#include \"" << units_header_name << "\"\n#include <bit>\n#include <cmath>\n#include <cstdint>\n#include <limits>\n\nnamespace psprecomp {\n";
+        out << "#include \"psprecomp/corpus_abi.hpp\"\n#include \"" << units_header_name << "\"\n#include <atomic>\n#include <bit>\n#include <cmath>\n#include <cstdint>\n#include <limits>\n\nnamespace psprecomp {\n";
         // The register-cache lowering passes (per-basic-block GPR/FPR caches and
         // the cross-unit hot-register cache) are deliberately absent.  They kept
         // large numbers of guest registers live in C++ locals and in a second
