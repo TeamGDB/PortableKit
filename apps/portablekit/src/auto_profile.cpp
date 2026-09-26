@@ -181,6 +181,12 @@ std::string activate_game_profile(const GameRecord &record) {
     main_save_folder() = SaveFolder{text.disc_id.c_str(), text.save_description.c_str(), true};
     profile.save_folders = std::span<const SaveFolder>(&main_save_folder(), 1u);
     profile.adhoc_product_code = text.disc_id.c_str();
+    // A console of the disc's region: the third letter of the disc id is the
+    // region (J Japan; U, E, A, K elsewhere). Japan: Japanese, confirm with
+    // circle; elsewhere English, confirm with cross.
+    const bool japanese = text.disc_id.size() > 2u && text.disc_id[2] == 'J';
+    profile.system_language = japanese ? 0u : 1u;
+    profile.confirm_button = japanese ? 0u : 1u;
     active_profile_name() = "auto";
 
     decisions().emplace_back("profile", "automatic");
@@ -189,6 +195,8 @@ std::string activate_game_profile(const GameRecord &record) {
     decisions().emplace_back("overlays", "none declared; code loaded at run time is interpreted");
     decisions().emplace_back("save_folder", text.disc_id + " (the disc id)");
     decisions().emplace_back("adhoc_product", text.disc_id + " (the disc id)");
+    decisions().emplace_back("console", japanese ? "Japanese, confirm with circle (a Japanese disc)"
+                                                 : "English, confirm with cross (a disc from outside Japan)");
     decisions().emplace_back("camera, widescreen, glyph cache, extra HLE, patches", "none (hand profiles only)");
     return "auto";
 }
