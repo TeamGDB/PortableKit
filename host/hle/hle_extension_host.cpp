@@ -57,6 +57,7 @@ HleExtensionReport install_linked_hle_extensions(Runtime &runtime, HleRegistrar 
         .bind = [&hle](const std::string &library, std::uint32_t nid, hle_extension::Handler handler) {
             hle.bind(library, nid, std::move(handler));
         },
+        .current = [&hle](const std::string &library, std::uint32_t nid) { return hle.bound_function(library, nid); },
     };
     HleExtensionReport report = apply_hle_extensions(runtime, modules, target);
     print_hle_extension_summary(std::cout, report);
