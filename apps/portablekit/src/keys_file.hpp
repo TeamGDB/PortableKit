@@ -16,6 +16,11 @@
 //                                  amctrl.1CE4, .1CF4, amctrl.dnas.1A90 and
 //                                  .1AA0 (host/crypto/pgd.hpp)
 //
+// HLE extension modules may declare more names (Registry::declare_key), each
+// with its length and optionally a fingerprint; they are read and checked the
+// same way. A name nothing declares is a warning and is left out, but does not
+// refuse the file.
+//
 // The fixed keys are checked against SHA-256 fingerprints compiled into the
 // program, so a mistyped key is named instead of producing garbage; a
 // fingerprint does not reveal the key. Tag keys have no fingerprint: an
@@ -34,6 +39,16 @@ struct KeysReport {
     std::filesystem::path path;
     CryptoKeys keys;
     std::vector<std::string> problems;  // one sentence each
+    // Names nothing reads (not this program, not an extension module): kept
+    // out, but they do not refuse the file.
+    std::vector<std::string> warnings;
+    // The keys HLE extension modules declare, and whether the file has them.
+    struct DeclaredStatus {
+        std::string name;
+        std::string module;
+        bool present{};
+    };
+    std::vector<DeclaredStatus> declared;
     // What the keys that passed allow.
     bool can_decrypt_executables{};     // kirk.aes.5D and kirk.cmd1
     bool can_encrypt_saves{};           // every save-data key

@@ -167,6 +167,7 @@ amctrl.1CD4  = <16 bytes>      # the DRM library's fixed keys, for PGD data (als
 - What each group enables: `kirk.aes.5D` + `kirk.cmd1` + the game's `tag.*` decrypt that game's `EBOOT.BIN`; the nine save slots and `savedata.2`–`7` encrypt and decrypt saves. `portablekit keys status` says which of these the file provides.
 - PGD data (below) uses `kirk.aes.38`, `kirk.aes.39`, `kirk.aes.63`, `amctrl.1CD4`, `amctrl.1CE4`, `amctrl.1CF4`, `amctrl.dnas.1A90` and `amctrl.dnas.1AA0` (and `kirk.aes.3A` if present); `keys status` says "decrypt PGD data: yes" when the first six are there. These have no fingerprint yet: they get one once they have been checked against a real PGD file, and until then a wrong value shows as a PGD file that does not decrypt, with a log line naming the file.
 - Without keys, a game can still be added when its disc carries an unencrypted `BOOT.BIN` (LocoRoco 2 does), or when the player gives an executable they decrypted (`--executable`). The program never names a source of keys.
+- A name the program does not use is a warning ("... is not a key this program or its extension modules use; it is ignored.") and is left out; it does not refuse the file. HLE extension modules the build links may declare more names, which are read and checked like the program's own ([HLE_EXTENSIONS.md](HLE_EXTENSIONS.md#keys)); `keys status` lists them by module.
 
 Messages when something is missing, as the prototype prints them:
 

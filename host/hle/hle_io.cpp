@@ -10,6 +10,7 @@
 #include "kernel/iso_image.hpp"
 
 #include "psprecomp/common.hpp"
+#include "portablekit/hle_extension.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -80,6 +81,11 @@ struct OpenFile {
     // where the image is touched.
     bool sector_units{};
     std::unique_ptr<std::fstream> host;
+    // What the game reads instead of the file's bytes, if anything
+    // (hle_extension::set_file_filter): size and position then count its
+    // bytes, and the file's own size is kept here.
+    std::shared_ptr<hle_extension::FileFilter> filter;
+    std::uint64_t unfiltered_size{};
     // Asynchronous calls (sceIo*Async): the result of the one operation in
     // flight, kept until sceIoWaitAsync or sceIoPollAsync collects it. The
     // operation itself has already run: the files are the host's, and a
@@ -299,8 +305,9 @@ std::size_t read_open_file(std::uint32_t fd, std::uint64_t offset, std::uint8_t 
     OpenFile &file = found->second;
     const std::span<std::uint8_t> out(output, size);
     if (file.kind == OpenFile::Kind::Disc) {
-        if (!io().disc || offset >= file.size) return 0u;
-        return io().disc->read(file.disc_offset + offset, out.first(std::min<std::uint64_t>(size, file.size - offset)));
+        const std::uint64_t file_size = file.filter ? file.unfiltered_size : file.size;
+        if (!io().disc || offset >= file_size) return 0u;
+        return io().disc->read(file.disc_offset + offset, out.first(std::min<std::uint64_t>(size, file_size - offset)));
     }
     if (file.kind == OpenFile::Kind::Host) {
         file.host->clear();
@@ -311,6 +318,47 @@ std::size_t read_open_file(std::uint32_t fd, std::uint64_t offset, std::uint8_t 
         return count;
     }
     return 0u;
+}
+
+bool set_open_file_filter(std::uint32_t fd, std::shared_ptr<hle_extension::FileFilter> filter) {
+    const auto found = io().files.find(fd);
+    if (found == io().files.end()) return false;
+    OpenFile &file = found->second;
+    if ((file.kind != OpenFile::Kind::Disc && file.kind != OpenFile::Kind::Host) || file.sector_units) return false;
+    if (filter) {
+        if (!file.filter) file.unfiltered_size = file.size;
+        file.filter = std::move(filter);
+        file.size = file.filter->size();
+    } else if (file.filter) {
+        file.filter.reset();
+        file.size = file.unfiltered_size;
+    }
+    if (trace_io())
+        std::cerr << "[io] filter fd=" << fd << " " << file.path << (file.filter ? " set, size " : " removed, size ")
+                  << file.size << "\n";
+    return true;
+}
+
+// sceIoRead through a file's filter: `requested` bytes of what the filter
+// gives at the position, which moves by as many.
+static std::uint32_t read_filtered(Runtime &rt, std::uint32_t fd, OpenFile &file, std::uint32_t address,
+                                   std::uint32_t requested) {
+    const std::uint64_t available = file.position < file.size ? file.size - file.position : 0u;
+    std::vector<std::uint8_t> buffer(static_cast<std::size_t>(std::min<std::uint64_t>(requested, available)));
+    const std::size_t count = buffer.empty() ? 0u : file.filter->read(file.position, buffer.data(), buffer.size());
+    buffer.resize(std::min(count, buffer.size()));
+    rt.memory().copy_in(address, buffer);
+    if (file.kind == OpenFile::Kind::Disc) {
+        load_trace::note_disc_read(buffer.size());
+        fast_loading::note_disc_read();
+    } else {
+        load_trace::note_memory_stick_read(buffer.size());
+    }
+    if (trace_io())
+        std::cerr << "[io] read fd=" << fd << " " << file.path << " filtered offset=" << file.position
+                  << " got=" << buffer.size() << " bytes -> " << psprecomp::hex32(address) << "\n";
+    file.position += buffer.size();
+    return static_cast<std::uint32_t>(buffer.size());
 }
 
 std::int64_t read_guest_file(const std::string &path, std::uint64_t offset, std::uint8_t *output, std::size_t size) {
@@ -346,6 +394,7 @@ std::uint32_t read_file_op(Runtime &rt, std::uint32_t fd, std::uint32_t address,
         (found->second.kind != OpenFile::Kind::Disc && found->second.kind != OpenFile::Kind::Host))
         return io_error::kBadFileDescriptor;
     OpenFile &file = found->second;
+    if (file.filter) return read_filtered(rt, fd, file, address, requested);
     std::vector<std::uint8_t> buffer;
     std::uint32_t result = 0u;
     if (file.pgd) {
@@ -598,6 +647,7 @@ void register_async_io(HleRegistrar &hle) {
             return;
         }
         file->host.reset();
+        file->filter.reset();
         file->kind = OpenFile::Kind::Failed;
         file->release_after_async = true;
         complete_async(*file, 0);
@@ -710,6 +760,11 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
     });
     hle.add("IoFileMgrForUser", "sceIoLseek", [](Runtime &, AllegrexContext &ctx) {
         kernel().finish64(ctx, static_cast<std::uint64_t>(lseek_op(arg(ctx, 0), static_cast<std::int64_t>(arg64(ctx, 2)), arg(ctx, 4))));
+    });
+    // sceIoLseek32(fd, offset, whence): a 32-bit offset and result.
+    hle.add("IoFileMgrForUser", "sceIoLseek32", [](Runtime &, AllegrexContext &ctx) {
+        const auto offset = static_cast<std::int64_t>(static_cast<std::int32_t>(arg(ctx, 1)));
+        kernel().finish(ctx, static_cast<std::uint32_t>(lseek_op(arg(ctx, 0), offset, arg(ctx, 2))));
     });
     register_async_io(hle);
     hle.add("IoFileMgrForUser", "sceIoGetstat", [](Runtime &rt, AllegrexContext &ctx) {

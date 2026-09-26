@@ -22,10 +22,12 @@
 #include "psprecomp/guest_memory.hpp"
 #include "psprecomp/runtime.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <initializer_list>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -35,7 +37,8 @@
 
 // Raised when this header changes, so a module can check what it is being
 // built against. 2: Registry::override_chained.
-#define PORTABLEKIT_HLE_EXTENSION_INTERFACE 2
+// 3: Registry::declare_key, key lookup, read_open_file, set_file_filter.
+#define PORTABLEKIT_HLE_EXTENSION_INTERFACE 3
 
 namespace portablekit::hle_extension {
 
@@ -78,6 +81,16 @@ struct Function {
     Chained chained;     // set by override_chained; the mode is then Override
 };
 
+// A key a module reads from the player's keys file (see key() below), as the
+// module declares it. The keys file accepts the name like one of PortableKit's
+// own keys, checks its length and, when given, its fingerprint, and
+// `portablekit keys status` lists it under the module.
+struct KeyDeclaration {
+    std::string name;        // as written in the keys file, e.g. "vendor.table" or "kirk.aes.38"
+    std::string sha256;      // lower-case hex SHA-256 of the value; empty: not checked
+    std::size_t size = 16u;  // bytes
+};
+
 // What a module's entry function fills in. Adding a function does nothing yet;
 // the host applies what was added after the entry returns.
 class Registry {
@@ -99,10 +112,18 @@ public:
             Function{std::string(library), nid, std::string(name), Handler{}, Mode::Override, std::move(handler)});
     }
 
+    // Declares a key the module reads with key() or key_bytes(). A name that
+    // PortableKit itself checks keeps PortableKit's check.
+    void declare_key(std::string_view name, std::string_view sha256 = {}, std::size_t size = 16u) {
+        keys_.push_back(KeyDeclaration{std::string(name), std::string(sha256), size});
+    }
+
     [[nodiscard]] const std::vector<Function> &functions() const noexcept { return functions_; }
+    [[nodiscard]] const std::vector<KeyDeclaration> &keys() const noexcept { return keys_; }
 
 private:
     std::vector<Function> functions_;
+    std::vector<KeyDeclaration> keys_;
 };
 
 // --- What a handler needs --------------------------------------------------
@@ -196,6 +217,48 @@ void log_once(std::string_view key, std::string_view message);
 // The port's environment variable <prefix>_<name> (for example
 // PORTABLEKIT_<name> in the desktop app), or null when it is not set.
 [[nodiscard]] const char *env(const char *name);
+
+// --- Keys --------------------------------------------------------------------
+// The program's keys, by the name the keys file gives them: PortableKit's own
+// ("kirk.aes.5D", "kirk.cmd1", "savedata.2", ...) and those modules declare.
+// In the desktop app they come from the player's keys file; in a port,
+// PortableKit's own are compiled in and declared ones come from an optional
+// keys file (<PREFIX>_KEYS, or keys.txt in the port's data folder). Names are
+// not case-sensitive. Empty when the program does not have the key.
+using Key16 = std::array<std::uint8_t, 16>;
+[[nodiscard]] std::optional<Key16> key(std::string_view name);
+// A key of any length, such as a table.
+[[nodiscard]] std::optional<std::vector<std::uint8_t>> key_bytes(std::string_view name);
+// The KIRK AES key of a slot: key("kirk.aes.<slot>").
+[[nodiscard]] std::optional<Key16> kirk_key(std::uint8_t slot);
+
+// --- Open files ----------------------------------------------------------------
+// Up to output.size() bytes of the open guest file `fd` at `offset`, as the
+// file holds them (before any filter below), without moving its position.
+// Returns how many were read: fewer at the end, 0 for an unknown descriptor.
+std::size_t read_open_file(std::uint32_t fd, std::uint64_t offset, std::span<std::uint8_t> output);
+
+// What a game reads from a file instead of its bytes, such as the plain text
+// of an encrypted container. Called on the emulation thread.
+class FileFilter {
+public:
+    virtual ~FileFilter() = default;
+    // The size of what the game sees, in bytes.
+    [[nodiscard]] virtual std::uint64_t size() const = 0;
+    // Up to `length` bytes of it at `offset` into `destination`; returns how
+    // many, fewer at the end. The raw bytes are at hand through
+    // read_open_file().
+    virtual std::size_t read(std::uint64_t offset, std::uint8_t *destination, std::size_t length) = 0;
+};
+// From now on, PortableKit's sceIoRead, sceIoReadAsync, sceIoLseek,
+// sceIoLseek32 (and their Async forms) and the disc seek ioctl 0x01010005
+// work on what `filter` gives for `fd`: positions and sizes count its bytes,
+// and asynchronous results are delivered as usual. The position is left
+// where it was. A null filter restores the file's own bytes; closing the file
+// drops the filter. False when `fd` is not an open file PortableKit reads (an
+// unknown descriptor, a directory, or the raw disc device, which counts
+// sectors).
+bool set_file_filter(std::uint32_t fd, std::shared_ptr<FileFilter> filter);
 
 } // namespace portablekit::hle_extension
 

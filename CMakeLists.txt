@@ -375,6 +375,7 @@ if(PSPRECOMP_BUILD_TESTS)
         "${PORTABLEKIT_ROOT}/tests/hle_extension_tests.cpp"
         "${PORTABLEKIT_ROOT}/tests/hle_extension_test_host.cpp"
         "${PORTABLEKIT_ROOT}/host/hle/hle_extensions.cpp"
+        "${PORTABLEKIT_ROOT}/host/extension_keys.cpp"
         "${PORTABLEKIT_ROOT}/examples/hle_extension/example_extension.cpp")
     target_include_directories(portablekit_hle_extension_tests PRIVATE "${PORTABLEKIT_ROOT}/host")
     target_link_libraries(portablekit_hle_extension_tests PRIVATE psprecomp_core)
@@ -422,4 +423,25 @@ if(PSPRECOMP_BUILD_TESTS)
         target_link_libraries(portablekit_host_check PRIVATE ws2_32 iphlpapi)
     endif()
     set_target_properties(portablekit_host_check PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+endif()
+
+# A read filter on an open file, through the real IoFileMgrForUser handlers:
+# the system layer the check above builds, with a test's main.
+if(PSPRECOMP_BUILD_TESTS)
+    set(_io_test_sources ${_check_sources})
+    list(REMOVE_ITEM _io_test_sources "${PORTABLEKIT_ROOT}/host/main.cpp")
+    add_executable(portablekit_io_filter_tests "${PORTABLEKIT_ROOT}/tests/io_filter_tests.cpp" ${_io_test_sources})
+    target_compile_features(portablekit_io_filter_tests PRIVATE cxx_std_20)
+    target_compile_definitions(portablekit_io_filter_tests PRIVATE
+        PORTABLEKIT_NIDS_CSV="${PORTABLEKIT_ROOT}/configs/nids.csv")
+    target_include_directories(portablekit_io_filter_tests PRIVATE
+        "${PORTABLEKIT_ROOT}/host" "${PORTABLEKIT_ROOT}/third_party"
+        "${CMAKE_CURRENT_BINARY_DIR}/host_check_nids")
+    target_link_libraries(portablekit_io_filter_tests PRIVATE psprecomp_core Threads::Threads ${CMAKE_DL_LIBS})
+    _portablekit_link_hle_extensions(portablekit_io_filter_tests)
+    if(WIN32)
+        target_link_libraries(portablekit_io_filter_tests PRIVATE ws2_32 iphlpapi)
+    endif()
+    set_target_properties(portablekit_io_filter_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME portablekit_io_filter_tests COMMAND portablekit_io_filter_tests)
 endif()

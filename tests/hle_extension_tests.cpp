@@ -3,11 +3,14 @@
 // not, and the first module to add a function keeping it. Uses the example
 // module in examples/hle_extension/ and a runtime with no kernel or game.
 
+#include "extension_keys.hpp"
 #include "hle/hle_extensions.hpp"
 
 #include "psprecomp/runtime.hpp"
 
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <map>
 #include <set>
@@ -311,6 +314,72 @@ int main() {
         check(program.call("TestDialog", kDialog, 1u) == 0xA1u && program.call("TestDialog", kDialog, 5u) == 0u,
               "with nothing behind it, a call passed on returns 0 as a logging stub would");
         check(!report.active.empty() && !report.active[0].overrides, "and it is not counted as an override");
+    }
+
+    // Keys modules declare.
+    {
+        const auto declaring = [](ext::Registry &registry) {
+            registry.declare_key("Vendor.Table", {}, 32u);
+            registry.declare_key("example.demo", "00");   // differs from the example's: the first stays
+            registry.declare_key("tag.1234");             // not a name a module can declare
+        };
+        static std::function<void(ext::Registry &)> entry;
+        entry = declaring;
+        const HleExtensionModule modules[] = {
+            kExample, {"vendor", "Vendor module", "", "MIT", [](ext::Registry &registry) { entry(registry); }}};
+        std::vector<std::string> notes;
+        const auto declared = portablekit::collect_declared_keys(modules, notes);
+        check(declared.size() == 2u && declared[0].name == "example.demo" && declared[0].module == "Example HLE extension" &&
+                  declared[1].name == "vendor.table" && declared[1].size == 32u,
+              "declared keys are collected in lower case with their module");
+        check(notes.size() == 2u, "a conflicting and an impossible declaration are noted");
+
+        const std::vector<std::uint8_t> demo{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+                                             0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF};
+        std::vector<std::uint8_t> wrong = demo;
+        wrong[0] ^= 1u;
+        check(portablekit::check_declared_key(declared[0], demo, "example.demo").empty(),
+              "a declared key with the right fingerprint passes");
+        check(!portablekit::check_declared_key(declared[0], wrong, "example.demo").empty(),
+              "a wrong value of a fingerprinted key is refused");
+        check(!portablekit::check_declared_key(declared[1], demo, "vendor.table").empty(),
+              "a value of the wrong length is refused");
+
+        portablekit::CryptoKeys keys;
+        keys.kirk_cmd1 = portablekit::Key16{1};
+        keys.savedata[2] = portablekit::Key16{2};
+        keys.tags[0xC0CB167Cu].table = std::vector<std::uint8_t>(0x90u, 7u);
+        portablekit::store_named_key(keys, "kirk.aes.38", demo);
+        portablekit::store_named_key(keys, "vendor.table", std::vector<std::uint8_t>(32u, 9u));
+        check(keys.kirk(0x38u) != nullptr && (*keys.kirk(0x38u))[1] == 0x11u,
+              "a declared kirk.aes slot is also a KIRK key");
+        check(portablekit::key_value(&keys, "KIRK.AES.38") == demo, "look-ups ignore case");
+        check(portablekit::key_value(&keys, "kirk.cmd1").value_or(std::vector<std::uint8_t>{}).at(0) == 1u &&
+                  portablekit::key_value(&keys, "savedata.2").value_or(std::vector<std::uint8_t>{}).at(0) == 2u,
+              "PortableKit's own keys are found by their names");
+        check(portablekit::key_value(&keys, "tag.C0CB167C").value_or(std::vector<std::uint8_t>{}).size() == 0x90u &&
+                  portablekit::key_value(&keys, "vendor.table").value_or(std::vector<std::uint8_t>{}).size() == 32u,
+              "tables and longer keys come back whole");
+        check(!portablekit::key_value(&keys, "savedata.3") && !portablekit::key_value(&keys, "nothing.here") &&
+                  !portablekit::key_value(nullptr, "kirk.cmd1"),
+              "a key the program lacks is empty");
+
+        const auto path = std::filesystem::temp_directory_path() / "portablekit_declared_keys_test.txt";
+        {
+            std::ofstream out(path);
+            out << "# a port's keys file\n"
+                << "kirk.aes.5D = 00000000000000000000000000000000   # PortableKit's own: left alone\n"
+                << "EXAMPLE.DEMO = 00112233 44556677 8899AABB CCDDEEFF\n"
+                << "vendor.table = 0011\n"
+                << "someone.else = 00\n";
+        }
+        const auto file = portablekit::read_declared_keys_file(path, declared);
+        std::filesystem::remove(path);
+        check(file.found && portablekit::key_value(&file.keys, "example.demo") == demo,
+              "a port's keys file gives a declared key");
+        check(file.problems.size() == 1u && !portablekit::key_value(&file.keys, "vendor.table") &&
+                  !portablekit::key_value(&file.keys, "kirk.aes.5D"),
+              "a wrong declared key is a problem, and names nothing declares are left alone");
     }
 
     if (g_failures != 0) std::printf("%d failed\n", g_failures);
