@@ -18,7 +18,7 @@ NIDs are added to `configs/nids.csv` only where the first word of SHA-1 of the n
 | --- | ---: | ---: | --- |
 | God of War | 18 | 2 | `sceKernelLoadExec`, `sceAtracSetAA3DataAndGetID` |
 | Chinatown Wars | 61 | 14 | `sceNetAdhocMatching*` (9), `0x91DE343C` (SysMem), `0x71EC4271` (ThreadMan), `0x05572A5F` (IoFileMgr), `0x20628E6F`, `0x46EBB729` |
-| Vice City Stories | 28 | 11 | `sceNetAdhocMatching*` (9), `sceKernelReferThreadProfiler`, `sceKernelReferGlobalProfiler` |
+| Vice City Stories | 28 | 9 | `sceNetAdhocMatching*` (9) |
 | MHP2G | 55 | 0 | |
 | Patapon | 37 | 0 | |
 
@@ -50,7 +50,7 @@ NIDs are added to `configs/nids.csv` only where the first word of SHA-1 of the n
 
 Written from documentation; each logs `UNVERIFIED` on its first call.
 
-- **ThreadManForUser**: `sceKernelCancelMsgPipe`, `sceKernelReferMsgPipeStatus`, `sceKernelGetThreadStackFreeSize` (the space below the stack pointer, not the never-written part a PSP measures), `sceKernelCheckThreadStack`.
+- **ThreadManForUser**: `sceKernelReferThreadProfiler`, `sceKernelReferGlobalProfiler` (the profiler reads as off, every counter 0), `sceKernelCancelMsgPipe`, `sceKernelReferMsgPipeStatus`, `sceKernelGetThreadStackFreeSize` (the space below the stack pointer, not the never-written part a PSP measures), `sceKernelCheckThreadStack`.
 - **IoFileMgrForUser**: `sceIoMkdir`, `sceIoRmdir`, `sceIoRemove` (memory stick only).
 - **sceRtc**: `GetTick`, `SetTick`, `CompareTick`, `GetCurrentClock`, `GetDayOfWeek`, `GetDaysInMonth`, `IsLeapYear`, `CheckValid`, `GetTickResolution`, `TickAdd{Ticks,Microseconds,Seconds,Minutes,Hours,Days,Weeks}`; the calendar has unit tests (`portablekit_rtc_tests`). What an invalid date returns is not traced.
 - **scePsmf**: `VerifyPsmf`, `SpecifyStreamWithStreamType`, `SpecifyStreamWithStreamTypeNumber`, `GetCurrentStreamNumber`, `GetAudioInfo`, `GetHeaderSize`, `GetStreamSize`, `GetPresentationStartTime`, `GetPresentationEndTime`; error codes are the library's documented ones.

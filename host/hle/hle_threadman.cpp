@@ -971,6 +971,20 @@ void register_kernel_library(HleRegistrar &hle) {
         const std::uint32_t sp = thread->uid == kernel().current_uid() ? ctx.gpr[29] : thread->context.gpr[29];
         kernel().finish(ctx, sp > thread->stack_bottom ? sp - thread->stack_bottom : 0u);
     });
+    // sceKernelReferThreadProfiler(regs) and sceKernelReferGlobalProfiler(regs):
+    // the hardware profiler's counters, PspDebugProfilerRegs in pspsdk's
+    // pspdebug.h (20 words, `enable` first). A retail PSP has the profiler
+    // off; here it reads as off with every counter 0. Vice City Stories and
+    // PSP2i import them.
+    for (const char *name : {"sceKernelReferThreadProfiler", "sceKernelReferGlobalProfiler"}) {
+        hle.add("ThreadManForUser", name, [name](Runtime &rt, AllegrexContext &ctx) {
+            log_once(std::string("profiler-") + name, std::string("[kernel] ") + name + " (UNVERIFIED: no game traced yet)");
+            constexpr std::uint32_t kProfilerRegsBytes = 20u * 4u;
+            if (const std::uint32_t regs = arg(ctx, 0); regs != 0u)
+                for (std::uint32_t at = 0; at < kProfilerRegsBytes; at += 4u) rt.memory().store32(regs + at, 0u);
+            kernel().finish(ctx, 0u);
+        });
+    }
     hle.add("ThreadManForUser", "sceKernelCheckThreadStack", [](Runtime &, AllegrexContext &ctx) {
         const Thread *thread = kernel().current_thread();
         const std::uint32_t sp = ctx.gpr[29];
