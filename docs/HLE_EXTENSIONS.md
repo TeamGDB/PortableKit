@@ -71,6 +71,10 @@ Everything a module may rely on is in `include/portablekit/hle_extension.hpp`. `
 | `now_us()` | Emulated time since boot. |
 | `log_once(key, message)` | Log a line the first time `key` is seen. |
 | `env(name)` | The port's variable `<PREFIX>_<name>`. |
+| `Registry::declare_key(name, sha256, size)` | Declares a key the module reads (see [Keys](#keys)). Since interface version 3. |
+| `key(name)`, `key_bytes(name)`, `kirk_key(slot)` | The program's keys by their keys-file name: PortableKit's own and declared ones; empty when missing. |
+| `read_open_file(fd, offset, bytes)` | The raw bytes of an open guest file, without moving its position. |
+| `set_file_filter(fd, filter)` | What the game reads from an open file instead of its bytes (see [Filtered files](#filtered-files)). |
 
 Handlers run on the emulation thread, one at a time. A module may include PortableKit's `host/` headers to reach further than this, but those change without notice; a need that comes up twice belongs in the header instead.
 
@@ -114,6 +118,25 @@ PORTABLEKIT_HLE_EXTENSION(my_module) {
 
 `previous` must be called with the caller's registers as the handler found them, and as its last act, in place of `finish()`.
 
+## Keys
+
+A module that needs keys the console's crypto uses declares each name it reads, at registration:
+
+```cpp
+registry.declare_key("vendor.table", "<sha256 of the value, lower-case hex>", 0x90);  // fingerprint and size optional
+```
+
+and reads it at run time with `ext::key_bytes("vendor.table")` (`ext::key` for 16-byte keys, `ext::kirk_key(slot)` for `kirk.aes.<slot>`). The names are the keys file's, not case-sensitive, and a lookup also finds PortableKit's own keys (`kirk.aes.5D`, `kirk.cmd1`, `savedata.2`, `tag.<tag>`).
+
+- **Desktop app.** The player's keys file accepts a declared name like one of PortableKit's own: it checks the length and, when one is declared, the fingerprint, and a wrong value is a problem that refuses the file on import. A declared `kirk.aes.<slot>` is also a KIRK key for PortableKit. A name nothing declares is a warning and is left out, but no longer refuses the file. `portablekit keys status` lists the declared keys by module, present or missing (`--json`: `extension_keys`). A name PortableKit checks itself keeps PortableKit's check.
+- **Ports.** PortableKit's own keys are compiled in. Declared keys come from an optional keys file in the same format: `<PREFIX>_KEYS`, else `keys.txt` in the data folder (`<PREFIX>_DATA_DIR`, else the port's own); names nothing declares are left alone there. Startup says `HLE extension keys: N of M declared keys present (<path>)`, with a line for each wrong one.
+
+An entry function may be called more than once (the keys are collected before the game starts); it only adds to its registry.
+
+## Filtered files
+
+`set_file_filter(fd, filter)` puts a `FileFilter` (its `size()` and `read(offset, destination, length)`) between the game and an open file, such as the plain text of an encrypted container. While it is set, PortableKit's own `sceIoRead`, `sceIoReadAsync`, `sceIoLseek`, `sceIoLseek32` (and their Async forms) and the disc seek ioctl `0x01010005` work on what the filter gives: positions and sizes count its bytes, and asynchronous results come with `sceIoWaitAsync`/`sceIoPollAsync` as usual. The position is left where it was when the filter is set. The filter reads the file's own bytes with `read_open_file`, which a filter does not change. A null filter restores the file; closing it (`sceIoClose`, `sceIoCloseAsync`) drops the filter. The raw disc device (`umd0:` and `sce_lbn` sector files, which count sectors) and directories take no filter. Writing to a filtered file writes the file's own bytes.
+
 ## What the log says
 
 ```text
@@ -134,7 +157,7 @@ HLE extensions: 1 module linked, ignored (PORTABLEKIT_NO_HLE_EXTENSIONS)
 
 ## Tests
 
-`portablekit_hle_extension_tests` builds the example module into a runtime with no kernel and checks a fill-in, an override, a fill-in left to the built-in, two modules adding one function, and the log lines.
+`portablekit_io_filter_tests` runs PortableKit's own IoFileMgrForUser handlers on a memory stick folder with a filter: synchronous and asynchronous reads and seeks, the raw bytes, removing it and closing. `portablekit_hle_extension_tests` builds the example module into a runtime with no kernel and checks a fill-in, an override, a fill-in left to the built-in, two modules adding one function, chained overrides, the log lines, and declared keys: collecting them, checking a value, looking keys up and reading a port's keys file.
 
 ## Licensing
 

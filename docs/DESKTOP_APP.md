@@ -165,6 +165,7 @@ tag.C0CB167C.slot = 5D         # optional: the KIRK slot the tag's header uses
 - `portablekit keys import <file>` checks the file and copies it into the data folder. Every fixed key is checked against a SHA-256 fingerprint compiled into the program, so the player is told "`savedata.4` is not the right key" instead of getting garbage later. Tag keys have no fingerprint: an executable that decrypts to an ELF the runtime can load is the check.
 - What each group enables: `kirk.aes.5D` + `kirk.cmd1` + the game's `tag.*` decrypt that game's `EBOOT.BIN`; the nine save slots and `savedata.2`–`7` encrypt and decrypt saves. `portablekit keys status` says which of these the file provides.
 - Without keys, a game can still be added when its disc carries an unencrypted `BOOT.BIN` (LocoRoco 2 does), or when the player gives an executable they decrypted (`--executable`). The program never names a source of keys.
+- A name the program does not use is a warning ("... is not a key this program or its extension modules use; it is ignored.") and is left out; it does not refuse the file. HLE extension modules the build links may declare more names, which are read and checked like the program's own ([HLE_EXTENSIONS.md](HLE_EXTENSIONS.md#keys)); `keys status` lists them by module.
 
 Messages when something is missing, as the prototype prints them:
 

@@ -424,13 +424,16 @@ int command_keys(const Arguments &args) {
         if (g_json) {
             std::vector<Json> problems;
             for (const std::string &problem : report.problems) problems.push_back(Json().field("problem", problem));
+            std::vector<Json> warnings;
+            for (const std::string &warning : report.warnings) warnings.push_back(Json().field("warning", warning));
             std::cout << Json().field("ok", ok).field("path", path_text(keys_file_path()))
                              .field("executables", report.can_decrypt_executables)
                              .field("saves", report.can_encrypt_saves)
                              .field("tags", static_cast<std::uint64_t>(report.tag_count))
-                             .array("problems", problems).str() << "\n";
+                             .array("problems", problems).array("warnings", warnings).str() << "\n";
         } else {
             for (const std::string &problem : report.problems) std::cerr << "  " << problem << "\n";
+            for (const std::string &warning : report.warnings) std::cerr << "  warning: " << warning << "\n";
             if (ok) std::cout << "Keys saved to " << path_text(keys_file_path()) << "\n";
         }
         return ok ? 0 : kKeysRejected;
@@ -440,11 +443,17 @@ int command_keys(const Arguments &args) {
     if (g_json) {
         std::vector<Json> problems;
         for (const std::string &problem : report.problems) problems.push_back(Json().field("problem", problem));
+        std::vector<Json> warnings;
+        for (const std::string &warning : report.warnings) warnings.push_back(Json().field("warning", warning));
+        std::vector<Json> declared;
+        for (const KeysReport::DeclaredStatus &key : report.declared)
+            declared.push_back(Json().field("name", key.name).field("module", key.module).field("present", key.present));
         std::cout << Json().field("ok", true).field("path", path_text(report.path)).field("found", report.file_found)
                          .field("executables", report.can_decrypt_executables)
                          .field("saves", report.can_encrypt_saves)
                          .field("tags", static_cast<std::uint64_t>(report.tag_count))
-                         .array("problems", problems).str() << "\n";
+                         .array("problems", problems).array("warnings", warnings)
+                         .array("extension_keys", declared).str() << "\n";
         return 0;
     }
     std::cout << "Keys file: " << path_text(report.path) << (report.file_found ? "" : " (none)") << "\n"
@@ -452,6 +461,16 @@ int command_keys(const Arguments &args) {
               << "  encrypt saves:       " << (report.can_encrypt_saves ? "yes" : "no (saves are kept unencrypted)") << "\n"
               << "  tag keys:            " << report.tag_count << "\n";
     for (const std::string &problem : report.problems) std::cout << "  problem: " << problem << "\n";
+    for (const std::string &warning : report.warnings) std::cout << "  warning: " << warning << "\n";
+    // The keys HLE extension modules read, by module.
+    std::string module;
+    for (const KeysReport::DeclaredStatus &key : report.declared) {
+        if (key.module != module) {
+            module = key.module;
+            std::cout << "  keys " << module << " reads:\n";
+        }
+        std::cout << "    " << key.name << ": " << (key.present ? "present" : "missing") << "\n";
+    }
     return 0;
 }
 

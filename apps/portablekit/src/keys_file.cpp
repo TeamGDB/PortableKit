@@ -3,10 +3,13 @@
 #include "app_home.hpp"
 #include "text_format.hpp"
 
+#include "extension_keys.hpp"
 #include "psprecomp/sha256.hpp"
 
 #include <cstdlib>
 #include <mutex>
+#include <set>
+#include <string_view>
 
 namespace portablekit::app {
 namespace {
@@ -51,14 +54,55 @@ Key16 to_key(const std::vector<std::uint8_t> &bytes) {
     return key;
 }
 
+// What the reader says of a name it does not use, and what that becomes once
+// HLE extension modules had their say: nothing for a name one declares, a
+// warning for the rest (another program's keys may share the file).
+constexpr std::string_view kNotUsed = " is not a key this program uses.";
+
+void sort_out_unused_names(KeysReport &report, const std::set<std::string> &declared_found) {
+    std::vector<std::string> kept;
+    for (std::string &problem : report.problems) {
+        if (!problem.ends_with(kNotUsed)) {
+            kept.push_back(std::move(problem));
+            continue;
+        }
+        const std::string written = problem.substr(0, problem.size() - kNotUsed.size());
+        if (declared_found.contains(lower(written))) continue;
+        report.warnings.push_back(written + " is not a key this program or its extension modules use; it is ignored.");
+    }
+    report.problems = std::move(kept);
+}
+
+// The keys HLE extension modules declare, and whether the file gave them.
+void list_declared(KeysReport &report) {
+    for (const DeclaredKey &key : declared_extension_keys())
+        report.declared.push_back({key.name, key.module, key_value(&report.keys, key.name).has_value()});
+}
+
+// Copies a checked keys file to <home>/keys.txt.
+bool copy_to_home(const std::filesystem::path &source, KeysReport &report) {
+    std::error_code ec;
+    std::filesystem::create_directories(keys_file_path().parent_path(), ec);
+    std::filesystem::copy_file(source, keys_file_path(), std::filesystem::copy_options::overwrite_existing, ec);
+    if (ec) {
+        report.problems.push_back("Cannot copy it to " + path_text(keys_file_path()) + ": " + ec.message());
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 KeysReport read_keys_file(const std::filesystem::path &path) {
     KeysReport report;
     report.path = path;
     std::error_code ec;
-    if (!std::filesystem::is_regular_file(path, ec)) return report;
+    if (!std::filesystem::is_regular_file(path, ec)) {
+        list_declared(report);
+        return report;
+    }
     report.file_found = true;
+    std::set<std::string> declared_found;  // names a module declares, kept as its keys
     const KeyValues values = read_key_values(path);
     for (const auto &[raw_name, value] : values) {
         const std::string name = lower(raw_name);
@@ -86,6 +130,25 @@ KeysReport read_keys_file(const std::filesystem::path &path) {
             report.keys.tags[static_cast<std::uint32_t>(tag)] = std::move(entry);
             continue;
         }
+        // A key an HLE extension module declares (extension_keys.hpp), unless
+        // it is one this program checks itself: that check stays.
+        if (const DeclaredKey *declared = find_declared_key(declared_extension_keys(), name);
+            declared != nullptr && expected_fingerprint(name) == nullptr) {
+            if (std::string problem = check_declared_key(*declared, *bytes, raw_name); !problem.empty()) {
+                report.problems.push_back(std::move(problem));
+                continue;
+            }
+            store_named_key(report.keys, name, *bytes);
+            declared_found.insert(name);
+            // A 16-byte one goes on, so a name this program also reads in its
+            // own way is kept that way as well.
+            if (bytes->size() != 16u) continue;
+        } else if (bytes->size() != 16u && expected_fingerprint(name) == nullptr && !name.starts_with("kirk.") &&
+                   !name.starts_with("savedata.")) {
+            // Not a name anything here reads: a warning, whatever its length.
+            report.warnings.push_back(raw_name + " is not a key this program or its extension modules use; it is ignored.");
+            continue;
+        }
         if (bytes->size() != 16u) {
             report.problems.push_back(raw_name + " must be 16 bytes.");
             continue;
@@ -108,6 +171,8 @@ KeysReport read_keys_file(const std::filesystem::path &path) {
             report.keys.savedata[std::atoi(name.substr(9).c_str())] = to_key(*bytes);
         }
     }
+    sort_out_unused_names(report, declared_found);
+    list_declared(report);
     report.tag_count = report.keys.tags.size();
     report.can_decrypt_executables = report.keys.kirk(0x5Du) != nullptr && report.keys.kirk_cmd1.has_value();
     report.can_encrypt_saves = true;
@@ -135,6 +200,7 @@ bool import_keys_file(const std::filesystem::path &source, KeysReport &report) {
         return false;
     }
     if (!report.problems.empty()) return false;
+    if (!report.keys.named.empty()) return copy_to_home(source, report);  // keys only modules use
     if (report.keys.kirk_aes.empty() && !report.keys.kirk_cmd1 && report.keys.savedata.empty() &&
         report.keys.tags.empty()) {
         report.problems.push_back("The file holds no keys.");
@@ -157,10 +223,13 @@ namespace portablekit {
 // The framework asks here for every key it uses (host/crypto_keys.hpp).
 const CryptoKeys *crypto_keys() {
     const app::KeysReport &report = app::active_keys();
+    if (!report.keys.named.empty()) return &report.keys;
     if (report.keys.kirk_aes.empty() && !report.keys.kirk_cmd1 && report.keys.savedata.empty() &&
         report.keys.tags.empty())
         return nullptr;
     return &report.keys;
 }
+
+bool keys_come_from_keys_file() { return true; }
 
 } // namespace portablekit
