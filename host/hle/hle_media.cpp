@@ -966,6 +966,41 @@ void register_audio(HleRegistrar &hle) {
         audio::sas_core(arg(ctx, 0)).set_pause(arg(ctx, 1), arg(ctx, 2) != 0u);
         kernel().finish(ctx, 0u);
     });
+    // __sceSasSetADSR(core, voice, flag, attack, decay, sustain, release) and
+    // __sceSasSetADSRmode with the same arguments: the explicit envelope's
+    // rates and curves, the stages `flag` names. __sceSasSetSL(core, voice,
+    // level): its sustain level.
+    hle.try_add("sceSasCore", "__sceSasSetADSR", [](Runtime &, AllegrexContext &ctx) {
+        const std::array<std::int32_t, 4> rates{static_cast<std::int32_t>(arg(ctx, 3)), static_cast<std::int32_t>(arg(ctx, 4)),
+                                                static_cast<std::int32_t>(arg(ctx, 5)), static_cast<std::int32_t>(arg(ctx, 6))};
+        kernel().finish(ctx, audio::sas_core(arg(ctx, 0)).set_adsr_rates(arg(ctx, 1), arg(ctx, 2), rates));
+    });
+    hle.try_add("sceSasCore", "__sceSasSetADSRmode", [](Runtime &, AllegrexContext &ctx) {
+        kernel().finish(ctx, audio::sas_core(arg(ctx, 0)).set_adsr_curves(
+                                 arg(ctx, 1), arg(ctx, 2), {arg(ctx, 3), arg(ctx, 4), arg(ctx, 5), arg(ctx, 6)}));
+    });
+    hle.try_add("sceSasCore", "__sceSasSetSL", [](Runtime &, AllegrexContext &ctx) {
+        kernel().finish(ctx, audio::sas_core(arg(ctx, 0)).set_sustain_level(arg(ctx, 1), static_cast<std::int32_t>(arg(ctx, 2))));
+    });
+    // __sceSasGetAllEnvelopeHeights(core, heights): 32 words, one per voice.
+    hle.try_add("sceSasCore", "__sceSasGetAllEnvelopeHeights", [](Runtime &rt, AllegrexContext &ctx) {
+        auto &core = audio::sas_core(arg(ctx, 0));
+        for (std::uint32_t voice = 0; voice < audio::kSasMaxVoices; ++voice)
+            rt.memory().store32(arg(ctx, 1) + voice * 4u, static_cast<std::uint32_t>(core.envelope_height(voice)));
+        kernel().finish(ctx, 0u);
+    });
+    hle.try_add("sceSasCore", "__sceSasGetGrain", [](Runtime &, AllegrexContext &ctx) {
+        kernel().finish(ctx, audio::sas_core(arg(ctx, 0)).grain());
+    });
+    hle.try_add("sceSasCore", "__sceSasSetGrain", [](Runtime &, AllegrexContext &ctx) {
+        kernel().finish(ctx, audio::sas_core(arg(ctx, 0)).set_grain(arg(ctx, 1)));
+    });
+    hle.try_add("sceSasCore", "__sceSasSetOutputmode", [](Runtime &, AllegrexContext &ctx) {
+        kernel().finish(ctx, audio::sas_core(arg(ctx, 0)).set_output_mode(arg(ctx, 1)));
+    });
+    hle.try_add("sceSasCore", "__sceSasGetPauseFlag", [](Runtime &, AllegrexContext &ctx) {
+        kernel().finish(ctx, audio::sas_core(arg(ctx, 0)).pause_flag());
+    });
     hle.try_add("sceSasCore", "__sceSasGetEnvelopeHeight", [](Runtime &, AllegrexContext &ctx) {
         kernel().finish(ctx, static_cast<std::uint32_t>(audio::sas_core(arg(ctx, 0)).envelope_height(arg(ctx, 1))));
     });
