@@ -403,6 +403,10 @@ Each is a self-contained commit, so other branches can take them:
 | `<algorithm>` in `allegrex_context.hpp` | `include/psprecomp/allegrex_context.hpp` |
 | **Editions** (`ProfileVariant`), edition corpora as libraries, the corpus library loader | `host/profile.*`, `host/corpus_library.*`, `host/corpus_module.cpp.in`, `host/main.cpp`, `host/system.cpp`, `host/overlays.cpp`, `host/install/*`, `cmake/PortableKit.cmake`, `tests/profile_tests.cpp` |
 | MinGW build of the ad hoc discovery | `host/adhoc/discovery.cpp` |
+| SIGNAL's list flow (jump, call, return, sync), `<prefix>_TRACE_GE_LIST` | `host/gpu/ge_state.cpp` |
+| ATRAC streaming through `sceAtracSetData` | `host/hle/hle_atrac.cpp` |
+
+The PortableKit stack #23, #24, #25 and #27 (`purun-first-levels`) is merged into this branch, and b24fc69 (only the vertices an indexed draw uses) cherry-picked; neither changes the corpus ABI, so compiled caches stay valid.
 
 Taken from other branches (cherry-picked with `-x`, or by hand where it would not apply): from #29 (`fubuki-prep`) the recompiler fix for imports called from the same unit, VCRS.T, `psp_recomp --code`, the remaining user-mode Allegrex instructions and the test fix they need, SDL3.dll beside the executable on Windows, the shader step's Python, SYNC as a plain fence, `sceMpegAvcDecode`, and SAS noise voices and envelopes (with its prerequisite from #27). Worth taking when they land: #28's release packaging for macOS and Linux (the app needs an `.app` bundle with the recompiler and headers inside), and #23's commit that finds overlays and fonts inside a macOS bundle.
 
@@ -430,8 +434,11 @@ The maintainer's own discs, each in a data folder of its own beside the delivere
 | Grand Theft Auto: Chinatown Wars (`ULUS-10490`, EBOOT decrypted with the player's keys) | the Rockstar logo, the story intro with subtitles, the 3D airport scene at full speed, under the interpreter (guest ~21 ms a frame) and from -O0 (~12 ms) | fixed-size memory pools (`sceKernel*Fpl`), asynchronous file I/O (`sceIo*Async`), the scratchpad (taken from `tenkawa-bringup`), `sceKernelVolatileMemTryLock`, `sceKernelTryLockMutex`, a 64 MiB stack for the MinGW build (compiled code overflowed the default at once) |
 | Grand Theft Auto: Vice City Stories (`ULES-00502`) | the Rockstar logo movie and the next one, then waits for its world streaming (`WorldStreamEventFlag` bits 1 and 2 are never set) | directory reads (`sceIoDread`; the disc must not list "." and ".."), `sceUmdCheckMedium`, callbacks in `*CB` waits, thread suspend and resume. The stream wait is the open blocker |
 | Monster Hunter Portable 2nd G (`ULJM-05500`) | the game menu | (the Fubuki port's fixes) |
+| Patapon (`UCES-00995`) | the warning that system data will not be saved, then (after "Yes") the developer logo and the title screen, at full speed under the interpreter. The title does not react to Start, Cross, Circle or Square yet | the notify callback of an asynchronous open that completed before the callback was set, the system language and confirm button from the disc's region, `sceIoIoctl` first sector, size and seek, SIGNAL's own list flow (behaviour 0x11: its frame list jumps into a list inside `DATA_CMN.BND`; without it, a black screen with one fade sprite), and ATRAC tracks streamed through `sceAtracSetData` with a buffer smaller than the file |
 
-Known in Chinatown Wars: grey untextured areas in 3D. Control past the intro was not tried.
+Known in Chinatown Wars: grey untextured areas in 3D, unchanged by the vertex-space fixes from #24 and b24fc69 (the same frame of the same run looks the same before and after). Control past the intro was not tried.
+
+Known in Patapon: the title screen waits for something not yet found; the pad is read every frame (`sceCtrlReadBufferPositive`) and every thread but the main one is idle in an ordinary wait. Its looping menu music goes silent after the first pass, because a streamed track that loops is not refilled from the loop start yet (`sceAtracGetStreamDataInfo` reports no room once the whole file was added).
 
 ### What was not verified
 
