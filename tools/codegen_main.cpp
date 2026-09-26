@@ -713,7 +713,7 @@ std::string emit_regular(const psprecomp::DecodedInstruction &d, std::uint32_t p
     case psprecomp::OpcodeKind::Extra:
         // UNVERIFIED: not yet exercised by a real game (docs/INSTRUCTION_COVERAGE.md).
         // The interpreter runs the same function, so the two agree.
-        out << "    execute_extra_instruction(rt, ctx, " << psprecomp::hex32(pc) << "u, "
+        out << "    rt.execute_extra_instruction(ctx, " << psprecomp::hex32(pc) << "u, "
             << psprecomp::hex32(d.word) << "u);\n";
         break;
     case psprecomp::OpcodeKind::Vcrs: {
@@ -1064,7 +1064,7 @@ std::string emit_function_source(const GeneratedFunctionInput &function,
         }
         body << "\n};\n";
 
-        body << "void " << cpp_name << "_entry(Runtime &rt, AllegrexContext &ctx, std::uint16_t direct_entry_id, GuestMemory::AotFastView &aot_mem) {\n"
+        body << "void " << cpp_name << "_entry(CorpusRuntime &rt, AllegrexContext &ctx, std::uint16_t direct_entry_id, AotFastView &aot_mem) {\n"
              << "    std::uint32_t jump_target = 0u;\n"
              << "    std::uint32_t local_transfers = 0u;\n"
              << "    std::uint32_t local_pc = ctx.pc;\n"
@@ -1095,7 +1095,7 @@ std::string emit_function_source(const GeneratedFunctionInput &function,
              << "    }\n"
              << "    }\n";
     } else {
-        body << "void " << cpp_name << "_entry(Runtime &rt, AllegrexContext &ctx, std::uint16_t direct_entry_id, GuestMemory::AotFastView &aot_mem) {\n"
+        body << "void " << cpp_name << "_entry(CorpusRuntime &rt, AllegrexContext &ctx, std::uint16_t direct_entry_id, AotFastView &aot_mem) {\n"
              << "    (void)direct_entry_id;\n"
              << "    std::uint32_t jump_target = 0u;\n"
              << "    std::uint32_t local_transfers = 0u;\n"
@@ -1273,7 +1273,7 @@ std::string emit_function_source(const GeneratedFunctionInput &function,
         }
     }
     body << "}\n\n";
-    body << "void " << cpp_name << "(Runtime &rt, AllegrexContext &ctx) {\n"
+    body << "void " << cpp_name << "(CorpusRuntime &rt, AllegrexContext &ctx) {\n"
          << "    auto aot_mem = rt.memory().aot_fast_view();\n"
          << "    " << cpp_name << "_entry(rt, ctx, 0u, aot_mem);\n}\n\n";
     return body.str();
@@ -1281,13 +1281,13 @@ std::string emit_function_source(const GeneratedFunctionInput &function,
 
 void write_import_wrappers(std::ostream &out, const std::vector<psprecomp::PspImport> &imports) {
     for (std::size_t i = 0; i < imports.size(); ++i) {
-        out << "static void import_" << i << "(Runtime &rt, AllegrexContext &ctx) {\n"
-            << "    const RuntimeExecutionContextToken caller_context = capture_runtime_execution_context();\n"
+        out << "static void import_" << i << "(CorpusRuntime &rt, AllegrexContext &ctx) {\n"
+            << "    const RuntimeExecutionContextToken caller_context = rt.capture_execution_context();\n"
             << "    const std::uint32_t import_pc = ctx.pc;\n"
             << "    const std::uint32_t return_address = ctx.gpr[31];\n"
             << "    rt.invoke_import_cached(" << i << "u, \"" << cpp_escape(imports[i].library) << "\", "
             << psprecomp::hex32(imports[i].nid) << "u, ctx);\n"
-            << "    if (!rt.stopped() && runtime_execution_context_matches(caller_context) &&\n"
+            << "    if (!rt.stopped() && rt.execution_context_matches(caller_context) &&\n"
             << "        ctx.pc == import_pc) ctx.pc = return_address;\n"
             << "}\n\n";
     }
@@ -1310,7 +1310,7 @@ int generate_manual(const std::filesystem::path &elf_path,
 
     std::ofstream out(output_path);
     if (!out) throw psprecomp::Error("Cannot create generated source");
-    out << "#include \"psprecomp/runtime.hpp\"\n#include <bit>\n#include <cmath>\n#include <cstdint>\n#include <limits>\n\nnamespace psprecomp {\n";
+    out << "#include \"psprecomp/corpus_abi.hpp\"\n#include <bit>\n#include <cmath>\n#include <cstdint>\n#include <limits>\n\nnamespace psprecomp {\n";
 
     std::vector<GeneratedFunctionInput> generated;
     for (const auto &function : functions) {
@@ -1323,14 +1323,12 @@ int generate_manual(const std::filesystem::path &elf_path,
             pc += decoded.has_delay_slot() ? 8u : 4u;
         }
         const std::string function_source = emit_function_source(input, memory, safe_name(input.name, input.address));
-        if (function_source.find("execute_extra_instruction(") != std::string::npos)
-            out << "void execute_extra_instruction(Runtime &, AllegrexContext &, std::uint32_t, std::uint32_t);\n";
         out << function_source;
         generated.push_back(std::move(input));
     }
 
     write_import_wrappers(out, imports);
-    out << "void register_generated_functions(Runtime &runtime) {\n";
+    out << "void register_generated_functions(CorpusRuntime &runtime) {\n";
     for (const auto &function : generated) {
         const auto cpp_name = safe_name(function.name, function.address);
         for (const auto label : function.entry_labels) {
@@ -1365,8 +1363,10 @@ int generate_manual(const std::filesystem::path &elf_path,
 // instead of every unit including extra_instructions.hpp: a unit's text then
 // changes only when it uses one.
 std::string extra_instruction_declaration(const std::string &source) {
-    if (source.find("execute_extra_instruction(") == std::string::npos) return {};
-    return "void execute_extra_instruction(Runtime &, AllegrexContext &, std::uint32_t, std::uint32_t);\n";
+    // Extra instructions are a member of CorpusRuntime (corpus_abi.hpp), so a
+    // unit that runs one needs no declaration of its own.
+    (void)source;
+    return {};
 }
 
 std::string lower_constant_gpr_writes(std::string text) {
@@ -1677,12 +1677,12 @@ int generate_auto(const std::filesystem::path &elf_path,
     const std::string units_header_name = g_symbol_prefix + "_units.hpp";
     const auto units_header_path = output_dir / units_header_name;
     std::ostringstream units_header;
-    units_header << "#pragma once\n\n#include <cstdint>\n#include \"psprecomp/guest_memory.hpp\"\n\nnamespace psprecomp {\nclass Runtime;\nstruct AllegrexContext;\n";
+    units_header << "#pragma once\n\n#include <cstdint>\n#include \"psprecomp/corpus_abi.hpp\"\n\nnamespace psprecomp {\n";
     for (const auto &unit : units) {
         units_header << "void " << generated_unit_cpp_name(unit.bucket)
-                     << "(Runtime &, AllegrexContext &);\n";
+                     << "(CorpusRuntime &, AllegrexContext &);\n";
         units_header << "void " << generated_unit_cpp_entry_name(unit.bucket)
-                     << "(Runtime &, AllegrexContext &, std::uint16_t, GuestMemory::AotFastView &);\n";
+                     << "(CorpusRuntime &, AllegrexContext &, std::uint16_t, AotFastView &);\n";
     }
     units_header << "} // namespace psprecomp\n";
     (void)write_text_if_changed(units_header_path, units_header.str());
@@ -1715,7 +1715,7 @@ int generate_auto(const std::filesystem::path &elf_path,
                  path.filename().string() + ": " + std::to_string(unit.instructions.size()) +
                  " instructions, " + std::to_string(unit.entries.size()) + " entries");
         std::ostringstream out;
-        out << "#include \"psprecomp/runtime.hpp\"\n#include \"" << units_header_name << "\"\n#include <bit>\n#include <cmath>\n#include <cstdint>\n#include <limits>\n\nnamespace psprecomp {\n";
+        out << "#include \"psprecomp/corpus_abi.hpp\"\n#include \"" << units_header_name << "\"\n#include <bit>\n#include <cmath>\n#include <cstdint>\n#include <limits>\n\nnamespace psprecomp {\n";
         // The register-cache lowering passes (per-basic-block GPR/FPR caches and
         // the cross-unit hot-register cache) are deliberately absent.  They kept
         // large numbers of guest registers live in C++ locals and in a second
@@ -1736,7 +1736,7 @@ int generate_auto(const std::filesystem::path &elf_path,
         progress(unit_label + " lowering VFPU accesses");
         source = lower_constant_vfpu_accesses(source);
         out << extra_instruction_declaration(source) << source;
-        out << "void register_" << g_symbol_prefix << "_unit_" << unit.bucket << "(Runtime &runtime) {\n";
+        out << "void register_" << g_symbol_prefix << "_unit_" << unit.bucket << "(CorpusRuntime &runtime) {\n";
         // The fast unit table describes one contiguous corpus, so only the main
         // executable installs itself there; overlay corpora rely on per-address
         // registration and the generic chain path.
@@ -1763,12 +1763,12 @@ int generate_auto(const std::filesystem::path &elf_path,
                                                                         : g_symbol_prefix + "_registry.cpp");
     expected_cpp.insert(registry_path.filename());
     std::ostringstream registry;
-    registry << "#include \"psprecomp/runtime.hpp\"\n#include <cstdint>\n\nnamespace psprecomp {\n";
+    registry << "#include \"psprecomp/corpus_abi.hpp\"\n#include <cstdint>\n\nnamespace psprecomp {\n";
     for (const auto &unit : units)
-        registry << "void register_" << g_symbol_prefix << "_unit_" << unit.bucket << "(Runtime &runtime);\n";
+        registry << "void register_" << g_symbol_prefix << "_unit_" << unit.bucket << "(CorpusRuntime &runtime);\n";
     registry << "\n";
     write_import_wrappers(registry, imports);
-    registry << "void " << registry_function << "(Runtime &runtime) {\n";
+    registry << "void " << registry_function << "(CorpusRuntime &runtime) {\n";
     for (const auto &unit : units) registry << "    register_" << g_symbol_prefix << "_unit_" << unit.bucket << "(runtime);\n";
     for (std::size_t i = 0; i < imports.size(); ++i) {
         registry << "    runtime.register_function(" << psprecomp::hex32(imports[i].stub_address)

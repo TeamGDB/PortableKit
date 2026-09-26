@@ -4,10 +4,10 @@
 #define PORTABLEKIT_OVERLAY_MODULE 1
 #include "overlay_module.hpp"
 
-#include "psprecomp/runtime.hpp"
+#include "psprecomp/corpus_abi.hpp"
 
 namespace psprecomp {
-void register_@PORTABLEKIT_OVERLAY_PREFIX@_functions(Runtime &runtime);
+void register_@PORTABLEKIT_OVERLAY_PREFIX@_functions(CorpusRuntime &runtime);
 }
 
 namespace {
@@ -20,6 +20,6 @@ constexpr portablekit::OverlayModuleInfo kInfo{portablekit::kOverlayAbiVersion, 
 
 const portablekit::OverlayModuleInfo *portablekit_overlay_info() { return &kInfo; }
 
-void portablekit_register_overlay(psprecomp::Runtime &runtime) {
+void portablekit_register_overlay(psprecomp::CorpusRuntime &runtime) {
     psprecomp::register_@PORTABLEKIT_OVERLAY_PREFIX@_functions(runtime);
 }

@@ -484,4 +484,27 @@ std::string GuestMemory::read_c_string(std::uint32_t address, std::size_t max_le
 const std::vector<std::uint8_t> &GuestMemory::bytes() const noexcept { return bytes_; }
 const std::vector<std::uint8_t> &GuestMemory::vram_bytes() const noexcept { return vram_; }
 
+// The slow paths of AotFastView, reached from generated code through a table
+// so that the corpus references no symbol of the runtime.
+const AotSlowPaths GuestMemory::kAotSlowPaths{
+    [](const void *memory, std::uint32_t address) {
+        return static_cast<const GuestMemory *>(memory)->aot_load8_slow(address);
+    },
+    [](const void *memory, std::uint32_t address) {
+        return static_cast<const GuestMemory *>(memory)->aot_load16_slow(address);
+    },
+    [](const void *memory, std::uint32_t address) {
+        return static_cast<const GuestMemory *>(memory)->aot_load32_slow(address);
+    },
+    [](void *memory, std::uint32_t address, std::uint8_t value) {
+        static_cast<GuestMemory *>(memory)->aot_store8_slow(address, value);
+    },
+    [](void *memory, std::uint32_t address, std::uint16_t value) {
+        static_cast<GuestMemory *>(memory)->aot_store16_slow(address, value);
+    },
+    [](void *memory, std::uint32_t address, std::uint32_t value) {
+        static_cast<GuestMemory *>(memory)->aot_store32_slow(address, value);
+    },
+};
+
 } // namespace psprecomp
