@@ -22,6 +22,7 @@
 
 #include "app_home.hpp"
 #include "auto_profile.hpp"
+#include "compile_control.hpp"
 #include "corpus.hpp"
 #include "corpus_loader.hpp"
 #include "game_import.hpp"
@@ -272,17 +273,6 @@ std::string self_path(char **argv) {
     return self.empty() ? std::string(argv[0]) : path_text(self);
 }
 
-int start_background_compile(const GameRecord &game, const std::string &level, unsigned jobs, char **argv) {
-    std::vector<std::string> command{self_path(argv), "compile", game.id, "--opt", level};
-    if (jobs != 0u) {
-        command.push_back("--jobs");
-        command.push_back(std::to_string(jobs));
-    }
-    const std::filesystem::path log_dir = cache_root() / game.id;
-    std::error_code ec;
-    std::filesystem::create_directories(log_dir, ec);
-    return spawn_detached(command, log_dir / "compile-process.log") ? 0 : 1;
-}
 
 int command_compile(const GameRecord &game, const Arguments &args, char **argv) {
     CompileOptions options;
@@ -293,7 +283,7 @@ int command_compile(const GameRecord &game, const Arguments &args, char **argv) 
     options.jobs = static_cast<unsigned>(std::atoi(args.get("jobs", "0").c_str()));
     options.keep_intermediates = args.has("keep");
     if (args.has("background")) {
-        if (start_background_compile(game, args.get("opt", "2"), options.jobs, argv) != 0)
+        if (!start_background_compile(game, args.get("opt", "2"), options.jobs))
             return report_error(1, "cannot start the background compile");
         if (g_json) std::cout << Json().field("ok", true).field("started", true).field("opt_level", options.opt_level).str() << "\n";
         else std::cout << "Compiling " << game.title << " in the background; follow it with: portablekit status " << game.disc_id << "\n";
@@ -384,7 +374,7 @@ int command_run(const GameRecord &game, const Arguments &args, char **argv) {
         }
         if (!running && find_toolchain().found) {
             std::cout << "[portablekit] compiling " << game.title << " in the background\n";
-            (void)start_background_compile(game, args.get("opt", "tiered"), 0u, argv);
+            (void)start_background_compile(game, args.get("opt", "tiered"), 0u);
         }
     }
     prepare_corpus_loading(game, choice);
