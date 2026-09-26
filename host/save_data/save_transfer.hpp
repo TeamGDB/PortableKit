@@ -94,6 +94,9 @@ struct ExportResult {
     std::string error;
     std::filesystem::path folder;       // <target>/<project name> saves <time>
     std::vector<std::string> exported;  // folder names
+    // Of those, the ones kept unencrypted (no keys when the game wrote them)
+    // that were encrypted for a PSP on the way out: keys are there now.
+    std::vector<std::string> encrypted;
 };
 
 // Copies this game's save folders from the memory stick to

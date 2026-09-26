@@ -373,6 +373,39 @@ int check_save(const std::filesystem::path &folder, const std::string &file_name
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
+// A save written without keys (flags 0) is encrypted on export once the keys
+// and the game's key are there, and the copy loads as a PSP's save would.
+void test_export_encrypts_plain_save() {
+    const auto root = std::filesystem::temp_directory_path() / "portablekit_savedata_export_ms";
+    const auto target = std::filesystem::temp_directory_path() / "portablekit_savedata_export_out";
+    std::filesystem::remove_all(root);
+    std::filesystem::remove_all(target);
+    std::filesystem::create_directories(target);
+    SaveFiles files;
+    files.game_name = "TEST00001";
+    files.file_name = "DATA.BIN";
+    SaveContents contents;
+    contents.data = std::vector<std::uint8_t>(4096u, 0x5Au);
+    contents.title = "Title";
+    std::string error;
+    check(write_save(root, files, contents, error), "a save is written without a key");
+    const Block key = block("00112233445566778899aabbccddeeff");
+    remember_game_key("TEST00001", key);
+    const ExportResult result = export_saves(root, target, std::chrono::system_clock::now());
+    check(result.ok && result.encrypted.size() == 1u && result.encrypted.front() == "TEST00001",
+          "export encrypts the unencrypted save");
+    files.key = key;
+    const LoadResult exported = load_save(result.folder, files);
+    check(exported.status == LoadStatus::Ok && exported.contents.data == contents.data,
+          "the encrypted copy loads with the game's key");
+    const auto sfo_bytes = read_all(save_folder(result.folder, files) / "PARAM.SFO");
+    const auto sfo = ParamSfo::parse(sfo_bytes);
+    const auto *params = sfo ? sfo->binary("SAVEDATA_PARAMS") : nullptr;
+    check(params != nullptr && (*params)[kParamsFlagsOffset] != 0u, "the copy is marked encrypted");
+    std::filesystem::remove_all(root);
+    std::filesystem::remove_all(target);
+}
+
 int main(int argc, char **argv) {
     if (argc >= 5 && std::string(argv[1]) == "--check")
         return check_save(argv[2], argv[3], argv[4], argc >= 6 ? argv[5] : nullptr);
@@ -382,6 +415,7 @@ int main(int argc, char **argv) {
     test_encryption();
     test_store();
     test_transfer();
+    test_export_encrypts_plain_save();
     std::printf("%d failure(s)\n", failures);
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
