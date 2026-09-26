@@ -177,7 +177,7 @@ bool browse(bool back) {
 #if defined(PORTABLEKIT_ANDROID_APP)
     indented("Import: open the pack's folder, the one that holds textures.ini, or choose a folder that holds it, "
              "such as PPSSPP's PSP/TEXTURES.");
-    indented("On Android this lists only folders Yakumo can read by itself, which leaves out Downloads and SD "
+    indented("On Android this lists only folders the game can read by itself, which leaves out Downloads and SD "
              "cards. Importing through Android's file picker is not supported yet.",
              colors::kTextDim);
 #else

@@ -2150,7 +2150,7 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
         }
     }
     if (want_breadcrumbs && !impl.breadcrumbs.available)
-        std::cout << "[render] <prefix>_GPU_BREADCRUMBS needs VK_AMD_buffer_marker, which this device lacks\n";
+        std::cout << "[render] " << portablekit::env_name("GPU_BREADCRUMBS") << " needs VK_AMD_buffer_marker, which this device lacks\n";
 
     const float priority = 1.0f;
     VkDeviceQueueCreateInfo queue_info{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
@@ -2167,7 +2167,7 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
             enabled_features.vertexPipelineStoresAndAtomics = VK_TRUE;
             impl.check_gpu_decode = true;
         } else {
-            std::cout << "[render] <prefix>_CHECK_GPU_DECODE needs vertexPipelineStoresAndAtomics, which this device "
+            std::cout << "[render] " << portablekit::env_name("CHECK_GPU_DECODE") << " needs vertexPipelineStoresAndAtomics, which this device "
                          "lacks\n";
         }
     }
@@ -2736,7 +2736,7 @@ bool VulkanRenderer::Impl::create_swapchain(std::string &error) {
     std::cout << "[render] swapchain " << swapchain_builds << " for " << extent.width << "x" << extent.height
               << ", surface transform 0x" << std::hex << static_cast<unsigned>(transform) << std::dec
               << " (a quarter turn x" << swapchain_quarter_turns << ")\n";
-    SDL_Log("Yakumo: swapchain %u for %ux%u, surface transform 0x%x", swapchain_builds, extent.width, extent.height,
+    SDL_Log("[render] swapchain %u for %ux%u, surface transform 0x%x", swapchain_builds, extent.width, extent.height,
             static_cast<unsigned>(transform));
 #endif
     swapchain_extent = extent;
@@ -4286,7 +4286,7 @@ VkDescriptorSet VulkanRenderer::Impl::framebuffer_descriptor(Target &target, boo
 
 void VulkanRenderer::Impl::load_pipeline_cache() {
     if (portablekit::env("NO_PIPELINE_CACHE") != nullptr) {
-        std::cout << "[render] pipeline cache off (<prefix>_NO_PIPELINE_CACHE)\n";
+        std::cout << "[render] pipeline cache off (" << portablekit::env_name("NO_PIPELINE_CACHE") << ")\n";
         return;
     }
     pipeline_cache_path = install::user_data_directory() / "pipeline_cache.bin";

@@ -1,4 +1,5 @@
 #include "platform/android_performance.hpp"
+#include "profile.hpp"
 
 #include <dlfcn.h>
 #include <unistd.h>
@@ -33,7 +34,7 @@ Hints &hints() {
 void open(Hints &hints) {
     hints.opened = true;
     if (portablekit::env("NO_PERFORMANCE_HINT") != nullptr) {
-        std::cout << "[perf] performance hints off (<prefix>_NO_PERFORMANCE_HINT)\n";
+        std::cout << "[perf] performance hints off (" << portablekit::env_name("NO_PERFORMANCE_HINT") << ")\n";
         return;
     }
     void *library = dlopen("libandroid.so", RTLD_NOW | RTLD_LOCAL);
