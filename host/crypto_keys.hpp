@@ -30,8 +30,10 @@ struct CryptoKeys {
     // The AES key of KIRK command 1 (signed and encrypted blocks), which wraps
     // an executable's payload key.
     std::optional<Key16> kirk_cmd1;
-    // Keys HLE extension modules declare (extension_keys.hpp), by their
-    // keys-file name in lower case, of any length.
+    // Every key the player's keys file gave, by its keys-file name in lower
+    // case and of any length: PortableKit's own (also kept in the fields
+    // here) and those HLE extension modules declare (extension_keys.hpp).
+    // hle_extension::key() looks here first.
     std::map<std::string, std::vector<std::uint8_t>> named;
     // Save-data keys 2 to 7, in the order they are usually published.
     std::map<int, Key16> savedata;
