@@ -175,7 +175,7 @@ int main() {
 
     // Calls into the game with more than four arguments: t0-t3 after a0-a3.
     {
-        constexpr std::uint32_t kCallback = 0x08900040u;
+        static constexpr std::uint32_t kCallback = 0x08900040u;
         Program program;
         std::uint32_t seen[8]{};
         const auto calling = [&](ext::Registry &registry) {
