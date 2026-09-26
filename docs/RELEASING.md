@@ -15,6 +15,8 @@ In its own repository:
 | `packaging/icon.png` (256×256), `packaging/linux/README.txt`, `packaging/linux/<app id>.desktop`, `packaging/linux/<app id>.metainfo.xml` | The Linux icon, read-me, desktop entry and AppStream data (`@VERSION@`, `@DATE@` are filled in) |
 | `packaging/android/res/` | For Android, the name and launcher icons; see `packaging/android/README.md` |
 
+`release.env` may also set, for a program with more than one executable file: `RELEASE_EXTRA_EXECUTABLES` (programs of the build's `bin/` to put beside the executable), `RELEASE_RESOURCES` (folders of `bin/` to ship in `Contents/Resources`, as `<from>=<to>`) and `RELEASE_PROFILE_DIR` (where the profile is in the checkout, `.` by default). The desktop app uses all three.
+
 ## macOS
 
 On an Apple Silicon Mac with the macOS 13 SDK installed (the deployment target in `packaging/sources.sh`):
@@ -26,6 +28,8 @@ cmake --build out-release --target <RELEASE_TARGET>
 ```
 
 It builds SDL3 and the Vulkan loader from pinned sources for the deployment target, takes MoltenVK's pinned release, assembles `<Name>.app`, links everything inside the bundle, checks the system imports against the macOS 13 SDK, signs ad hoc (no notarization) and packs a disk image into `out/release-macos/dist`, with the FFmpeg source archive and `SHA256SUMS`.
+
+`--packaging DIR` reads `release.env`, the notices and `macos/` from another directory than `<game>/packaging`. `--license NAME=FILE`, `--notices FILE` and `--extra PATH` (each repeatable) add what a build brings beyond the game and the framework: a licence as `licenses/NAME-LICENSE.txt`, a notices file in `licenses/`, and files or folders beside the app in the disk image and the zip.
 
 ## Linux
 
