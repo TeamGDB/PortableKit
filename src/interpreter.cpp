@@ -697,6 +697,15 @@ bool execute_simple(Runtime &rt, AllegrexContext &ctx, const DecodedInstruction 
     case OpcodeKind::Vhdp:
         ctx.execute_vfpu_vhdp(vfpu_vd(d.word), vfpu_vs(d.word), vfpu_vt(d.word), vfpu_length(d.word));
         break;
+    case OpcodeKind::Vcrs: {
+        float source[4]{};
+        float target[4]{};
+        ctx.read_vfpu_vector_with_source_prefix(source, vfpu_vs(d.word), 3u, 0u);
+        ctx.read_vfpu_vector_with_source_prefix(target, vfpu_vt(d.word), 3u, 1u);
+        const float result[4]{source[1] * target[2], source[2] * target[0], source[0] * target[1], 0.0f};
+        ctx.write_vfpu_vector_with_destination_prefix(result, vfpu_vd(d.word), 3u);
+        break;
+    }
     case OpcodeKind::VcrossQuat:
         ctx.execute_vfpu_cross_quat(vfpu_vd(d.word), vfpu_vs(d.word), vfpu_vt(d.word), vfpu_length(d.word));
         break;

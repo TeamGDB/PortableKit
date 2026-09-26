@@ -251,6 +251,11 @@ DecodedInstruction decode_allegrex(std::uint32_t word) {
         } else if (operation == 4u) {
             d.kind = OpcodeKind::Vhdp;
             d.mnemonic = "vhdp";
+        } else if (operation == 5u && (((word >> 7u) & 1u) | (((word >> 15u) & 1u) << 1u)) == 2u) {
+            // VCRS.T, the half of a cross product: (s.y*t.z, s.z*t.x, s.x*t.y).
+            // It exists only for triples.
+            d.kind = OpcodeKind::Vcrs;
+            d.mnemonic = "vcrs.t";
         } else {
             d.kind = OpcodeKind::Vfpu;
             d.mnemonic = "vfpu1";
