@@ -71,6 +71,7 @@ sceAtrac3plus,0x0E2A73AB,sceAtracSetData
 sceAtrac3plus,0x0FAE370E,sceAtracSetHalfwayBufferAndGetID
 sceAtrac3plus,0x36FAABFB,sceAtracGetNextSample
 sceAtrac3plus,0x7DB31251,sceAtracAddStreamData
+sceAtrac3plus,0x83E85EA0,sceAtracGetSecondBufferInfo
 sceAudio,0x01562BA3,sceAudioOutput2Reserve
 sceAudio,0x136CAF51,sceAudioOutputBlocking
 sceAudio,0x13F592BC,sceAudioOutputPannedBlocking

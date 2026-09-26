@@ -42,6 +42,7 @@ inline constexpr std::uint32_t kNoData = 0x80630010u;
 inline constexpr std::uint32_t kSizeTooSmall = 0x80630011u;
 inline constexpr std::uint32_t kBadSample = 0x80630015u;
 inline constexpr std::uint32_t kNoLoopInformation = 0x80630021u;
+inline constexpr std::uint32_t kSecondBufferNotNeeded = 0x80630022u;
 inline constexpr std::uint32_t kAllDataDecoded = 0x80630024u;
 } // namespace atrac_error
 
@@ -759,6 +760,21 @@ void register_atrac_functions(HleRegistrar &hle) {
         details << "write=" << psprecomp::hex32(write.address) << " bytes=" << write.writable
                 << " from=" << write.file_offset;
         finish_traced(ctx, "sceAtracGetStreamDataInfo", 0u, details.str());
+    });
+    // sceAtracGetSecondBufferInfo(id, outPosition, outBytes): where a
+    // looping streamed track wants the file's end kept, when its buffer
+    // cannot hold it. Tracks loop here from the bytes the game added the
+    // first time (see trim_stored), so none ever needs one. God of War
+    // (UCES00842) asks after setting up its streamed music.
+    hle.add("sceAtrac3plus", "sceAtracGetSecondBufferInfo", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t id = arg(ctx, 0);
+        if (find_context(id) == nullptr) {
+            finish_traced(ctx, "sceAtracGetSecondBufferInfo", context_error(id));
+            return;
+        }
+        write_s32(rt.memory(), arg(ctx, 1), 0);
+        write_s32(rt.memory(), arg(ctx, 2), 0);
+        finish_traced(ctx, "sceAtracGetSecondBufferInfo", atrac_error::kSecondBufferNotNeeded);
     });
     // sceAtracAddStreamData(id, bytesAdded): the game has written that many
     // bytes where GetStreamDataInfo said.
