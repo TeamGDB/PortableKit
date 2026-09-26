@@ -631,24 +631,16 @@ void register_vblank_waits(HleRegistrar &hle) {
     // The CB forms also run the thread's pending callbacks. The kernel runs
     // them at the next scheduling point either way, so they wait the same.
     hle.add("sceDisplay", "sceDisplayWaitVblankStartCB", wait_for_vblank);
-    // MultiCB waits for that many vblanks. One is the common case and the only
-    // one seen so far; more than one waits once here and is a known
-    // approximation rather than a silent one.
+    // MultiCB waits for that many vblanks: the wait's object counts them
+    // down (Kernel::on_vblank). Tenkawa waits two at a time while it loads a
+    // fight.
     hle.add("sceDisplay", "sceDisplayWaitVblankStartMultiCB", [](Runtime &, AllegrexContext &ctx) {
-        if (arg(ctx, 0) > 1u)
-            log_once("sceDisplayWaitVblankStartMultiCB",
-                     "[display] sceDisplayWaitVblankStartMultiCB waits one vblank, not " +
-                         std::to_string(arg(ctx, 0)));
+        trace_pacing("sceDisplayWaitVblankStartMultiCB", arg(ctx, 0));
         WaitState wait{};
         wait.type = WaitType::VBlank;
+        wait.object = static_cast<SceUID>(std::max<std::uint32_t>(arg(ctx, 0), 1u));
         kernel().block(ctx, wait, 0u);
     });
-    // sceDisplayWaitVblank returns at once while the display is in its
-    // vertical blank, and otherwise waits for the next one to start: unlike
-    // sceDisplayWaitVblankStart, a call made just after the vblank began does
-    // not lose a whole frame. Purun's sound thread sleeps on it, and its main
-    // loop calls it straight after the flip. <prefix>_VBLANK_WAIT_RETURNS=1
-    // returns at once every time, as the logging stub did.
     hle.add("sceDisplay", "sceDisplayWaitVblank", [](Runtime &, AllegrexContext &ctx) {
         trace_pacing("sceDisplayWaitVblank");
         static const bool returns = portablekit::env("VBLANK_WAIT_RETURNS") != nullptr;
@@ -968,6 +960,20 @@ void register_audio(HleRegistrar &hle) {
     });
     hle.try_add("sceSasCore", "__sceSasGetEnvelopeHeight", [](Runtime &, AllegrexContext &ctx) {
         kernel().finish(ctx, static_cast<std::uint32_t>(audio::sas_core(arg(ctx, 0)).envelope_height(arg(ctx, 1))));
+    });
+    // __sceSasGetAllEnvelopeHeights(core, heights): every voice's envelope
+    // height, 32 words. Stubbed, the game read back whatever the buffer held.
+    hle.try_add("sceSasCore", "__sceSasGetAllEnvelopeHeights", [](Runtime &rt, AllegrexContext &ctx) {
+        const audio::SasCore &sas = audio::sas_core(arg(ctx, 0));
+        const std::uint32_t heights = arg(ctx, 1);
+        auto &memory = rt.memory();
+        if (memory.contains(heights, audio::kSasMaxVoices * 4u))
+            for (std::uint32_t voice = 0; voice < audio::kSasMaxVoices; ++voice)
+                memory.store32(heights + voice * 4u, static_cast<std::uint32_t>(sas.envelope_height(voice)));
+        kernel().finish(ctx, 0u);
+    });
+    hle.try_add("sceSasCore", "__sceSasGetPauseFlag", [](Runtime &, AllegrexContext &ctx) {
+        kernel().finish(ctx, audio::sas_core(arg(ctx, 0)).pause_flags());
     });
     // Reverb is not modelled, so the sends are accepted and dropped.
     for (const char *name : {"__sceSasRevType", "__sceSasRevParam", "__sceSasRevEVOL", "__sceSasRevVON"})

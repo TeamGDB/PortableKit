@@ -79,6 +79,8 @@ public:
     // One bit per voice, set while the voice is *not* playing.
     [[nodiscard]] std::uint32_t end_flag() const noexcept;
     [[nodiscard]] std::int32_t envelope_height(std::uint32_t voice) const noexcept;
+    // One bit per voice, set while the voice is paused.
+    [[nodiscard]] std::uint32_t pause_flags() const noexcept;
 
     // Renders `frames` stereo frames into `output`, overwriting it.
     void render(const psprecomp::GuestMemory &memory, std::int16_t *output, std::size_t frames);

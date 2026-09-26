@@ -208,6 +208,13 @@ std::uint32_t SasCore::end_flag() const noexcept {
     return flags;
 }
 
+std::uint32_t SasCore::pause_flags() const noexcept {
+    std::uint32_t flags = 0u;
+    for (std::uint32_t voice = 0; voice < kSasMaxVoices; ++voice)
+        if (voices_[voice].paused) flags |= 1u << voice;
+    return flags;
+}
+
 std::int32_t SasCore::envelope_height(std::uint32_t voice) const noexcept {
     if (voice >= kSasMaxVoices) return 0;
     return voices_[voice].envelope << 15;
