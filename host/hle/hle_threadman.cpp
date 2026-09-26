@@ -875,6 +875,12 @@ void register_kernel_library(HleRegistrar &hle) {
         kernel().finish(ctx, 0u);
     };
     hle.add("Kernel_Library", "sceKernelCpuResumeIntr", resume_interrupts);
+    // sceKernelIsCpuIntrEnable() -> 1 while interrupts are enabled. God of
+    // War (UCES00842) asks it at start-up and, given 0, stops in a loop that
+    // never ends.
+    hle.add("Kernel_Library", "sceKernelIsCpuIntrEnable", [](Runtime &, AllegrexContext &ctx) {
+        kernel().finish(ctx, kernel().interrupts_enabled() ? 1u : 0u);
+    });
     // With a pipeline sync on a PSP, which has nothing to wait for here.
     hle.add("Kernel_Library", "sceKernelCpuResumeIntrWithSync", resume_interrupts);
     hle.add("Kernel_Library", "sceKernelMemset", [](Runtime &rt, AllegrexContext &ctx) {

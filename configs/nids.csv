@@ -37,6 +37,7 @@ Kernel_Library,0x293B45B8,sceKernelGetThreadId
 Kernel_Library,0x5F10D406,sceKernelCpuResumeIntr
 Kernel_Library,0x3B84732D,sceKernelCpuResumeIntrWithSync
 Kernel_Library,0xA089ECA4,sceKernelMemset
+Kernel_Library,0xB55249D2,sceKernelIsCpuIntrEnable
 Kernel_Library,0xBEA46419,sceKernelLockLwMutex
 Kernel_Library,0xD13BDE95,sceKernelCheckThreadStack
 LoadExecForUser,0x05572A5F,sceKernelExitGame
