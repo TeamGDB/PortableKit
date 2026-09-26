@@ -475,6 +475,12 @@ void exported_screen(bool back) {
         for (const std::string &name : s.exported.exported)
             names += (names.empty() ? "" : ", ") + sd::save_label(name);
         info_row("Exported", names);
+        if (!s.exported.encrypted.empty()) {
+            std::string encrypted;
+            for (const std::string &name : s.exported.encrypted)
+                encrypted += (encrypted.empty() ? "" : ", ") + sd::save_label(name);
+            info_row("Encrypted for a PSP", encrypted);
+        }
         info_row("To", utf8(s.exported.folder));
         ImGui::Indent(px(16.0f));
         paragraph("The folder is laid out like a memory stick: copy its PSP folder to the root of a PSP's memory "
