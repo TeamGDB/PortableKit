@@ -541,6 +541,27 @@ void governor() {
 
 } // namespace
 
+// A game that makes 60 frames a second (GameProfile::frame_vblanks 1):
+// frames are one vblank long, 60 is its own rate, and 90 and 120 blend.
+void sixty() {
+    set_game_frame_vblanks(1);
+    check(game_frame_us() == kGameFrameUs / 2 && game_rate() == 60.0, "a 60 fps game's frame is one vblank");
+    check(presents_per_frame(60.0) == 1.0 && presents_per_frame(90.0) == 1.5 && presents_per_frame(120.0) == 2.0,
+          "at 60, 90 and 120 are 1.5 and 2 presents per game frame");
+    RateGovernor governor;
+    governor.set_requested(30.0);
+    check(governor.rate() == 60.0, "a 60 fps game never goes below its own 60");
+    governor.set_requested(120.0);
+    check(governor.rate() == 120.0, "and starts at the rate asked for above it");
+    bool dropped = false;
+    for (int i = 0; i < 3 && !dropped; ++i) dropped = governor.update(second_with(0.8, 0.0, 8.0, 0.4, 120.0));
+    check(dropped && governor.rate() < 120.0 && governor.rate() >= 60.0, "it steps down no further than 60");
+    PresentClock clock;
+    clock.set_presents_per_frame(presents_per_frame(120.0));
+    check(clock.frame_us() == kGameFrameUs / 2, "the present clock takes the game's frame");
+    set_game_frame_vblanks(2);
+}
+
 int main() {
     blending();
     rigid();
@@ -550,6 +571,7 @@ int main() {
     rates();
     present_clock();
     governor();
+    sixty();
     std::printf("%s\n", failures == 0 ? "all passed" : "FAILED");
     return failures == 0 ? 0 : 1;
 }

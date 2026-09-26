@@ -31,14 +31,25 @@
 // shown when its code has run.
 namespace portablekit::gpu::pacing {
 
-// Two vblanks of the PSP's display, in microseconds (kernel kVBlankPeriodUs).
+// Two vblanks of the PSP's display, in microseconds (kernel kVBlankPeriodUs):
+// the frame of a game that runs at 30 frames a second, the usual case.
 inline constexpr std::int64_t kGameFrameUs = 2 * 16'683;
 
-// The rates the Frame rate setting offers, slowest first; 30 is the game's
-// own, without interpolation. A display rate outside these joins them.
+// The game's own frame, in vblanks of the PSP's display: 2 for a game at 30
+// frames a second, 1 for one at 60 (GameProfile::frame_vblanks). Set once,
+// before any clock or governor is made; 2 until then.
+void set_game_frame_vblanks(int vblanks) noexcept;
+[[nodiscard]] std::int64_t game_frame_us() noexcept;
+// The game's own rate as the Frame rate setting names it: 30 or 60.
+[[nodiscard]] double game_rate() noexcept;
+
+// The rates the Frame rate setting offers, slowest first; the game's own
+// (game_rate()) is shown without interpolation, and the rates at or below it
+// are not offered. A display rate outside these joins them.
 inline constexpr double kRates[] = {30.0, 45.0, 60.0, 90.0, 120.0};
 
-// Presents per game frame at `rate` presents a second: 45 is 1.5, 90 is 3.
+// Presents per game frame at `rate` presents a second: for a game at 30, 45
+// is 1.5 and 90 is 3; for one at 60, 90 is 1.5 and 120 is 2.
 [[nodiscard]] double presents_per_frame(double rate) noexcept;
 // Of those, the ones that fall on a frame's own moment and show it as it
 // is, per game frame: 1 at 60, 90 and 120, 0.5 at 45, 0.2 at 144.
@@ -86,11 +97,11 @@ private:
 
     double per_frame_{1.0};
     // The shortest step from a frame's moment to the next grid moment.
-    std::int64_t first_step_us_{kGameFrameUs};
+    std::int64_t first_step_us_{game_frame_us()};
     std::int64_t work_us_{kWorkMarginUs};
     std::vector<std::int64_t> work_window_;  // the last frames' code time, oldest first
     std::size_t work_cursor_{};
-    std::int64_t frame_us_{kGameFrameUs};
+    std::int64_t frame_us_{game_frame_us()};
     bool has_newer_{};
     bool has_older_{};
     std::int64_t newer_us_{};
@@ -112,7 +123,7 @@ struct Second {
     std::uint32_t blocked{};       // presents dropped: the display had no image free
 };
 
-// Picks the rate from the setting down to 30, so that interpolation never
+// Picks the rate from the setting down to the game's own, so that interpolation never
 // slows the game: when the game falls behind real time, or has no spare time
 // left, and presents take at least half of the time missing and more than
 // the time the kernel spent waiting, it steps down at once to a rate the
@@ -153,9 +164,9 @@ public:
 private:
     void step_to(std::size_t index, const char *why);
 
-    double requested_{30.0};
+    double requested_{game_rate()};
     bool automatic_{true};
-    std::vector<double> ladder_{30.0};
+    std::vector<double> ladder_{game_rate()};
     std::size_t index_{};
     int slow_seconds_{};
     int skipping_seconds_{};

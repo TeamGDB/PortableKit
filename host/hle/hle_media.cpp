@@ -239,18 +239,19 @@ void feed_mouse(gpu::VulkanRenderer &renderer) {
 }
 #endif
 
-// The emulated time of the vblank the frame being flipped started from. The
-// game starts a frame every other vblank, when its vblank handler has counted
-// two since the last one; the flip comes when the frame's code has run, and
-// on a slower machine that is often after the vblank between, so the latest
-// vblank is not the frame's own. Frames are kept on a grid of two vblanks
-// from the one before: the latest start on that grid not after the latest
-// vblank. A flip that comes before a whole step, or two steps late, starts
-// the grid again at its latest vblank.
+// The emulated time of the vblank the frame being flipped started from. A
+// game at 30 frames a second starts a frame every other vblank, when its
+// vblank handler has counted two since the last one; the flip comes when the
+// frame's code has run, and on a slower machine that is often after the
+// vblank between, so the latest vblank is not the frame's own. Frames are
+// kept on a grid of the game's frame (GameProfile::frame_vblanks) from the
+// one before: the latest start on that grid not after the latest vblank. A
+// flip that comes before a whole step, or two steps late, starts the grid
+// again at its latest vblank.
 std::uint64_t frame_start_us(std::uint64_t latest_vblank_us) {
     static std::uint64_t previous = 0u;
     static bool known = false;
-    constexpr std::uint64_t kStep = 2u * kVBlankPeriodUs;
+    static const std::uint64_t kStep = std::max<std::uint64_t>(portablekit::game().frame_vblanks, 1u) * kVBlankPeriodUs;
     std::uint64_t start = latest_vblank_us;
     if (known && latest_vblank_us >= previous + kStep && latest_vblank_us < previous + 3u * kStep)
         start = previous + kStep * ((latest_vblank_us - previous) / kStep);

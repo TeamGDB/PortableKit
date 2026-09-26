@@ -14,10 +14,21 @@ constexpr std::int64_t kRealignUs = 2000;
 // A gap of this many frames between two flips (a load, a pause) starts over.
 constexpr std::int64_t kGapFrames = 10;
 
+int &frame_vblanks() {
+    static int vblanks = 2;
+    return vblanks;
+}
+
 } // namespace
 
+void set_game_frame_vblanks(int vblanks) noexcept { frame_vblanks() = std::clamp(vblanks, 1, 4); }
+
+std::int64_t game_frame_us() noexcept { return kGameFrameUs / 2 * frame_vblanks(); }
+
+double game_rate() noexcept { return 60.0 / static_cast<double>(frame_vblanks()); }
+
 double presents_per_frame(double rate) noexcept {
-    const double presents = rate / 30.0;
+    const double presents = rate / game_rate();
     // A display that reports 59.94 or 89.9 Hz means 2 or 3.
     const double whole = std::round(presents);
     return std::fabs(presents - whole) < 0.03 ? whole : presents;
@@ -129,11 +140,13 @@ std::optional<PresentClock::Present> PresentClock::take(std::int64_t now_us) noe
 }
 
 void RateGovernor::set_requested(double rate) {
-    requested_ = std::max(rate, 30.0);
+    const double own = game_rate();
+    requested_ = std::max(rate, own);
     ladder_.clear();
+    ladder_.push_back(own);
     for (const double known : kRates)
-        if (known < requested_ - 0.5) ladder_.push_back(known);
-    ladder_.push_back(requested_);
+        if (known > own + 0.5 && known < requested_ - 0.5) ladder_.push_back(known);
+    if (requested_ > own + 0.5) ladder_.push_back(requested_);
     index_ = ladder_.size() - 1u;
     blocked_.assign(ladder_.size(), 0);
     block_length_.assign(ladder_.size(), kBlockSeconds);
@@ -184,7 +197,7 @@ bool RateGovernor::update(const Second &second) {
     // they are blamed only when they take at least half of what is missing.
     const bool slow = second.speed < kSlowSpeed;
     const bool no_spare = second.idle_ms < kMinIdleMs;
-    const double missing_ms = std::max(0.0, 1.0 - second.speed) * static_cast<double>(kGameFrameUs) / 1000.0 +
+    const double missing_ms = std::max(0.0, 1.0 - second.speed) * static_cast<double>(game_frame_us()) / 1000.0 +
                               std::max(0.0, kMinIdleMs - second.idle_ms);
     if (index_ > 0u && (slow || no_spare) && second.interpolation_ms >= std::max(kMinCostMs, 0.5 * missing_ms) &&
         second.idle_ms < second.interpolation_ms) {
