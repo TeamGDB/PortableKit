@@ -1,5 +1,7 @@
 #pragma once
 
+#include "psprecomp/corpus_abi.hpp"
+
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -53,93 +55,13 @@ public:
     }
     [[nodiscard]] bool contains(std::uint32_t address, std::size_t length = 1u) const noexcept;
 
-    // cached AOT memory view. Generated units contain hundreds to
-    // thousands of guest loads/stores each. Calling the inline GuestMemory
-    // accessors still asks the optimizer to rediscover ram_data_, three limits
-    // and the immutable write-watch flag at every static site. Materialize those
-    // values once when a unit is entered, then keep them as ordinary locals that
-    // MSVC/LTCG can retain in registers across the unit's basic blocks.
-    //
-    // The underlying RAM/VRAM vectors never resize after construction and
-    // write_watch_enabled_ is fixed by the constructor, so this view remains
-    // valid across nested AOT/HLE calls. Slow/VRAM paths delegate to the owning
-    // GuestMemory and preserve the original validation/watch behavior.
-    class AotFastView {
-    public:
-        [[nodiscard]] PSPRECOMP_MEMORY_FAST_PATH std::uint8_t aot_load8(std::uint32_t address) const {
-            const std::uint32_t offset = ram_offset_of_fast(address);
-            if (offset <= ram_limit8_) return ram_data_[offset];
-            return owner_->aot_load8_slow(address);
-        }
-        [[nodiscard]] PSPRECOMP_MEMORY_FAST_PATH std::uint16_t aot_load16(std::uint32_t address) const {
-            const std::uint32_t offset = ram_offset_of_fast(address);
-            if (offset <= ram_limit16_) return GuestMemory::read_le16(ram_data_ + offset);
-            return owner_->aot_load16_slow(address);
-        }
-        [[nodiscard]] PSPRECOMP_MEMORY_FAST_PATH std::uint32_t aot_load32(std::uint32_t address) const {
-            const std::uint32_t offset = ram_offset_of_fast(address);
-            if (offset <= ram_limit32_) return GuestMemory::read_le32(ram_data_ + offset);
-            return owner_->aot_load32_slow(address);
-        }
-        PSPRECOMP_MEMORY_FAST_PATH void aot_store8(std::uint32_t address, std::uint8_t value) const {
-            const std::uint32_t offset = ram_offset_of_fast(address);
-#if defined(PSPRECOMP_AOT_ASSUME_NO_WRITE_WATCH)
-            if (offset <= ram_limit8_) {
-#else
-            if (!write_watch_enabled_ && offset <= ram_limit8_) {
-#endif
-                ram_data_[offset] = value;
-                return;
-            }
-            owner_->aot_store8_slow(address, value);
-        }
-        PSPRECOMP_MEMORY_FAST_PATH void aot_store16(std::uint32_t address, std::uint16_t value) const {
-            const std::uint32_t offset = ram_offset_of_fast(address);
-#if defined(PSPRECOMP_AOT_ASSUME_NO_WRITE_WATCH)
-            if (offset <= ram_limit16_) {
-#else
-            if (!write_watch_enabled_ && offset <= ram_limit16_) {
-#endif
-                GuestMemory::write_le16(ram_data_ + offset, value);
-                return;
-            }
-            owner_->aot_store16_slow(address, value);
-        }
-        PSPRECOMP_MEMORY_FAST_PATH void aot_store32(std::uint32_t address, std::uint32_t value) const {
-            const std::uint32_t offset = ram_offset_of_fast(address);
-#if defined(PSPRECOMP_AOT_ASSUME_NO_WRITE_WATCH)
-            if (offset <= ram_limit32_) {
-#else
-            if (!write_watch_enabled_ && offset <= ram_limit32_) {
-#endif
-                GuestMemory::write_le32(ram_data_ + offset, value);
-                return;
-            }
-            owner_->aot_store32_slow(address, value);
-        }
-
-    private:
-        friend class GuestMemory;
-        AotFastView(GuestMemory *owner, std::uint8_t *ram_data,
-                    std::uint32_t limit8, std::uint32_t limit16,
-                    std::uint32_t limit32, bool write_watch) noexcept
-            : owner_(owner), ram_data_(ram_data), ram_limit8_(limit8),
-              ram_limit16_(limit16), ram_limit32_(limit32),
-              write_watch_enabled_(write_watch) {}
-        [[nodiscard]] PSPRECOMP_MEMORY_FAST_PATH static constexpr std::uint32_t ram_offset_of_fast(
-            std::uint32_t address) noexcept {
-            return (address & 0x1FFFFFFFu) - GuestMemory::kPhysicalBase;
-        }
-        GuestMemory *owner_{};
-        std::uint8_t *ram_data_{};
-        std::uint32_t ram_limit8_{};
-        std::uint32_t ram_limit16_{};
-        std::uint32_t ram_limit32_{};
-        bool write_watch_enabled_{};
-    };
+    // The view generated code keeps for a unit's memory accesses. Defined in
+    // corpus_abi.hpp, which is all a corpus sees; its slow paths come back
+    // here through kAotSlowPaths.
+    using AotFastView = psprecomp::AotFastView;
 
     [[nodiscard]] PSPRECOMP_MEMORY_FAST_PATH AotFastView aot_fast_view() noexcept {
-        return AotFastView(this, ram_data_, ram_limit8_, ram_limit16_, ram_limit32_,
+        return AotFastView(this, &kAotSlowPaths, ram_data_, ram_limit8_, ram_limit16_, ram_limit32_,
                            write_watch_enabled_);
     }
 
@@ -293,6 +215,8 @@ private:
                     ((value << 8u) & 0x00FF0000u) | ((value << 24u) & 0xFF000000u);
         std::memcpy(destination, &value, sizeof(value));
     }
+
+    static const AotSlowPaths kAotSlowPaths;
 
     [[nodiscard]] std::uint8_t aot_load8_slow(std::uint32_t address) const;
     [[nodiscard]] std::uint16_t aot_load16_slow(std::uint32_t address) const;

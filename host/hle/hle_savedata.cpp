@@ -11,6 +11,7 @@
 #include "hle_common.hpp"
 #include "utility_dialog.hpp"
 
+#include "crypto_keys.hpp"
 #include "save_data/savedata_crypto.hpp"
 #include "save_data/savedata_store.hpp"
 #include "save_data/save_transfer.hpp"
@@ -178,7 +179,11 @@ savedata::SaveFiles files_for(const psprecomp::GuestMemory &memory, std::uint32_
         savedata::Block key{};
         for (std::uint32_t i = 0; i < key.size(); ++i) key[i] = memory.load8(params + param::kKey + i);
         if (!savedata::is_zero(key)) {
-            files.key = key;
+            // Without the console's keys the save is kept unencrypted; the
+            // game cannot tell, since it only ever sees the plain data. The
+            // key is still remembered, so the save can be encrypted for a PSP
+            // once keys are added.
+            if (savedata_keys_available()) files.key = key;
             // The menu's Import checks saves with it.
             savedata::remember_game_key(files.game_name, key);
         }

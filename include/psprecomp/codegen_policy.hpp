@@ -13,7 +13,9 @@ namespace psprecomp::codegen {
 [[nodiscard]] constexpr std::string_view memory_ordering_statement(OpcodeKind kind) noexcept {
     switch (kind) {
     case OpcodeKind::Sync:
-        return "    rt.memory().memory_barrier();\n";
+        // A plain fence: generated code sees only corpus_abi.hpp, which has
+        // no GuestMemory to ask.
+        return "    std::atomic_thread_fence(std::memory_order_seq_cst);\n";
     case OpcodeKind::Cache:
         return "    // PSP CACHE is a no-op in coherent host memory.\n";
     default:

@@ -1,5 +1,6 @@
 #include "psprecomp/program_analysis.hpp"
 
+#include "psprecomp/common.hpp"
 #include "psprecomp/decoder.hpp"
 
 #include <algorithm>
@@ -232,6 +233,7 @@ void propagate_constant(const DecodedInstruction &decoded,
         break;
     case OpcodeKind::Unsupported:
     case OpcodeKind::Vfpu:
+    case OpcodeKind::Extra:
     case OpcodeKind::Syscall:
     case OpcodeKind::Break:
         clear_all_constants(constants);
@@ -472,9 +474,22 @@ bool is_executable_address(const std::vector<ExecutableRange> &ranges, std::uint
 ProgramAnalysis analyze_program(const Elf32Image &elf,
                                 const GuestMemory &memory,
                                 std::uint32_t load_base,
-                                std::size_t max_instructions_per_function) {
+                                std::size_t max_instructions_per_function,
+                                const std::vector<ExecutableRange> &extra_code_ranges) {
     ProgramAnalysis program{};
     program.executable_ranges = executable_ranges_for(elf, load_base);
+    if (!extra_code_ranges.empty()) {
+        for (const auto &range : extra_code_ranges) {
+            if (range.end <= range.start || ((range.start | range.end) & 3u) != 0u)
+                throw Error("extra code range must be non-empty and word aligned");
+            for (const auto &existing : program.executable_ranges)
+                if (range.start < existing.end && existing.start < range.end)
+                    throw Error("extra code range overlaps an executable section");
+            program.executable_ranges.push_back(range);
+        }
+        std::sort(program.executable_ranges.begin(), program.executable_ranges.end(),
+                  [](const auto &a, const auto &b) { return a.start < b.start; });
+    }
     program.seeds = collect_initial_seeds(elf, memory, load_base, program.executable_ranges);
     program.functions.reserve(program.seeds.size());
 

@@ -25,6 +25,7 @@ set(PORTABLEKIT_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." CACHE INTERNAL "PortableKit 
 set(PORTABLEKIT_HOST_SOURCES
     host/profile.cpp
     host/app_paths.cpp
+    host/corpus_library.cpp
     host/audio/atrac_decoder.cpp
     host/movie/avc_decoder.cpp
     host/movie/psmf_demuxer.cpp
@@ -106,7 +107,11 @@ set(PORTABLEKIT_RENDERER_SOURCES
 function(_portablekit_prefix out root)
     set(result)
     foreach(source IN LISTS ARGN)
-        list(APPEND result "${root}/${source}")
+        if(IS_ABSOLUTE "${source}")
+            list(APPEND result "${source}")
+        else()
+            list(APPEND result "${root}/${source}")
+        endif()
     endforeach()
     set(${out} "${result}" PARENT_SCOPE)
 endfunction()
@@ -137,7 +142,15 @@ function(_portablekit_inherit_settings target)
 endfunction()
 
 function(portablekit_add_game target)
-    cmake_parse_arguments(GAME "" "PROFILE_DIR" "SOURCES" ${ARGN})
+    # Options a program that wraps the port uses (the desktop app,
+    # apps/portablekit); a port passes none of them.
+    #   EXTERNAL_KEYS   do not link crypto_keys_builtin.cpp: the program
+    #                   defines portablekit::crypto_keys() itself.
+    #   NO_CORPUS       link no generated code and no stub: the program
+    #                   defines psprecomp::register_generated_functions().
+    #   HOST_MAIN_NAME  compile host/main.cpp's main() under this name, so the
+    #                   program's own main() can call it.
+    cmake_parse_arguments(GAME "EXTERNAL_KEYS;NO_CORPUS" "PROFILE_DIR;HOST_MAIN_NAME" "SOURCES" ${ARGN})
     if(NOT GAME_PROFILE_DIR)
         set(GAME_PROFILE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
     endif()
@@ -146,7 +159,9 @@ function(portablekit_add_game target)
     # committed. Until the profile's generate step has produced it, link an
     # empty registry instead, so a checkout still builds and says so.
     file(GLOB generated CONFIGURE_DEPENDS "${GAME_PROFILE_DIR}/generated/*.cpp")
-    if(generated)
+    if(GAME_NO_CORPUS)
+        set(generated)
+    elseif(generated)
         list(LENGTH generated generated_count)
         message(STATUS "${target}: ${generated_count} generated AOT units")
         if(MSVC)
@@ -163,6 +178,13 @@ function(portablekit_add_game target)
         message(STATUS "${target}: no generated AOT units; run the profile's generate step")
         set(generated "${PORTABLEKIT_ROOT}/host/generated_stub.cpp")
     endif()
+    if(NOT GAME_EXTERNAL_KEYS)
+        list(APPEND GAME_SOURCES_ABSOLUTE "${PORTABLEKIT_ROOT}/host/crypto_keys_builtin.cpp")
+    endif()
+    if(GAME_HOST_MAIN_NAME)
+        set_property(SOURCE "${PORTABLEKIT_ROOT}/host/main.cpp" APPEND PROPERTY COMPILE_DEFINITIONS
+            PORTABLEKIT_HOST_MAIN_NAME=${GAME_HOST_MAIN_NAME})
+    endif()
 
     # Renderer: SDL3 for the window and Vulkan for drawing. Both are optional
     # so a port still builds headless on a machine without them.
@@ -172,7 +194,11 @@ function(portablekit_add_game target)
         find_package(SDL3 QUIET)
         find_package(Vulkan QUIET)
         find_program(PORTABLEKIT_GLSLANG NAMES glslangValidator glslang)
-        if(SDL3_FOUND AND Vulkan_FOUND AND PORTABLEKIT_GLSLANG)
+        # The interpreter by what CMake finds rather than by the name python3:
+        # a Windows install from python.org has no python3.exe, and the name
+        # then reaches the Microsoft Store's placeholder instead.
+        find_package(Python3 COMPONENTS Interpreter QUIET)
+        if(SDL3_FOUND AND Vulkan_FOUND AND PORTABLEKIT_GLSLANG AND Python3_Interpreter_FOUND)
             set(shader_inc "${CMAKE_CURRENT_BINARY_DIR}/generated_shaders/ge_shaders.inc")
             set(shaders
                 "kGeVertexShader=${PORTABLEKIT_ROOT}/host/gpu/shaders/ge.vert"
@@ -191,7 +217,7 @@ function(portablekit_add_game target)
             add_custom_command(
                 OUTPUT "${shader_inc}"
                 COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/generated_shaders"
-                COMMAND python3 "${PORTABLEKIT_ROOT}/tools/embed_shaders.py" "${PORTABLEKIT_GLSLANG}" "${shader_inc}"
+                COMMAND "${Python3_EXECUTABLE}" "${PORTABLEKIT_ROOT}/tools/embed_shaders.py" "${PORTABLEKIT_GLSLANG}" "${shader_inc}"
                         ${shaders}
                 DEPENDS ${shader_sources}
                         "${PORTABLEKIT_ROOT}/tools/embed_shaders.py"
@@ -200,7 +226,7 @@ function(portablekit_add_game target)
             _portablekit_prefix(renderer_sources "${PORTABLEKIT_ROOT}" ${PORTABLEKIT_RENDERER_SOURCES})
             message(STATUS "${target}: Vulkan renderer enabled")
         else()
-            message(STATUS "${target}: renderer disabled (SDL3, Vulkan or glslang not found)")
+            message(STATUS "${target}: renderer disabled (SDL3, Vulkan, glslang or Python 3 not found)")
             set(PORTABLEKIT_RENDERER OFF)
         endif()
     endif()
@@ -227,6 +253,7 @@ function(portablekit_add_game target)
     # psprecomp headers, so definitions and include paths the host adds do not
     # change its compile commands and rebuild all of it. Its objects still link
     # straight into the executable, which exports their symbols to the overlays.
+    if(generated)
     add_library(${target}_generated OBJECT ${generated})
     # The standard is stated per target: a game's own CMakeLists is the top
     # level project and need not set CMAKE_CXX_STANDARD for the framework.
@@ -235,6 +262,10 @@ function(portablekit_add_game target)
         "${PORTABLEKIT_ROOT}/include" "${GAME_PROFILE_DIR}/generated")
     set_target_properties(${target}_generated PROPERTIES JOB_POOL_COMPILE psprecomp_generated)
     _portablekit_inherit_settings(${target}_generated)
+    set(generated_objects $<TARGET_OBJECTS:${target}_generated>)
+    else()
+        set(generated_objects)
+    endif()
 
     # An Android app is a shared library, libmain.so, that SDL's Java activity
     # loads and calls; the command-line executable still builds for Android
@@ -247,8 +278,9 @@ function(portablekit_add_game target)
         "${PORTABLEKIT_ROOT}/host/main.cpp"
         ${host_sources}
         ${profile_sources}
+        ${GAME_SOURCES_ABSOLUTE}
         ${renderer_sources}
-        $<TARGET_OBJECTS:${target}_generated>)
+        ${generated_objects})
     if(PORTABLEKIT_ANDROID_APP)
         add_library(${target} SHARED ${program_sources} "${PORTABLEKIT_ROOT}/host/platform/android_app.cpp"
             "${PORTABLEKIT_ROOT}/host/platform/android_jni.cpp"
@@ -273,6 +305,14 @@ function(portablekit_add_game target)
             "${CMAKE_CURRENT_BINARY_DIR}/generated_shaders"
             "${PORTABLEKIT_ROOT}/third_party/imgui")
         target_link_libraries(${target} PRIVATE SDL3::SDL3 Vulkan::Vulkan)
+        # Windows finds a DLL next to the executable or on PATH, and SDL3's
+        # development package puts it in neither: put it next to the
+        # executable, as the FFmpeg DLLs already are.
+        if(WIN32 AND TARGET SDL3::SDL3-shared)
+            add_custom_command(TARGET ${target} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "$<TARGET_FILE:SDL3::SDL3-shared>" "$<TARGET_FILE_DIR:${target}>")
+        endif()
     endif()
     target_include_directories(${target} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated_version")
     # The host only: the generated code never sees FFmpeg.
@@ -344,6 +384,48 @@ function(portablekit_add_game target)
     set_target_properties(${target} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
         JOB_POOL_COMPILE psprecomp_generated)
+
+    # Other editions of the game (GameProfile::variants): each one's corpus,
+    # generated into <profile>/generated-variants/<key>/, becomes a library
+    # of its own in bin/corpora/, which host/main.cpp loads when that
+    # edition's executable is the one running. Such a library needs nothing
+    # from the executable (psprecomp/corpus_abi.hpp).
+    file(GLOB variant_dirs LIST_DIRECTORIES true "${GAME_PROFILE_DIR}/generated-variants/*")
+    foreach(variant_dir IN LISTS variant_dirs)
+        if(NOT IS_DIRECTORY "${variant_dir}")
+            continue()
+        endif()
+        get_filename_component(variant_key "${variant_dir}" NAME)
+        file(GLOB variant_sources CONFIGURE_DEPENDS "${variant_dir}/*.cpp")
+        if(NOT variant_sources)
+            continue()
+        endif()
+        set(variant_target "${target}_corpus_${variant_key}")
+        string(MAKE_C_IDENTIFIER "${variant_target}" variant_target)
+        set(variant_entry "${CMAKE_CURRENT_BINARY_DIR}/corpora/${variant_key}_module.cpp")
+        configure_file("${PORTABLEKIT_ROOT}/host/corpus_module.cpp.in" "${variant_entry}" COPYONLY)
+        add_library(${variant_target} MODULE ${variant_sources} "${variant_entry}")
+        target_compile_features(${variant_target} PRIVATE cxx_std_20)
+        _portablekit_inherit_settings(${variant_target})
+        target_include_directories(${variant_target} PRIVATE "${PORTABLEKIT_ROOT}/include" "${variant_dir}")
+        if(generated_options)
+            target_compile_options(${variant_target} PRIVATE ${generated_options})
+        elseif(MSVC)
+            target_compile_options(${variant_target} PRIVATE /O${PSPRECOMP_GENERATED_OPT_LEVEL} /bigobj)
+        else()
+            target_compile_options(${variant_target} PRIVATE -O${PSPRECOMP_GENERATED_OPT_LEVEL} -g0)
+        endif()
+        set_target_properties(${variant_target} PROPERTIES
+            JOB_POOL_COMPILE psprecomp_generated
+            CXX_VISIBILITY_PRESET hidden
+            VISIBILITY_INLINES_HIDDEN ON
+            PREFIX ""
+            SUFFIX "${CMAKE_SHARED_LIBRARY_SUFFIX}"
+            OUTPUT_NAME "${variant_key}"
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/corpora")
+        add_dependencies(${target} ${variant_target})
+        message(STATUS "${target}: corpus of edition ${variant_key}")
+    endforeach()
 
     # Recompiled overlay corpora, produced by tools/add_overlay.py. Each
     # directory under <profile>/overlays/ holds one corpus and becomes one

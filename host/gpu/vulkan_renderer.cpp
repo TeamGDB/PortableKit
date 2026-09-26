@@ -1610,6 +1610,11 @@ struct VulkanRenderer::Impl {
     // Index list of a draw whose decoded vertices go straight into the vertex
     // buffer (see submit()).
     std::vector<std::uint16_t> direct_indices;
+    // An indexed draw that uses a few vertices of a large pool (a shared
+    // vertex array, indexed from far apart) is written with only the vertices
+    // its indices name; these hold that compacted copy and the old-to-new map.
+    std::vector<Vertex> compact_vertices;
+    std::vector<std::uint16_t> compact_map;
     // Background texture decoding: the pool (made on first use) and the
     // textures of the frame being recorded whose pixels are still decoding.
     std::unique_ptr<DecodePool> decode_pool;
@@ -5553,6 +5558,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         }
         return true;
     };
+    const std::vector<Vertex> *draw_vertices = &call.vertices;
     if (direct) {
         triangle_indices(call.primitive, count, call.indices, vertex_total, impl.direct_indices);
         if (impl.direct_indices.empty()) return;
@@ -5570,6 +5576,27 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
                 std::cout << "[direct-check] draw " << impl.draws << " prim=" << static_cast<int>(call.primitive)
                           << " count=" << count << " vertices=" << call.vertices.size() << " expanded "
                           << impl.scratch.size() << " indices " << impl.direct_indices.size() << " differ\n";
+        }
+        // A draw whose indices name a few vertices of a much larger range
+        // (Monster Hunter Portable 2nd G's field: 25 indices into 3,500
+        // vertices in VRAM, hundreds of times a frame) would otherwise write
+        // the whole range, and fill the frame's vertex space. Only the named
+        // vertices are written, and the indices renumbered.
+        // <prefix>_NO_COMPACT_VERTICES writes the whole range as before.
+        static const bool no_compact = portablekit::env("NO_COMPACT_VERTICES") != nullptr;
+        if (!raw && !check_direct && !no_compact && call.vertices.size() > 2u * impl.direct_indices.size() + 32u) {
+            constexpr std::uint16_t kUnset = 0xFFFFu;
+            impl.compact_map.assign(call.vertices.size(), kUnset);
+            impl.compact_vertices.clear();
+            for (std::uint16_t &index : impl.direct_indices) {
+                std::uint16_t &slot = impl.compact_map[index];
+                if (slot == kUnset) {
+                    slot = static_cast<std::uint16_t>(impl.compact_vertices.size());
+                    impl.compact_vertices.push_back(call.vertices[index]);
+                }
+                index = slot;
+            }
+            draw_vertices = &impl.compact_vertices;
         }
     } else {
         if (!expand()) return;
@@ -5917,12 +5944,25 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
             (raw ? impl.group.stride == call.raw_stride && !impl.check_gpu_decode : !loose_merge))
             vertex_start = impl.vertex_offset;
         const VkDeviceSize vertex_bytes =
-            raw ? static_cast<VkDeviceSize>(call.raw_count) * call.raw_stride : call.vertices.size() * sizeof(GpuVertex);
+            raw ? static_cast<VkDeviceSize>(call.raw_count) * call.raw_stride : draw_vertices->size() * sizeof(GpuVertex);
         const VkDeviceSize vertex_end = vertex_start + vertex_bytes;
         index_start = (vertex_end + 3u) & ~VkDeviceSize{3u};
         draw_end = merge ? vertex_end : index_start + impl.direct_indices.size() * sizeof(std::uint16_t);
         if (draw_end > impl.vertex_limit) {
             report_frame_space_full("vertex");
+            // <prefix>_TRACE_VERTEX_SPACE: the draws that did not fit, so a
+            // draw with an absurd vertex count can be told from a frame that
+            // is simply full.
+            static const bool trace_space = portablekit::env("TRACE_VERTEX_SPACE") != nullptr;
+            static std::uint32_t traced = 0u;
+            if (trace_space && traced < 64u) {
+                ++traced;
+                std::cout << "[render] vertex space: draw of " << vertex_bytes << " bytes (" << (raw ? call.raw_count : draw_vertices->size())
+                          << " vertices, " << impl.direct_indices.size() << " indices, prim " << static_cast<int>(call.primitive)
+                          << ", count " << call.primitive_count << ", vtype 0x" << std::hex << call.vertex_type << ", at 0x"
+                          << call.vertex_address << std::dec << "), frame used "
+                          << (impl.vertex_offset - static_cast<VkDeviceSize>(impl.frame_region) * kVertexBufferBytes) << " bytes\n";
+            }
             return;
         }
         if (merge && impl.index_offset + 4u + impl.direct_indices.size() * sizeof(std::uint16_t) > impl.index_limit) {
@@ -5931,7 +5971,7 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         }
         auto *out = static_cast<std::uint8_t *>(impl.vertex_mapped) + vertex_start;
         if (raw) std::memcpy(out, call.raw_vertices, static_cast<std::size_t>(vertex_bytes));
-        else for (const Vertex &vertex : call.vertices) {
+        else for (const Vertex &vertex : *draw_vertices) {
             const GpuVertex converted = to_gpu(vertex);
             std::memcpy(out, &converted, sizeof(GpuVertex));
             out += sizeof(GpuVertex);

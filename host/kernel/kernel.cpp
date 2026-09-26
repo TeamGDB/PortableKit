@@ -44,10 +44,10 @@ bool trace_enabled() {
     return enabled;
 }
 
-void native_thread_exit(Runtime &, AllegrexContext &ctx) { kernel().thread_exit_stub(ctx); }
-void native_interrupt_return(Runtime &, AllegrexContext &ctx) { kernel().interrupt_return_stub(ctx); }
-void native_idle(Runtime &, AllegrexContext &ctx) { kernel().idle_stub(ctx); }
-void native_guest_call_return(Runtime &, AllegrexContext &ctx) { kernel().guest_call_return_stub(ctx); }
+void native_thread_exit(psprecomp::CorpusRuntime &, AllegrexContext &ctx) { kernel().thread_exit_stub(ctx); }
+void native_interrupt_return(psprecomp::CorpusRuntime &, AllegrexContext &ctx) { kernel().interrupt_return_stub(ctx); }
+void native_idle(psprecomp::CorpusRuntime &, AllegrexContext &ctx) { kernel().idle_stub(ctx); }
+void native_guest_call_return(psprecomp::CorpusRuntime &, AllegrexContext &ctx) { kernel().guest_call_return_stub(ctx); }
 void native_starvation(Runtime &, AllegrexContext &ctx) { kernel().on_starvation(ctx); }
 
 const char *status_name(ThreadStatus status) {

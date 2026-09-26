@@ -109,7 +109,7 @@ std::uint64_t header_hash(const psprecomp::GuestMemory &memory, std::uint32_t ba
 
 // Slot containing `address`, or {0, 0}.
 std::pair<std::uint32_t, std::uint32_t> slot_of(std::uint32_t address) {
-    const std::span<const std::uint32_t> slots = game().overlay_slots;
+    const std::span<const std::uint32_t> slots = active_overlay_slots();
     for (std::size_t i = 0; i + 1u < slots.size(); ++i) {
         if (address >= slots[i] && address < slots[i + 1u])
             return {slots[i], slots[i + 1u]};
@@ -305,7 +305,10 @@ bool install_overlay_for(Runtime &runtime, std::uint32_t pc) {
     return false;
 }
 
-bool missing_function_hook(Runtime &runtime, AllegrexContext &, std::uint32_t pc) {
+CodeMissHook g_code_miss_hook = nullptr;
+
+bool missing_function_hook(Runtime &runtime, AllegrexContext &ctx, std::uint32_t pc) {
+    if (g_code_miss_hook != nullptr && g_code_miss_hook(runtime, ctx, pc)) return true;
     return install_overlay_for(runtime, pc);
 }
 
@@ -358,6 +361,7 @@ void revalidate_overlays(Runtime &runtime) {
 }
 
 void forget_unmatched_overlays() { unmatched_slots().clear(); }
+void set_code_miss_hook(CodeMissHook hook) { g_code_miss_hook = hook; }
 
 void install_overlay_support(Runtime &runtime) {
     (void)runtime;

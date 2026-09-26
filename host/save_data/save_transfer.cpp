@@ -1,8 +1,10 @@
 #include "../profile.hpp"
 #include "save_data/save_transfer.hpp"
+#include "crypto_keys.hpp"
 
 #include "save_data/param_sfo.hpp"
 #include "save_data/savedata_crypto.hpp"
+#include "save_data/savedata_store.hpp"
 
 #include <algorithm>
 #include <ctime>
@@ -240,6 +242,11 @@ SaveCheck check_save_folder(const fs::path &folder, const std::optional<Block> &
                         " does not know.";
         return check;
     }
+    if (!savedata_keys_available()) {
+        check.problem = "The save is encrypted, as a PSP writes it. Importing it needs the console's keys: add a "
+                        "keys file.";
+        return check;
+    }
     const auto params_offset = sfo->data_offset("SAVEDATA_PARAMS");
     if (!params_offset || !verify_param_sfo(*sfo_bytes, *params_offset)) {
         check.problem = "PARAM.SFO is damaged: its hashes do not match.";
@@ -385,6 +392,40 @@ ImportResult import_save(const SaveCheck &save, const fs::path &memory_stick, co
     return result;
 }
 
+namespace {
+
+// See export_saves(). False with no error when there is nothing to do.
+bool encrypt_plain_save(const fs::path &folder, const std::string &name, const fs::path &memory_stick,
+                        std::string &error) {
+    const std::optional<Block> key = game_key();
+    const std::string game = portablekit::game().save_game_name != nullptr ? portablekit::game().save_game_name : "";
+    if (!savedata_keys_available() || !key || game.empty() || !name.starts_with(game)) return false;
+    const auto sfo_bytes = read_file(folder / "PARAM.SFO");
+    const auto sfo = sfo_bytes ? ParamSfo::parse(*sfo_bytes) : std::nullopt;
+    if (!sfo) return false;
+    const auto *params = sfo->binary("SAVEDATA_PARAMS");
+    if (params == nullptr || params->size() <= kParamsFlagsOffset || (*params)[kParamsFlagsOffset] != 0u) return false;
+    // The data file: the one that is not the save's metadata.
+    std::string data_file;
+    std::error_code ec;
+    for (const auto &entry : fs::directory_iterator(folder, ec)) {
+        const std::string file = entry.path().filename().string();
+        if (file == "PARAM.SFO" || file == "ICON0.PNG" || file == "ICON1.PMF" || file == "PIC1.PNG" ||
+            file == "SND0.AT3" || !entry.is_regular_file())
+            continue;
+        if (!data_file.empty()) return false;  // more than one: not a save this can rewrite
+        data_file = file;
+    }
+    if (data_file.empty()) return false;
+    SaveFiles files{game, name.substr(game.size()), data_file, std::nullopt};
+    LoadResult loaded = load_save(memory_stick, files);
+    if (loaded.status != LoadStatus::Ok) return false;
+    files.key = key;
+    return write_save(memory_stick, files, loaded.contents, error);
+}
+
+} // namespace
+
 ExportResult export_saves(const fs::path &memory_stick, const fs::path &target,
                           std::chrono::system_clock::time_point time) {
     ExportResult result;
@@ -410,6 +451,12 @@ ExportResult export_saves(const fs::path &memory_stick, const fs::path &target,
             return result;
         }
         result.exported.push_back(name);
+        // A save kept unencrypted because there were no keys when the game
+        // wrote it: with keys now, and the game's key known, write the copy
+        // the way a PSP would, so it loads on one.
+        std::string encrypt_error;
+        if (encrypt_plain_save(savedata / name, name, result.folder, encrypt_error)) result.encrypted.push_back(name);
+        else if (!encrypt_error.empty()) result.error = encrypt_error;
     }
     result.ok = true;
     return result;

@@ -1,5 +1,7 @@
 #include "psprecomp/decoder.hpp"
 
+#include "psprecomp/extra_instructions.hpp"
+
 namespace psprecomp {
 
 bool DecodedInstruction::is_control_flow() const noexcept {
@@ -46,6 +48,11 @@ DecodedInstruction decode_allegrex(std::uint32_t word) {
     const std::uint32_t op = word >> 26u;
 
     if (word == 0u) { d.kind = OpcodeKind::Nop; d.mnemonic = "nop"; return d; }
+    if (const auto extra = extra_instruction_name(word); !extra.empty()) {
+        d.kind = OpcodeKind::Extra;
+        d.mnemonic = std::string(extra);
+        return d;
+    }
     switch (op) {
     case 0x00: {
         const std::uint32_t fn = word & 0x3Fu;
@@ -251,6 +258,11 @@ DecodedInstruction decode_allegrex(std::uint32_t word) {
         } else if (operation == 4u) {
             d.kind = OpcodeKind::Vhdp;
             d.mnemonic = "vhdp";
+        } else if (operation == 5u && (((word >> 7u) & 1u) | (((word >> 15u) & 1u) << 1u)) == 2u) {
+            // VCRS.T, the half of a cross product: (s.y*t.z, s.z*t.x, s.x*t.y).
+            // It exists only for triples.
+            d.kind = OpcodeKind::Vcrs;
+            d.mnemonic = "vcrs.t";
         } else {
             d.kind = OpcodeKind::Vfpu;
             d.mnemonic = "vfpu1";

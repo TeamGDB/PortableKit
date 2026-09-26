@@ -132,6 +132,7 @@ endif()
 # in the executable's import library for separately linked overlay modules.
 add_library(psprecomp_core OBJECT
     "${PORTABLEKIT_ROOT}/src/decoder.cpp"
+    "${PORTABLEKIT_ROOT}/src/extra_instructions.cpp"
     "${PORTABLEKIT_ROOT}/src/deflate.cpp"
     "${PORTABLEKIT_ROOT}/src/elf32.cpp"
     "${PORTABLEKIT_ROOT}/src/guest_memory.cpp"
@@ -195,6 +196,7 @@ if(PSPRECOMP_BUILD_TESTS)
         "${PORTABLEKIT_ROOT}/host/save_data/aes128.cpp"
         "${PORTABLEKIT_ROOT}/host/save_data/param_sfo.cpp"
         "${PORTABLEKIT_ROOT}/host/save_data/savedata_crypto.cpp"
+        "${PORTABLEKIT_ROOT}/host/crypto_keys_builtin.cpp"
         "${PORTABLEKIT_ROOT}/host/save_data/savedata_store.cpp"
         "${PORTABLEKIT_ROOT}/host/save_data/save_transfer.cpp"
         "${PORTABLEKIT_ROOT}/third_party/tiny_aes/aes.c")
@@ -245,6 +247,17 @@ if(PSPRECOMP_BUILD_TESTS)
     target_include_directories(portablekit_touch_tests PRIVATE "${PORTABLEKIT_ROOT}/host")
     set_target_properties(portablekit_touch_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
     add_test(NAME portablekit_touch_tests COMMAND portablekit_touch_tests)
+endif()
+
+# Editions of a game (ProfileVariant) against the stand-in profile.
+if(PSPRECOMP_BUILD_TESTS)
+    add_executable(portablekit_profile_tests
+        "${PORTABLEKIT_ROOT}/tests/profile_tests.cpp"
+        "${PORTABLEKIT_ROOT}/tests/test_profile.cpp"
+        "${PORTABLEKIT_ROOT}/host/profile.cpp")
+    target_include_directories(portablekit_profile_tests PRIVATE "${PORTABLEKIT_ROOT}/host" "${PORTABLEKIT_ROOT}/include")
+    set_target_properties(portablekit_profile_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME portablekit_profile_tests COMMAND portablekit_profile_tests)
 endif()
 
 # Texture pack import: finding a pack in the layouts packs come in, the
@@ -329,6 +342,7 @@ if(PSPRECOMP_BUILD_TESTS)
         "${PORTABLEKIT_ROOT}/host/main.cpp"
         "${PORTABLEKIT_ROOT}/host/generated_stub.cpp"
         "${PORTABLEKIT_ROOT}/tests/test_profile.cpp"
+        "${PORTABLEKIT_ROOT}/host/crypto_keys_builtin.cpp"
         "${_check_nids}")
     foreach(_source IN LISTS PORTABLEKIT_HOST_SOURCES)
         list(APPEND _check_sources "${PORTABLEKIT_ROOT}/${_source}")
