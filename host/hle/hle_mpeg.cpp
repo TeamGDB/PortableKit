@@ -573,6 +573,35 @@ void register_decoding(HleRegistrar &hle) {
         if (arg(ctx, 3) != 0u) memory.store32(arg(ctx, 3), produced ? 1u : 0u);
         finish_traced(ctx, "sceMpegAvcDecodeYCbCr", 0u, produced ? "picture " + std::to_string(state->pictures) : "none");
     });
+    // sceMpegAvcCsc(mpeg, ycbcr, range, frameWidth, dest): a picture from
+    // sceMpegAvcDecodeYCbCr's buffer into pixels in the format
+    // sceMpegAvcDecodeMode set, `frameWidth` pixels a row. `range` is
+    // {x, y, width, height}; Patapon (UCES00995) converts its intro movie
+    // with it, the whole picture each frame.
+    hle.add("sceMpeg", "sceMpegAvcCsc", [](Runtime &rt, AllegrexContext &ctx) {
+        MpegState *state = find_mpeg(arg(ctx, 0));
+        auto &memory = rt.memory();
+        const std::uint32_t range = arg(ctx, 2);
+        const std::uint32_t stride = arg(ctx, 3);
+        const std::uint32_t dest = ctx.gpr[8];  // t0
+        const auto found = module().ycbcr.find(arg(ctx, 1));
+        if (state == nullptr || found == module().ycbcr.end() || range == 0u || stride == 0u) {
+            finish_traced(ctx, "sceMpegAvcCsc", state == nullptr ? mpeg_error::kInvalidValue : 0u, "no picture", 5u);
+            return;
+        }
+        const std::uint32_t x = memory.load32(range), y = memory.load32(range + 4u);
+        const std::uint32_t width = memory.load32(range + 8u), height = memory.load32(range + 12u);
+        movie::Picture picture = found->second;
+        if (x != 0u || y != 0u || width < picture.width || height < picture.height)
+            log_once("mpeg-csc-range", "[mpeg] sceMpegAvcCsc converts part of a picture: x=" + std::to_string(x) +
+                                           " y=" + std::to_string(y) + " " + std::to_string(width) + "x" +
+                                           std::to_string(height) + " (UNVERIFIED: converting all of it)");
+        store_pixels(memory, dest, stride, state->pixel_mode, picture);
+        finish_traced(ctx, "sceMpegAvcCsc", 0u,
+                      std::to_string(x) + "," + std::to_string(y) + " " + std::to_string(width) + "x" +
+                          std::to_string(height),
+                      5u);
+    });
     // sceMpegAvcDecodeStopYCbCr(mpeg, bufferPointer, outStatus): pictures
     // the decoder still holds at the end of the stream.
     hle.add("sceMpeg", "sceMpegAvcDecodeStopYCbCr", [](Runtime &rt, AllegrexContext &ctx) {

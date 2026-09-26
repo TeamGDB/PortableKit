@@ -188,6 +188,7 @@ sceMpeg,0xF2930C9C,sceMpegAvcDecodeStopYCbCr
 sceMpeg,0xF5E7EA31,sceMpegAvcConvertToYuv420
 sceMpeg,0xF8DCB679,sceMpegQueryAtracEsSize
 sceMpeg,0xFE246728,sceMpegGetAvcAu
+sceMpeg,0x31BD0272,sceMpegAvcCsc
 sceNet,0x0BF0A3AE,sceNetGetLocalEtherAddr
 sceNet,0x281928A9,sceNetTerm
 sceNet,0x39AF39A6,sceNetInit
