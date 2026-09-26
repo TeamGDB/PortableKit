@@ -44,13 +44,15 @@ public:
     bool try_add(std::string_view library, std::string_view name, HleFunction function);
     // Binds `function` by NID, replacing whatever was bound to it before.
     void bind(const std::string &library, std::uint32_t nid, HleFunction function);
+    // What is bound to the function now; empty when nothing is.
+    [[nodiscard]] HleFunction bound_function(const std::string &library, std::uint32_t nid) const;
     [[nodiscard]] bool bound(const std::string &library, std::uint32_t nid) const;
     [[nodiscard]] std::size_t count() const noexcept { return bound_.size(); }
 
 private:
     Runtime &runtime_;
     std::map<std::pair<std::string, std::string>, std::uint32_t> nids_by_name_;
-    std::set<std::pair<std::string, std::uint32_t>> bound_;
+    std::map<std::pair<std::string, std::uint32_t>, HleFunction> bound_;
 };
 
 // Reads from an open guest file descriptor without moving its position.

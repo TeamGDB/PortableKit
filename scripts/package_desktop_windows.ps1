@@ -7,7 +7,7 @@ and a zip archive, with the trimmed llvm-mingw toolchain it compiles games with.
   package_desktop_windows.ps1 -BuildDir <build> -Toolchain <llvm-mingw>
       [-Output <folder>] [-Version <version>] [-Packaging <folder>]
       [-License NAME=FILE,...] [-Notices FILE,...] [-Extra PATH,...]
-      [-Sdl3License FILE] [-NoZip]
+      [-Sdl3License FILE] [-TopLicense FILE] [-NoZip]
 
 BuildDir is a build of apps/portablekit made with that llvm-mingw toolchain,
 configured with -DPORTABLEKIT_RELEASE=ON (see docs/RELEASING.md, "The desktop
@@ -26,7 +26,9 @@ Packaging (default apps\portablekit\packaging) holds THIRD_PARTY_NOTICES.md
 and windows\README.txt; a downstream build may point it at its own copy.
 -License, -Notices and -Extra add what such a build brings: a licence as
 licenses\NAME-LICENSE.txt, a notices file in licenses\, and files or folders
-at the top of the package.
+at the top of the package. -TopLicense replaces the LICENSE.txt at the top of
+the package (PortableKit's by default), for a build whose combined licence is
+another; PortableKit's own is in licenses\ either way.
 
 Before packing it checks that the package holds no game data and no path of
 this machine in the program's own files, and that the packed program starts
@@ -42,6 +44,7 @@ param(
     [string[]]$Notices = @(),
     [string[]]$Extra = @(),
     [string]$Sdl3License = "",
+    [string]$TopLicense = "",
     [switch]$NoZip
 )
 $ErrorActionPreference = 'Stop'
@@ -126,6 +129,8 @@ foreach ($entry in $License) {
 }
 foreach ($file in $Notices) { if (-not (Test-Path $file)) { Fail "-Notices $file`: no such file" } }
 foreach ($path in $Extra) { if (-not (Test-Path $path)) { Fail "-Extra $path`: no such file or folder" } }
+if ($TopLicense -eq "") { $TopLicense = Join-Path $kitDir 'LICENSE' }
+if (-not (Test-Path -PathType Leaf $TopLicense)) { Fail "-TopLicense $TopLicense`: no such file" }
 
 # The notices must name what is bundled.
 $ffmpegCmake = Get-Content (Join-Path $kitDir 'cmake\FFmpeg.cmake') -Raw
@@ -188,7 +193,7 @@ if (-not (Get-ChildItem -Recurse -File (Join-Path $tool 'lib\clang') -Filter 'li
 Copy-Item -Recurse (Join-Path $Toolchain 'x86_64-w64-mingw32') (Join-Path $tool 'x86_64-w64-mingw32')
 
 Copy-Item $readme (Join-Path $stage 'README.txt')
-Copy-Item (Join-Path $kitDir 'LICENSE') (Join-Path $stage 'LICENSE.txt')
+Copy-Item $TopLicense (Join-Path $stage 'LICENSE.txt')
 $licenses = Join-Path $stage 'licenses'
 New-Item -ItemType Directory $licenses | Out-Null
 Copy-Item $notices $licenses
