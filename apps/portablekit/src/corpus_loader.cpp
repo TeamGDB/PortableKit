@@ -169,8 +169,18 @@ void refresh_line() {
 // Every few thousand dispatches, at a dispatch boundary: no generated code is
 // on the stack and ctx.pc is the next address to run, so registering a corpus
 // here makes the very next dispatch use it.
+std::atomic<bool> g_stop_requested{false};
+bool g_watching = false;
+
 void heartbeat(std::uint64_t, std::uint32_t) {
     LoaderState &s = state();
+    // A bounded run (--seconds) ends here, at a dispatch boundary, so the
+    // port reports its threads and the interpreter's profile as it stops.
+    if (g_stop_requested.load(std::memory_order_relaxed) && s.runtime != nullptr) {
+        s.runtime->stop("run time limit reached (--seconds)");
+        return;
+    }
+    if (!g_watching) return;
     // Opening a library of hundreds of megabytes takes seconds (measured: a
     // 4.4 s frame when it was done here), so the watcher thread opens it and
     // this only registers it.
@@ -247,6 +257,8 @@ void overlay_draw() {
 
 } // namespace
 
+void request_stop() { g_stop_requested = true; }
+
 void prepare_corpus_loading(const GameRecord &game, const CorpusChoice &choice) {
     state().game = game;
     state().choice = choice;
@@ -271,6 +283,10 @@ void register_generated_functions(CorpusRuntime &corpus) {
     auto &runtime = static_cast<Runtime &>(corpus);
     LoaderState &s = state();
     s.runtime = &runtime;
+    // Checked every few thousand dispatches, which is many times a second
+    // whether the interpreter or compiled code runs; heartbeat() itself looks
+    // at the cache at most once a second.
+    set_runtime_heartbeat_hook(&heartbeat, 4096u);
     if (!s.game || s.choice.interpreter_only) {
         std::cout << "[corpus] not loading compiled code; the game runs under the interpreter\n";
         return;
@@ -278,12 +294,9 @@ void register_generated_functions(CorpusRuntime &corpus) {
     if (const auto corpus = ready_corpus(*s.game)) (void)load(runtime, *corpus);
     if (!s.choice.watch || s.loaded.opt_level >= corpus_levels().front()) return;
     g_opened_level = s.loaded.opt_level;
+    g_watching = true;
     refresh_line();
     std::thread(&watch).detach();
-    // Checked every few thousand dispatches, which is many times a second
-    // whether the interpreter or compiled code runs; heartbeat() itself looks
-    // at the cache at most once a second.
-    set_runtime_heartbeat_hook(&heartbeat, 4096u);
 #if defined(PORTABLEKIT_HAS_RENDERER)
     portablekit::ui::set_status_overlay(&overlay_visible, &overlay_draw);
 #endif

@@ -386,12 +386,17 @@ int command_run(const GameRecord &game, const Arguments &args, char **argv) {
     prepare_corpus_loading(game, choice);
     std::cout << "[portablekit] " << game.title << " (" << game.id << "), profile " << profile << "\n";
     if (args.has("seconds")) {
-        // A bounded run, for tests: the port's own switch stops the runtime
-        // after this many dispatches is not time-based, so stop the process.
+        // A bounded run, for tests: the game is stopped at a dispatch
+        // boundary after this long, and the port reports its threads.
         const int seconds = std::atoi(args.get("seconds").c_str());
         std::thread([seconds] {
             std::this_thread::sleep_for(std::chrono::seconds(seconds));
             std::cout << "[portablekit] --seconds " << seconds << " reached; stopping" << std::endl;
+            request_stop();
+            // Should the game not reach a dispatch boundary (a hang in host
+            // code), leave anyway a little later.
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            std::cout << "[portablekit] the game did not stop; leaving" << std::endl;
             save_interpreter_profile(*find_game(std::getenv("PORTABLEKIT_RUN_GAME")));
             std::_Exit(0);
         }).detach();

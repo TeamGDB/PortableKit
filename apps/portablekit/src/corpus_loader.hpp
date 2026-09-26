@@ -26,6 +26,10 @@ struct LoadedCorpus {
 };
 [[nodiscard]] LoadedCorpus loaded_corpus();
 
+// Stops the running game at the next dispatch boundary, the way the game's
+// own end would: the port then reports its threads before returning.
+void request_stop();
+
 // A line for the status overlay and the log, e.g. "Compiling 45% - running
 // under the interpreter".
 [[nodiscard]] std::string corpus_status_line();
