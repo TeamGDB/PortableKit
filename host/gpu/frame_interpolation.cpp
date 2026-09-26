@@ -22,6 +22,7 @@ DrawSummary summarize(const DrawCall &call) {
     draw.primitive = call.primitive;
     draw.target = call.target.color_address;
     draw.perspective = !call.through && !call.clear_mode && !is_orthographic(call.projection);
+    draw.transformed = !call.through && !call.clear_mode;
     // Vertex type bits 9..10 give the weight format; ge_state.cpp's
     // decode_vertices skins exactly the transformed vertices that have one.
     draw.skinned = ((call.vertex_type >> 9u) & 3u) != 0u && !call.through;
@@ -34,8 +35,9 @@ DrawSummary summarize(const DrawCall &call) {
     return draw;
 }
 
-void mark_eligible(std::vector<DrawSummary> &draws, std::uint32_t displayed) noexcept {
-    for (DrawSummary &draw : draws) draw.eligible = draw.perspective && draw.target == displayed;
+void mark_eligible(std::vector<DrawSummary> &draws, std::uint32_t displayed, bool orthographic) noexcept {
+    for (DrawSummary &draw : draws)
+        draw.eligible = (draw.perspective || (orthographic && draw.transformed)) && draw.target == displayed;
 }
 
 bool is_orthographic(const Matrix &projection) noexcept {

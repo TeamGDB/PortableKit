@@ -6563,7 +6563,7 @@ void VulkanRenderer::Impl::finish_interpolated_frame(VkImage source, std::uint32
     const perf::SplitScope split(perf::Split::Interp);
     FrameRecord &frame = recording_frame;
     frame.recorded = frame.recorded && interpolating;
-    interpolation::mark_eligible(frame.summaries, displayed);
+    interpolation::mark_eligible(frame.summaries, displayed, cut_thresholds.orthographic);
     frame.displayed = displayed;
     frame.moment_us = moment_us;
     frame.valid = true;
