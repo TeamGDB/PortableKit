@@ -102,6 +102,14 @@ struct AtracContext {
     std::uint32_t written{};              // bytes of the file delivered, from its start
     std::uint32_t stored_from{};          // file offset of stored[0]
     std::vector<std::uint8_t> stored;
+
+    // The codec sceAtracGetAtracID was asked for (0x1000 ATRAC3plus, 0x1001
+    // ATRAC3), and, once sceAtracLowLevelInitDecoder has run, the frames the
+    // game feeds the decoder itself: their size and the channels it wants.
+    std::uint32_t codec_type{0x1000u};
+    bool low_level{};
+    std::uint32_t low_level_frame_bytes{};
+    std::uint32_t low_level_out_channels{2u};
 };
 
 std::array<std::unique_ptr<AtracContext>, kMaxAtracIds> &contexts() {
@@ -423,6 +431,7 @@ void register_atrac_functions(HleRegistrar &hle) {
             return;
         }
         *slot = std::make_unique<AtracContext>();
+        (*slot)->codec_type = arg(ctx, 0);
         finish_traced(ctx, "sceAtracGetAtracID", static_cast<std::uint32_t>(slot - table.begin()));
     });
     // sceAtracSetData(id, buffer, bufferSize): SetDataAndGetID for an id
@@ -435,6 +444,84 @@ void register_atrac_functions(HleRegistrar &hle) {
         }
         const auto loaded = load_track(rt.memory(), id, arg(ctx, 1), arg(ctx, 2), arg(ctx, 2), false);
         finish_traced(ctx, "sceAtracSetData", loaded.result == id ? 0u : loaded.result, loaded.details);
+    });
+    // sceAtracLowLevelInitDecoder(id, params): the game will hand the decoder
+    // raw frames itself (sceAtracLowLevelDecode), with no file around them.
+    // params is three words: the stream's channels, the channels it wants
+    // out, and the bytes of one frame.
+    hle.try_add("sceAtrac3plus", "sceAtracLowLevelInitDecoder", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t id = arg(ctx, 0);
+        if (!id_in_use(id)) {
+            finish_traced(ctx, "sceAtracLowLevelInitDecoder", context_error(id));
+            return;
+        }
+        AtracContext &context = *contexts()[id];
+        const auto &memory = rt.memory();
+        const std::uint32_t params = arg(ctx, 1);
+        if (!memory.contains(params, 12u)) {
+            finish_traced(ctx, "sceAtracLowLevelInitDecoder", atrac_error::kBadCodecParam);
+            return;
+        }
+        const std::uint32_t channels = memory.load32(params);
+        const std::uint32_t out_channels = memory.load32(params + 4u);
+        const std::uint32_t frame_bytes = memory.load32(params + 8u);
+        const bool atrac3 = context.codec_type == 0x1001u;
+        std::vector<std::uint8_t> extradata;
+        if (atrac3) {
+            // What a WAVE file's fmt chunk would carry for ATRAC3: 1, the
+            // samples per channel of a frame (32 bits), the coding mode and
+            // its copy, a frame factor of 1, and 0. Joint stereo only for the
+            // smallest stereo frames (192 bytes): Tenkawa's 304-byte stereo
+            // frames fail to decode as joint stereo and decode as plain.
+            const auto joint = static_cast<std::uint8_t>(channels == 2u && frame_bytes <= 0xC0u ? 1u : 0u);
+            extradata = {1, 0, 0x00, 0x04, 0, 0, joint, 0, joint, 0, 1, 0, 0, 0};
+        }
+        const bool opened = context.decoder.open(atrac3 ? audio::AtracCodec::Atrac3 : audio::AtracCodec::Atrac3Plus,
+                                                 channels, frame_bytes, extradata);
+        context.low_level = opened;
+        context.low_level_frame_bytes = frame_bytes;
+        context.low_level_out_channels = out_channels == 1u ? 1u : 2u;
+        std::ostringstream details;
+        details << (atrac3 ? "ATRAC3" : "ATRAC3plus") << " channels=" << channels << " out=" << out_channels
+                << " frame=" << frame_bytes << (opened ? "" : " (the decoder refused it)");
+        finish_traced(ctx, "sceAtracLowLevelInitDecoder", opened ? 0u : atrac_error::kBadCodecParam, details.str());
+    });
+    // sceAtracLowLevelDecode(id, source, sourceBytesConsumed, samples,
+    // sampleBytesWritten): one frame from source, decoded into samples.
+    hle.try_add("sceAtrac3plus", "sceAtracLowLevelDecode", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t id = arg(ctx, 0);
+        if (!id_in_use(id) || !contexts()[id]->low_level) {
+            finish_traced(ctx, "sceAtracLowLevelDecode", id_in_use(id) ? atrac_error::kBadCodecParam : context_error(id));
+            return;
+        }
+        AtracContext &context = *contexts()[id];
+        auto &memory = rt.memory();
+        const std::uint32_t source = arg(ctx, 1);
+        const std::uint32_t consumed = arg(ctx, 2);
+        const std::uint32_t samples = arg(ctx, 3);
+        const std::uint32_t written = arg(ctx, 4);
+        const std::uint32_t bytes = context.low_level_frame_bytes;
+        const std::uint8_t *frame = memory.raw_pointer(source, bytes);
+        std::vector<std::int16_t> decoded(audio::atrac_frame_samples(context.decoder.codec()) * 2u);
+        const std::size_t count =
+            frame != nullptr ? context.decoder.decode(std::span<const std::uint8_t>(frame, bytes), decoded.data()) : 0u;
+        const std::uint32_t out_channels = context.low_level_out_channels;
+        const std::uint32_t out_bytes = static_cast<std::uint32_t>(count) * out_channels * 2u;
+        if (count != 0u && memory.contains(samples, out_bytes)) {
+            for (std::size_t i = 0; i < count; ++i) {
+                if (out_channels == 1u) {
+                    const auto mono = static_cast<std::int16_t>((decoded[i * 2u] + decoded[i * 2u + 1u]) / 2);
+                    memory.store16(samples + static_cast<std::uint32_t>(i) * 2u, static_cast<std::uint16_t>(mono));
+                } else {
+                    memory.store16(samples + static_cast<std::uint32_t>(i) * 4u, static_cast<std::uint16_t>(decoded[i * 2u]));
+                    memory.store16(samples + static_cast<std::uint32_t>(i) * 4u + 2u,
+                                   static_cast<std::uint16_t>(decoded[i * 2u + 1u]));
+                }
+            }
+        }
+        if (consumed != 0u && memory.contains(consumed, 4u)) memory.store32(consumed, bytes);
+        if (written != 0u && memory.contains(written, 4u)) memory.store32(written, out_bytes);
+        finish_traced(ctx, "sceAtracLowLevelDecode", 0u, count == 0u ? "nothing decoded" : "");
     });
     // sceAtracReinit(at3plusIds, at3Ids): how many ids each codec may use.
     // Every id here decodes either, so there is nothing to divide.

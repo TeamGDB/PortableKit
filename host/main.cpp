@@ -312,6 +312,9 @@ int run_adhoc_server(int argc, char **argv) {
 
 } // namespace
 
+// A program that wraps the port (the desktop app in apps/portablekit) compiles
+// this file with PORTABLEKIT_HOST_MAIN_NAME set, so it can choose the game and
+// prepare its files before this runs it.
 #if defined(PORTABLEKIT_ANDROID_APP)
 // android_app.cpp owns the entry point SDL calls and runs this on a thread
 // with the stack the game needs; restarting the process to get one is not an

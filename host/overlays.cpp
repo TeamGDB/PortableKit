@@ -363,6 +363,7 @@ void revalidate_overlays(Runtime &runtime) {
 void set_code_miss_hook(CodeMissHook hook) { g_code_miss_hook = hook; }
 
 void forget_unmatched_overlays() { unmatched_slots().clear(); }
+void set_code_miss_hook(CodeMissHook hook) { g_code_miss_hook = hook; }
 
 void install_overlay_support(Runtime &runtime) {
     (void)runtime;

@@ -885,8 +885,15 @@ void Kernel::on_vblank() {
     ++vblank_count_;
     for (auto &[uid, thread] : threads_) {
         (void)uid;
-        if (thread->status == ThreadStatus::Waiting && thread->wait.type == WaitType::VBlank)
+        if (thread->status == ThreadStatus::Waiting && thread->wait.type == WaitType::VBlank) {
+            // A wait for several vblanks (sceDisplayWaitVblankStartMultiCB)
+            // counts them down in its object; every other wait has 0 or 1.
+            if (thread->wait.object > 1) {
+                --thread->wait.object;
+                continue;
+            }
             wake(*thread, thread->context.gpr[2]);
+        }
     }
     const auto handlers = sub_interrupts.find(kVBlankInterrupt);
     if (handlers == sub_interrupts.end()) return;
