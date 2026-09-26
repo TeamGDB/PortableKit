@@ -15,6 +15,8 @@ In its own repository:
 | `packaging/icon.png` (256×256), `packaging/linux/README.txt`, `packaging/linux/<app id>.desktop`, `packaging/linux/<app id>.metainfo.xml` | The Linux icon, read-me, desktop entry and AppStream data (`@VERSION@`, `@DATE@` are filled in) |
 | `packaging/android/res/` | For Android, the name and launcher icons; see `packaging/android/README.md` |
 
+`release.env` may also set, for a program with more than one executable file: `RELEASE_EXTRA_EXECUTABLES` (programs of the build's `bin/` to put beside the executable), `RELEASE_RESOURCES` (folders of `bin/` to ship in `Contents/Resources`, as `<from>=<to>`) and `RELEASE_PROFILE_DIR` (where the profile is in the checkout, `.` by default). The desktop app uses all three.
+
 ## macOS
 
 On an Apple Silicon Mac with the macOS 13 SDK installed (the deployment target in `packaging/sources.sh`):
@@ -26,6 +28,34 @@ cmake --build out-release --target <RELEASE_TARGET>
 ```
 
 It builds SDL3 and the Vulkan loader from pinned sources for the deployment target, takes MoltenVK's pinned release, assembles `<Name>.app`, links everything inside the bundle, checks the system imports against the macOS 13 SDK, signs ad hoc (no notarization) and packs a disk image into `out/release-macos/dist`, with the FFmpeg source archive and `SHA256SUMS`.
+
+`--packaging DIR` reads `release.env`, the notices and `macos/` from another directory than `<game>/packaging`. `--license NAME=FILE`, `--notices FILE` and `--extra PATH` (each repeatable) add what a build brings beyond the game and the framework: a licence as `licenses/NAME-LICENSE.txt`, a notices file in `licenses/`, and files or folders beside the app in the disk image and the zip.
+
+## The desktop app
+
+The desktop app (`apps/portablekit`, see [DESKTOP_APP.md](DESKTOP_APP.md)) is packed by the same macOS script and by a Windows script of its own. Its release description is `apps/portablekit/packaging`: `release.env`, `THIRD_PARTY_NOTICES.md` for both systems, and a read-me for each.
+
+On macOS:
+
+```sh
+cmake -S apps/portablekit -B out-app-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DPORTABLEKIT_RELEASE=ON
+cmake --build out-app-release
+scripts/release_macos.sh --game . --packaging apps/portablekit/packaging out-app-release
+```
+
+`PortableKit.app` then holds the program, the recompiler beside it in `Contents/MacOS`, and the headers the generated code includes in `Contents/Resources/include`, which is where the program looks for them inside a bundle.
+
+On Windows, with a build of the app made with llvm-mingw (see [DESKTOP_APP.md](DESKTOP_APP.md#windows-ship-an-llvm-toolchain-done)) and configured with `-DPORTABLEKIT_RELEASE=ON`:
+
+```powershell
+scripts\package_desktop_windows.ps1 -BuildDir C:\path\to\build -Toolchain C:\path\to\llvm-mingw
+```
+
+It assembles the portable folder -- the program, the recompiler, their DLLs, the headers, an empty `data\` and the part of llvm-mingw that compiling a game for x86_64 needs, in `toolchain\` -- checks it for game data and for paths of the build machine, starts the packed program to check that it runs and finds its toolchain, and packs `portablekit-<version>-windows-x64.zip` with `SHA256SUMS` and `BUILDINFO.txt` into `out\package-windows\dist`. `-License NAME=FILE`, `-Notices FILE` and `-Extra PATH` work as on macOS, and `-Packaging DIR` names another release description.
+
+### A build with other components
+
+A build that links more than PortableKit's own code, such as [HLE extension modules](HLE_EXTENSIONS.md), is packed with the same scripts: set `PORTABLEKIT_BUILD_LABEL` so it is recognisable (window title, library header, `portablekit --version`), pass each component's licence with `--license`/`-License`, and point `--packaging`/`-Packaging` at a copy of `apps/portablekit/packaging` whose notices list the components. Such a build is distributed under the terms its combination of licences requires.
 
 ## Linux
 
