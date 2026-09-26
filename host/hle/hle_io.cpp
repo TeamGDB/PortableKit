@@ -436,7 +436,69 @@ std::uint32_t collect_async(Runtime &rt, std::uint32_t fd, std::uint32_t result_
     return 0u;
 }
 
+// sceIoIoctl(fd, command, in, in size, out, out size). What a disc file
+// answers, as the games that ask use it (traced with <prefix>_TRACE_IO):
+//   0x01020006  its first sector on the disc (4 bytes out). Patapon asks it
+//               of each archive it opens, before it seeks and reads.
+//   0x01020007  its size in bytes (4 bytes out).
+//   0x01010005  seek: 16 bytes in, a 64-bit byte offset and a 32-bit whence
+//               (0 from the start, 1 from here, 2 from the end). Patapon
+//               seeks its archives so, all from the start, then reads.
+// Anything else is logged once and answered 0, as before.
+std::uint32_t ioctl_op(Runtime &rt, AllegrexContext &ctx) {
+    const std::uint32_t fd = arg(ctx, 0);
+    const std::uint32_t command = arg(ctx, 1);
+    const std::uint32_t input = arg(ctx, 2);
+    const std::uint32_t input_size = arg(ctx, 3);
+    const std::uint32_t output = ctx.gpr[8];        // t0
+    const std::uint32_t output_size = ctx.gpr[9];   // t1
+    auto &memory = rt.memory();
+    const auto found = io().files.find(fd);
+    if (found == io().files.end()) return io_error::kBadFileDescriptor;
+    const OpenFile &file = found->second;
+    if (file.kind == OpenFile::Kind::Disc && command == 0x01010005u && input != 0u && input_size >= 12u) {
+        const auto offset = static_cast<std::int64_t>(static_cast<std::uint64_t>(memory.load32(input)) |
+                                                      (static_cast<std::uint64_t>(memory.load32(input + 4u)) << 32u));
+        const std::int64_t position = lseek_op(fd, offset, memory.load32(input + 8u));
+        return position < 0 ? static_cast<std::uint32_t>(position) : 0u;
+    }
+    if (file.kind == OpenFile::Kind::Disc && !file.sector_units && output != 0u && output_size >= 4u) {
+        if (command == 0x01020006u) {
+            const auto sector = static_cast<std::uint32_t>(file.disc_offset / IsoImage::kSectorSize);
+            memory.store32(output, sector);
+            if (trace_io()) std::cerr << "[io] ioctl " << file.path << " first sector -> " << sector << "\n";
+            return 0u;
+        }
+        if (command == 0x01020007u) {
+            memory.store32(output, static_cast<std::uint32_t>(file.size));
+            if (trace_io()) std::cerr << "[io] ioctl " << file.path << " size -> " << file.size << "\n";
+            return 0u;
+        }
+    }
+    std::string description = "[io] ioctl fd=" + std::to_string(fd) + " " + file.path + " cmd=" +
+                               psprecomp::hex32(command) + " in=" + std::to_string(input_size) + " bytes";
+    if (input != 0u && input_size != 0u && input_size <= 64u) {
+        description += ":";
+        for (std::uint32_t i = 0; i < input_size; ++i)
+            description += " " + psprecomp::hex32(memory.load8(input + i)).substr(8u);
+    }
+    description += " out=" + psprecomp::hex32(output) + "/" + std::to_string(output_size);
+    log_once("ioctl-" + psprecomp::hex32(command), description + " (unhandled, returning 0)");
+    return 0u;
+}
+
 void register_async_io(HleRegistrar &hle) {
+    hle.add("IoFileMgrForUser", "sceIoIoctlAsync", [](Runtime &rt, AllegrexContext &ctx) {
+        std::uint32_t error = 0u;
+        OpenFile *file = async_handle(arg(ctx, 0), error);
+        if (file == nullptr) {
+            kernel().finish(ctx, error);
+            return;
+        }
+        const std::uint32_t result = ioctl_op(rt, ctx);
+        complete_async(*file, static_cast<std::int32_t>(result));
+        kernel().finish(ctx, 0u);
+    });
     // sceIoOpenAsync(path, flags, mode): a handle at once; the open's own
     // result (the handle, or an error) when the game collects it.
     hle.add("IoFileMgrForUser", "sceIoOpenAsync", [](Runtime &rt, AllegrexContext &ctx) {
@@ -691,22 +753,7 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
     // guessed at: every call is reported once with the buffer the game filled
     // in, which is how the command should be worked out.
     hle.add("IoFileMgrForUser", "sceIoIoctl", [](Runtime &rt, AllegrexContext &ctx) {
-        const std::uint32_t fd = arg(ctx, 0);
-        const std::uint32_t command = arg(ctx, 1);
-        const std::uint32_t input = arg(ctx, 2);
-        const std::uint32_t input_size = arg(ctx, 3);
-        const auto found = io().files.find(fd);
-        std::string description = "[io] ioctl fd=" + std::to_string(fd) + " " +
-                                  (found != io().files.end() ? found->second.path : std::string("?")) +
-                                  " cmd=" + psprecomp::hex32(command) + " in=" + std::to_string(input_size) +
-                                  " bytes";
-        if (input != 0u && input_size != 0u && input_size <= 64u) {
-            description += ":";
-            for (std::uint32_t i = 0; i < input_size; ++i)
-                description += " " + psprecomp::hex32(rt.memory().load8(input + i)).substr(8u);
-        }
-        log_once("ioctl-" + psprecomp::hex32(command), description + " (unhandled, returning 0)");
-        kernel().finish(ctx, 0u);
+        kernel().finish(ctx, ioctl_op(rt, ctx));
     });
 
     hle.add("IoFileMgrForUser", "sceIoDevctl", [](Runtime &rt, AllegrexContext &ctx) {
