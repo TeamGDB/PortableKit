@@ -172,7 +172,11 @@ function(portablekit_add_game target)
         find_package(SDL3 QUIET)
         find_package(Vulkan QUIET)
         find_program(PORTABLEKIT_GLSLANG NAMES glslangValidator glslang)
-        if(SDL3_FOUND AND Vulkan_FOUND AND PORTABLEKIT_GLSLANG)
+        # The interpreter by what CMake finds rather than by the name python3:
+        # a Windows install from python.org has no python3.exe, and the name
+        # then reaches the Microsoft Store's placeholder instead.
+        find_package(Python3 COMPONENTS Interpreter QUIET)
+        if(SDL3_FOUND AND Vulkan_FOUND AND PORTABLEKIT_GLSLANG AND Python3_Interpreter_FOUND)
             set(shader_inc "${CMAKE_CURRENT_BINARY_DIR}/generated_shaders/ge_shaders.inc")
             set(shaders
                 "kGeVertexShader=${PORTABLEKIT_ROOT}/host/gpu/shaders/ge.vert"
@@ -191,7 +195,7 @@ function(portablekit_add_game target)
             add_custom_command(
                 OUTPUT "${shader_inc}"
                 COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/generated_shaders"
-                COMMAND python3 "${PORTABLEKIT_ROOT}/tools/embed_shaders.py" "${PORTABLEKIT_GLSLANG}" "${shader_inc}"
+                COMMAND "${Python3_EXECUTABLE}" "${PORTABLEKIT_ROOT}/tools/embed_shaders.py" "${PORTABLEKIT_GLSLANG}" "${shader_inc}"
                         ${shaders}
                 DEPENDS ${shader_sources}
                         "${PORTABLEKIT_ROOT}/tools/embed_shaders.py"
@@ -200,7 +204,7 @@ function(portablekit_add_game target)
             _portablekit_prefix(renderer_sources "${PORTABLEKIT_ROOT}" ${PORTABLEKIT_RENDERER_SOURCES})
             message(STATUS "${target}: Vulkan renderer enabled")
         else()
-            message(STATUS "${target}: renderer disabled (SDL3, Vulkan or glslang not found)")
+            message(STATUS "${target}: renderer disabled (SDL3, Vulkan, glslang or Python 3 not found)")
             set(PORTABLEKIT_RENDERER OFF)
         endif()
     endif()
