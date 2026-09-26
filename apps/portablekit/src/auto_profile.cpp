@@ -65,11 +65,36 @@ std::vector<HandProfile> hand_profiles() {
 
 const HandProfile *hand_profile_for(const std::string &executable_sha256) {
     static const std::vector<HandProfile> profiles = hand_profiles();
-    for (const HandProfile &profile : profiles)
-        if (profile.get().executable_sha256 != nullptr && executable_sha256 == profile.get().executable_sha256)
-            return &profile;
+    for (const HandProfile &profile : profiles) {
+        const GameProfile &game = profile.get();
+        if (game.executable_sha256 != nullptr && executable_sha256 == game.executable_sha256) return &profile;
+        for (const ProfileVariant &variant : game.variants)
+            if (variant.executable_sha256 != nullptr && executable_sha256 == variant.executable_sha256)
+                return &profile;
+    }
     return nullptr;
 }
+
+namespace {
+// A hand profile's edition, applied to the app's copy of the profile: the app
+// runs its own corpus for whichever edition it is, so to the framework the
+// edition is simply the profile's own executable.
+std::string apply_edition(GameProfile &profile, const std::string &executable_sha256) {
+    for (const ProfileVariant &variant : profile.variants) {
+        if (variant.executable_sha256 == nullptr || executable_sha256 != variant.executable_sha256) continue;
+        profile.executable_sha256 = variant.executable_sha256;
+        if (variant.encrypted_executable_sha256 != nullptr)
+            profile.encrypted_executable_sha256 = variant.encrypted_executable_sha256;
+        if (variant.register_extra_hle != nullptr) profile.register_extra_hle = variant.register_extra_hle;
+        if (variant.patch_loaded_image != nullptr) profile.patch_loaded_image = variant.patch_loaded_image;
+        if (!variant.overlay_slots.empty()) profile.overlay_slots = variant.overlay_slots;
+        profile.variants = {};
+        return variant.name;
+    }
+    profile.variants = {};
+    return {};
+}
+} // namespace
 
 void activate_launcher_profile() {
     GameProfile &profile = active();
@@ -102,11 +127,12 @@ std::string activate_game_profile(const GameRecord &record) {
     GameProfile &profile = active();
     if (const HandProfile *hand = hand_profile_for(record.executable_sha256)) {
         profile = hand->get();
+        const std::string edition = apply_edition(profile, record.executable_sha256);
         apply_app_identity(profile);
         profile.data_application = text.data_application.c_str();
-        active_profile_name() = hand->name;
-        decisions().emplace_back("profile", std::string(hand->name) + " (hand-written, matched by executable hash)");
-        return hand->name;
+        active_profile_name() = edition.empty() ? std::string(hand->name) : std::string(hand->name) + " (" + edition + ")";
+        decisions().emplace_back("profile", active_profile_name() + " (hand-written, matched by executable hash)");
+        return active_profile_name();
     }
 
     profile = GameProfile{};

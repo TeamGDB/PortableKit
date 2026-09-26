@@ -190,7 +190,9 @@ std::string entry_source(const GameRecord &game) {
                "}\n\n"
                "#if defined(_WIN32)\n#define PORTABLEKIT_CORPUS_EXPORT __declspec(dllexport)\n"
                "#else\n#define PORTABLEKIT_CORPUS_EXPORT __attribute__((visibility(\"default\")))\n#endif\n\n"
-               "extern \"C\" PORTABLEKIT_CORPUS_EXPORT const char *portablekit_corpus_abi() { return \"") +
+               "extern \"C\" PORTABLEKIT_CORPUS_EXPORT std::uint32_t portablekit_corpus_abi_version() {\n"
+           "    return psprecomp::kCorpusAbiVersion;\n}\n"
+           "extern \"C\" PORTABLEKIT_CORPUS_EXPORT const char *portablekit_corpus_abi() { return \"") +
            kCorpusAbi +
            "\"; }\n"
            "extern \"C\" PORTABLEKIT_CORPUS_EXPORT const char *portablekit_corpus_executable() { return \"" +
