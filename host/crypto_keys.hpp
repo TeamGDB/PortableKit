@@ -39,8 +39,9 @@ struct CryptoKeys {
         std::vector<std::uint8_t> table;
     };
     std::map<std::uint32_t, TagKey> tags;
-    // The fixed keys of the console's DRM library (amctrl), 1 to 3, which the
-    // PGD format uses (crypto/pgd.hpp).
+    // The fixed keys of the console's DRM library (amctrl), which the PGD
+    // format uses (crypto/pgd.hpp): 1-3 amctrl.1CD4/1CE4/1CF4, 4-5
+    // amctrl.dnas.1A90/1AA0.
     std::map<int, Key16> amctrl;
 
     [[nodiscard]] const Key16 *kirk(std::uint8_t slot) const {

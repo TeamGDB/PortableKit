@@ -160,12 +160,12 @@ kirk.cmd1    = <16 bytes>      # the KIRK command 1 AES key
 savedata.2   = <16 bytes>      # save-data keys 2 to 7
 tag.C0CB167C = <16 bytes, or the 0x90-byte table of an old header layout>
 tag.C0CB167C.slot = 5D         # optional: the KIRK slot the tag's header uses
-amctrl.1     = <16 bytes>      # the DRM library's fixed keys 1 to 3, for PGD data
+amctrl.1CD4  = <16 bytes>      # the DRM library's fixed keys, for PGD data (also .1CE4, .1CF4, amctrl.dnas.1A90, .1AA0)
 ```
 
 - `portablekit keys import <file>` checks the file and copies it into the data folder. Every fixed key is checked against a SHA-256 fingerprint compiled into the program, so the player is told "`savedata.4` is not the right key" instead of getting garbage later. Tag keys have no fingerprint: an executable that decrypts to an ELF the runtime can load is the check.
 - What each group enables: `kirk.aes.5D` + `kirk.cmd1` + the game's `tag.*` decrypt that game's `EBOOT.BIN`; the nine save slots and `savedata.2`–`7` encrypt and decrypt saves. `portablekit keys status` says which of these the file provides.
-- PGD data (below) needs `kirk.aes.38`, `kirk.aes.39`, `kirk.aes.3A`, `kirk.aes.63`, `amctrl.1`, `amctrl.2` and `amctrl.3`; `keys status` says "decrypt PGD data: yes" when all seven are there. These have no fingerprint yet: they get one once they have been checked against a real PGD file, and until then a wrong value shows as a PGD file that does not decrypt, with a log line naming the file.
+- PGD data (below) uses `kirk.aes.38`, `kirk.aes.39`, `kirk.aes.63`, `amctrl.1CD4`, `amctrl.1CE4`, `amctrl.1CF4`, `amctrl.dnas.1A90` and `amctrl.dnas.1AA0` (and `kirk.aes.3A` if present); `keys status` says "decrypt PGD data: yes" when the first six are there. These have no fingerprint yet: they get one once they have been checked against a real PGD file, and until then a wrong value shows as a PGD file that does not decrypt, with a log line naming the file.
 - Without keys, a game can still be added when its disc carries an unencrypted `BOOT.BIN` (LocoRoco 2 does), or when the player gives an executable they decrypted (`--executable`). The program never names a source of keys.
 
 Messages when something is missing, as the prototype prints them:
@@ -179,7 +179,7 @@ Messages when something is missing, as the prototype prints them:
 
 Some games keep large data files in PGD containers, "Protected Game Data" (Phantasy Star Portable 2 Infinity's `PSP_GAME/INSDIR/MEDIA.FPB`, 275 MB). The game opens the file with flag `0x40000000` and gives the library the file's key with `sceIoIoctl(fd, 0x04100001, key, 16)`; after that it reads and seeks in the decrypted data. [`host/crypto/pgd.hpp`](../host/crypto/pgd.hpp) implements the container from public descriptions of the format: the 0x90-byte header, the encrypted description (data key, size, 0x400-byte blocks from 0x90), and block-by-block decryption for random access. The keys come only from the player's file.
 
-The public descriptions do not say which KIRK slots, masks and counter conventions the console's cipher uses, so these are parameters. `portablekit keys pgd-check <game> <path on the disc> <key>` tries all 1024 combinations with the player's keys and prints those that turn the file's header into a valid description (version 0, 0x400-byte blocks, data at 0x90), with the start of the first data block; `PORTABLEKIT_PGD_SCHEME` selects one. When the maintainer's keys have been checked this way against PSP2i's file, the one that works becomes the default and the keys get fingerprints.
+The public descriptions do not say which KIRK slots, masks and counter conventions the console's cipher uses, so these are parameters. `portablekit keys pgd-check <game> <path on the disc> <key>` tries all 1536 combinations with the player's keys and prints those that turn the file's header into a valid description (version 0, 0x400-byte blocks, data at 0x90), with the start of the first data block; `PORTABLEKIT_PGD_SCHEME` selects one. When the maintainer's keys have been checked this way against PSP2i's file, the one that works becomes the default and the keys get fingerprints.
 
 Without the keys, the file is refused with the I/O error (what a PSP answers for a file it cannot decrypt has not been traced), and the log names the file and the missing key once: `[pgd] <file>: cannot decrypt: the keys file has no kirk.aes.39`.
 

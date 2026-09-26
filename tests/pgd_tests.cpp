@@ -30,7 +30,7 @@ portablekit::Key16 dummy(std::uint8_t seed) {
 int main() {
     using namespace portablekit::pgd;
     static std::map<std::uint8_t, portablekit::Key16> kirk{{0x38, dummy(1)}, {0x39, dummy(2)}, {0x3A, dummy(3)}, {0x63, dummy(4)}};
-    static std::map<int, portablekit::Key16> fixed{{1, dummy(5)}, {2, dummy(6)}, {3, dummy(7)}};
+    static std::map<int, portablekit::Key16> fixed{{1, dummy(5)}, {2, dummy(6)}, {3, dummy(7)}, {4, dummy(8)}, {5, dummy(9)}};
     const KeySource keys{[](std::uint8_t slot) -> const portablekit::Key16 * {
                              const auto it = kirk.find(slot);
                              return it != kirk.end() ? &it->second : nullptr;
@@ -94,7 +94,7 @@ int main() {
     header[1] = 'X';
     check(!PgdFile::open(header, vkey, 0x10000, keys, active_scheme(), std::nullopt, error) && error == "not a PGD file",
           "a file without the magic is not PGD");
-    check(candidate_schemes().size() == 1024u, "pgd-check tries 1024 schemes");
+    check(candidate_schemes().size() == 1536u, "pgd-check tries 1536 schemes");
 
     if (g_failures != 0) std::printf("%d failed\n", g_failures);
     return g_failures == 0 ? 0 : 1;

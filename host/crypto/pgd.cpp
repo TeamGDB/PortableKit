@@ -65,6 +65,17 @@ std::string CipherScheme::describe() const {
 
 std::vector<std::uint8_t> kirk_slots_used() { return {0x38u, 0x39u, 0x3Au, 0x63u}; }
 
+const char *fixed_key_name(int index) {
+    switch (index) {
+    case 1: return "amctrl.1CD4";
+    case 2: return "amctrl.1CE4";
+    case 3: return "amctrl.1CF4";
+    case 4: return "amctrl.dnas.1A90";
+    case 5: return "amctrl.dnas.1AA0";
+    default: return "amctrl.?";
+    }
+}
+
 std::vector<CipherScheme> candidate_schemes() {
     std::vector<CipherScheme> schemes;
     for (const std::uint8_t header : kirk_slots_used())
@@ -100,7 +111,7 @@ std::optional<std::string> bb_cipher(const CipherScheme &scheme, const KeySource
     Block context = key;
     if (scheme.header_mask != 0) {
         const Key16 *mask = keys.fixed ? keys.fixed(scheme.header_mask) : nullptr;
-        if (mask == nullptr) return "amctrl." + std::to_string(scheme.header_mask);
+        if (mask == nullptr) return fixed_key_name(scheme.header_mask);
         context = xor_block(context, *mask);
     }
     if (!scheme.vkey_after) context = xor_block(context, vkey);

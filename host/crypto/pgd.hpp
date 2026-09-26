@@ -47,8 +47,10 @@ inline constexpr std::uint32_t kHeaderSize = 0x90u;
 inline constexpr std::uint32_t kIoctlSetKey = 0x04100001u;
 inline constexpr std::uint32_t kOpenFlag = 0x40000000u;
 
-// Where the keys come from: KIRK AES key slots, and the fixed "amctrl" keys
-// (1 to 3). Null when the player's file does not have it.
+// Where the keys come from: KIRK AES key slots, and the DRM library's fixed
+// keys, numbered here 1 to 5: amctrl.1CD4, amctrl.1CE4, amctrl.1CF4,
+// amctrl.dnas.1A90 and amctrl.dnas.1AA0 in the keys file. Null when the
+// player's file does not have it.
 struct KeySource {
     std::function<const Key16 *(std::uint8_t slot)> kirk;
     std::function<const Key16 *(int index)> fixed;
@@ -60,7 +62,7 @@ struct KeySource {
 // One way of running the BB cipher; see the file comment.
 struct CipherScheme {
     std::uint8_t header_slot{};     // KIRK slot that decrypts the header key into the stream prefix
-    int header_mask{};              // amctrl key XORed into the header key first (0: none)
+    int header_mask{};              // fixed key (1-5) XORed into the header key first (0: none)
     bool vkey_after{};              // the version key XORed into the decrypted prefix, else into the header key
     std::uint8_t stream_slot{};     // KIRK slot of the key stream
     bool stream_encrypts{};         // key stream = AES-encrypt(counter block), else AES-decrypt
@@ -73,7 +75,9 @@ struct CipherScheme {
 
 // The slots and masks every scheme may use: what `keys status` checks.
 [[nodiscard]] std::vector<std::uint8_t> kirk_slots_used();
-inline constexpr int kFixedKeysUsed = 3;
+inline constexpr int kFixedKeysUsed = 5;
+// The keys file's name of fixed key `index` (1-5).
+[[nodiscard]] const char *fixed_key_name(int index);
 
 // Every scheme `pgd-check` tries.
 [[nodiscard]] std::vector<CipherScheme> candidate_schemes();

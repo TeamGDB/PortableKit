@@ -41,9 +41,18 @@ constexpr Fingerprint kFingerprints[] = {
 // added once they have been checked against a real PGD file; until then any
 // 16-byte value is taken under these names, and a wrong one shows as a PGD
 // header that does not decrypt.
+int amctrl_index(const std::string &name) {
+    if (name == "amctrl.1cd4") return 1;
+    if (name == "amctrl.1ce4") return 2;
+    if (name == "amctrl.1cf4") return 3;
+    if (name == "amctrl.dnas.1a90") return 4;
+    if (name == "amctrl.dnas.1aa0") return 5;
+    return 0;
+}
+
 bool pgd_key_name(const std::string &name) {
     return name == "kirk.aes.38" || name == "kirk.aes.39" || name == "kirk.aes.3a" || name == "kirk.aes.63" ||
-           name == "amctrl.1" || name == "amctrl.2" || name == "amctrl.3";
+           amctrl_index(name) != 0;
 }
 
 const char *expected_fingerprint(const std::string &name) {
@@ -115,8 +124,8 @@ KeysReport read_keys_file(const std::filesystem::path &path) {
             report.keys.kirk_cmd1 = to_key(*bytes);
         } else if (name.starts_with("savedata.")) {
             report.keys.savedata[std::atoi(name.substr(9).c_str())] = to_key(*bytes);
-        } else if (name.starts_with("amctrl.")) {
-            report.keys.amctrl[std::atoi(name.substr(7).c_str())] = to_key(*bytes);
+        } else if (const int index = amctrl_index(name); index != 0) {
+            report.keys.amctrl[index] = to_key(*bytes);
         }
     }
     report.tag_count = report.keys.tags.size();
@@ -127,7 +136,7 @@ KeysReport read_keys_file(const std::filesystem::path &path) {
     for (int index = 2; index <= 7; ++index)
         if (report.keys.savedata_key(index) == nullptr) report.can_encrypt_saves = false;
     report.can_decrypt_pgd = true;
-    for (const std::uint8_t slot : {0x38, 0x39, 0x3A, 0x63})
+    for (const std::uint8_t slot : {0x38, 0x39, 0x63})
         if (report.keys.kirk(slot) == nullptr) report.can_decrypt_pgd = false;
     for (int index = 1; index <= 3; ++index)
         if (report.keys.amctrl.find(index) == report.keys.amctrl.end()) report.can_decrypt_pgd = false;

@@ -11,9 +11,10 @@
 //   savedata.2   = <16 bytes>      save-data keys 2 to 7
 //   tag.C0CB167C = <16 or 0x90 bytes>   what an executable's tag selects
 //   tag.C0CB167C.slot = 5D         (optional) the KIRK slot of that tag
-//   amctrl.1     = <16 bytes>      the DRM library's fixed keys 1 to 3, which
-//                                  PGD data needs with kirk.aes.38, .39, .3A
-//                                  and .63 (host/crypto/pgd.hpp)
+//   amctrl.1CD4  = <16 bytes>      the DRM library's fixed keys, which PGD data
+//                                  needs with kirk.aes.38, .39 and .63; also
+//                                  amctrl.1CE4, .1CF4, amctrl.dnas.1A90 and
+//                                  .1AA0 (host/crypto/pgd.hpp)
 //
 // The fixed keys are checked against SHA-256 fingerprints compiled into the
 // program, so a mistyped key is named instead of producing garbage; a
@@ -36,7 +37,7 @@ struct KeysReport {
     // What the keys that passed allow.
     bool can_decrypt_executables{};     // kirk.aes.5D and kirk.cmd1
     bool can_encrypt_saves{};           // every save-data key
-    bool can_decrypt_pgd{};             // kirk.aes.38/39/3A/63 and amctrl.1-3
+    bool can_decrypt_pgd{};             // kirk.aes.38/39/63 and amctrl.1CD4/1CE4/1CF4
     std::size_t tag_count{};
 };
 
