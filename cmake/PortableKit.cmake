@@ -343,6 +343,10 @@ function(portablekit_add_game target)
     # thread the same 64 MiB stack on every platform.
     if(MSVC)
         target_link_options(${target} PRIVATE /STACK:67108864)
+    elseif(MINGW)
+        # MinGW's default is MSVC's 1 MiB reserve too; generated code at -O0
+        # overflowed it at once (Chinatown Wars, 0xC00000FD).
+        target_link_options(${target} PRIVATE "LINKER:--stack,67108864")
     elseif(APPLE)
         target_link_options(${target} PRIVATE "LINKER:-stack_size,0x4000000")
     endif()
