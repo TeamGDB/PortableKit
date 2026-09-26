@@ -195,6 +195,11 @@ else()
     endif()
     set(_portablekit_ffmpeg_src "${_portablekit_ffmpeg_root}/ffmpeg-${PORTABLEKIT_FFMPEG_VERSION}")
     set(_portablekit_ffmpeg_prefix "${_portablekit_ffmpeg_root}/install")
+    # FFmpeg keeps its configure line, prefix included, as a string in the
+    # libraries. It is configured for a neutral prefix and installed through
+    # DESTDIR, so no path of the build machine (a home directory, a user name)
+    # ends up in a shipped library.
+    set(_portablekit_ffmpeg_neutral_prefix /ffmpeg)
     # Platform settings that do not change what is built: where macOS finds the
     # libraries (the executable's rpath) and the compiler to use.
     set(_portablekit_ffmpeg_flags ${PORTABLEKIT_FFMPEG_CONFIGURE_FLAGS})
@@ -206,12 +211,29 @@ else()
                 "--extra-ldflags=-mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET}")
         endif()
     endif()
-    if(DEFINED ENV{CC})
+    if(ANDROID)
+        # Cross-compiled with the NDK's clang for the ABI and API level of the
+        # rest of the build. FFmpeg's android target names the libraries
+        # libavcodec.so and libavutil.so, without a version, which is also the
+        # only form an APK's lib/ directory accepts.
+        if(NOT ANDROID_ABI STREQUAL "arm64-v8a")
+            message(FATAL_ERROR "portablekit: the bundled FFmpeg is set up for arm64-v8a only, not ${ANDROID_ABI}")
+        endif()
+        set(_portablekit_ndk_bin "${ANDROID_TOOLCHAIN_ROOT}/bin")
+        list(APPEND _portablekit_ffmpeg_flags
+            --enable-cross-compile --target-os=android --arch=aarch64
+            "--cc=${_portablekit_ndk_bin}/aarch64-linux-android${ANDROID_PLATFORM_LEVEL}-clang"
+            "--cxx=${_portablekit_ndk_bin}/aarch64-linux-android${ANDROID_PLATFORM_LEVEL}-clang++"
+            "--ar=${_portablekit_ndk_bin}/llvm-ar" "--nm=${_portablekit_ndk_bin}/llvm-nm"
+            "--ranlib=${_portablekit_ndk_bin}/llvm-ranlib" "--strip=${_portablekit_ndk_bin}/llvm-strip"
+            # Pages may be 16 KiB on current devices; the NDK's own flag for it.
+            "--extra-ldflags=-Wl,-z,max-page-size=16384")
+    elseif(DEFINED ENV{CC})
         list(APPEND _portablekit_ffmpeg_flags "--cc=$ENV{CC}")
     endif()
     # Built once per build directory; again only when the pin or the flags change.
     string(REPLACE ";" " " _portablekit_ffmpeg_stamp
-        "${PORTABLEKIT_FFMPEG_VERSION} ${PORTABLEKIT_FFMPEG_SHA256} ${_portablekit_ffmpeg_flags}")
+        "${PORTABLEKIT_FFMPEG_VERSION} ${PORTABLEKIT_FFMPEG_SHA256} --prefix=${_portablekit_ffmpeg_neutral_prefix} ${_portablekit_ffmpeg_flags}")
     set(_portablekit_ffmpeg_stamp_file "${_portablekit_ffmpeg_prefix}/portablekit.stamp")
     set(_portablekit_ffmpeg_built "")
     if(EXISTS "${_portablekit_ffmpeg_stamp_file}")
@@ -227,7 +249,7 @@ else()
         file(MAKE_DIRECTORY "${_portablekit_ffmpeg_root}/build")
         set(_log "${_portablekit_ffmpeg_root}/build")
         _portablekit_ffmpeg_run(configure "${_log}/configure.log"
-            sh "${_portablekit_ffmpeg_src}/configure" "--prefix=${_portablekit_ffmpeg_prefix}" ${_portablekit_ffmpeg_flags})
+            sh "${_portablekit_ffmpeg_src}/configure" "--prefix=${_portablekit_ffmpeg_neutral_prefix}" ${_portablekit_ffmpeg_flags})
         # The licensing in docs/SOURCE_PROVENANCE.md assumes exactly this.
         file(READ "${_log}/configure.log" _portablekit_ffmpeg_configure)
         file(READ "${_log}/config.h" _portablekit_ffmpeg_config)
@@ -238,7 +260,11 @@ else()
                 "see ${_log}/configure.log")
         endif()
         _portablekit_ffmpeg_run(build "${_log}/build.log" "${PORTABLEKIT_MAKE}" -j${PSPRECOMP_GENERATED_JOBS})
-        _portablekit_ffmpeg_run(install "${_log}/install.log" "${PORTABLEKIT_MAKE}" install)
+        file(REMOVE_RECURSE "${_portablekit_ffmpeg_root}/destdir")
+        _portablekit_ffmpeg_run(install "${_log}/install.log"
+            "${PORTABLEKIT_MAKE}" install "DESTDIR=${_portablekit_ffmpeg_root}/destdir")
+        file(RENAME "${_portablekit_ffmpeg_root}/destdir${_portablekit_ffmpeg_neutral_prefix}" "${_portablekit_ffmpeg_prefix}")
+        file(REMOVE_RECURSE "${_portablekit_ffmpeg_root}/destdir")
         file(WRITE "${_portablekit_ffmpeg_stamp_file}" "${_portablekit_ffmpeg_stamp}")
     endif()
 
@@ -251,6 +277,8 @@ else()
         list(POP_FRONT _versions lib soversion)
         if(APPLE)
             set(runtime_name "lib${lib}.${soversion}.dylib")
+        elseif(ANDROID)
+            set(runtime_name "lib${lib}.so")
         else()
             set(runtime_name "lib${lib}.so.${soversion}")
         endif()

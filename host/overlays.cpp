@@ -130,14 +130,25 @@ std::map<std::uint32_t, std::uint64_t> &installed_headers() {
 
 std::filesystem::path overlay_directory() {
     if (const char *dir = portablekit::env("OVERLAY_DIR"); dir != nullptr && *dir != '\0') return dir;
-    const std::filesystem::path directory = executable_directory();
+#if defined(PORTABLEKIT_ANDROID_APP)
+    // An APK's libraries all sit in one flat directory, next to libmain.so.
+    return executable_directory();
+#else
+    const std::filesystem::path directory = bundled_overlay_directory();
     if (directory.empty()) return "overlays";
-    return directory / "overlays";
+    return directory;
+#endif
 }
 
 bool is_overlay_library(const std::filesystem::path &path) {
     const std::filesystem::path extension = path.extension();
+#if defined(PORTABLEKIT_ANDROID_APP)
+    // The package manager extracts only lib*.so, so the overlays are named
+    // libovl*.so there, among SDL's, FFmpeg's and the host's own.
+    return extension == ".so" && path.filename().string().starts_with("libovl");
+#else
     return extension == ".so" || extension == ".dylib" || extension == ".dll";
+#endif
 }
 
 // The library stays mapped for the rest of the process: its code can be reached

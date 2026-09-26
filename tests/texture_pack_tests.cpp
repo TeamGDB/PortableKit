@@ -70,7 +70,7 @@ struct Scratch {
     fs::path root;
     Scratch() {
         std::random_device random;
-        root = fs::temp_directory_path() / ("mhp3rd_texture_pack_tests_" + std::to_string(random()));
+        root = fs::temp_directory_path() / ("portablekit_texture_pack_tests_" + std::to_string(random()));
         fs::create_directories(root);
     }
     ~Scratch() {
