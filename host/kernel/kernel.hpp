@@ -136,6 +136,9 @@ struct Thread {
     std::int32_t exit_status{};
     std::uint32_t wakeup_count{};
     std::uint64_t ready_sequence{};
+    // sceKernelSuspendThread: kept off the processor until resumed, whatever
+    // else it is (ready, or waiting: "waiting, suspended" on a PSP).
+    bool suspended{};
 };
 
 struct Semaphore {

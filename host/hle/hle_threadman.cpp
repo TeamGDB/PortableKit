@@ -145,6 +145,45 @@ void register_threads(HleRegistrar &hle) {
 
     const auto delay = [](Runtime &, AllegrexContext &ctx) { kernel().delay_current(ctx, arg(ctx, 0)); };
     hle.add("ThreadManForUser", "sceKernelDelayThread", delay);
+    // Another thread only: it keeps its state and simply is not run until
+    // sceKernelResumeThread.
+    hle.add("ThreadManForUser", "sceKernelSuspendThread", [](Runtime &, AllegrexContext &ctx) {
+        const SceUID uid = as_signed(arg(ctx, 0));
+        Thread *thread = kernel().find_thread(uid);
+        if (uid == 0 || uid == kernel().current_uid()) {
+            kernel().finish(ctx, error::kIllegalThid);
+            return;
+        }
+        if (thread == nullptr) {
+            kernel().finish(ctx, error::kUnknownThid);
+            return;
+        }
+        if (thread->status == ThreadStatus::Dormant || thread->status == ThreadStatus::Dead) {
+            kernel().finish(ctx, error::kDormant);
+            return;
+        }
+        if (thread->suspended) {
+            kernel().finish(ctx, 0x800201A3u);  // SCE_KERNEL_ERROR_SUSPEND
+            return;
+        }
+        thread->suspended = true;
+        if (trace_sync()) log_sync("SuspendThread " + std::to_string(uid) + " " + thread->name);
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("ThreadManForUser", "sceKernelResumeThread", [](Runtime &, AllegrexContext &ctx) {
+        Thread *thread = kernel().find_thread(as_signed(arg(ctx, 0)));
+        if (thread == nullptr) {
+            kernel().finish(ctx, error::kUnknownThid);
+            return;
+        }
+        if (!thread->suspended) {
+            kernel().finish(ctx, 0x800201A5u);  // SCE_KERNEL_ERROR_NOT_SUSPEND
+            return;
+        }
+        thread->suspended = false;
+        if (trace_sync()) log_sync("ResumeThread " + std::to_string(thread->uid) + " " + thread->name);
+        kernel().finish(ctx, 0u);  // which runs it now if it outranks this thread
+    });
     // Runs the thread's notified callbacks now: 1 when there were any.
     hle.add("ThreadManForUser", "sceKernelCheckCallback", [](Runtime &, AllegrexContext &ctx) {
         kernel().finish(ctx, kernel().deliver_callbacks() ? 1u : 0u);
@@ -354,6 +393,12 @@ void register_event_flags(HleRegistrar &hle) {
         }
         if (poll) {
             if (out != 0u) rt.memory().store32(out, flag.pattern);
+            // Once per flag and bits: a game polling in a loop would
+            // otherwise fill the log.
+            if (trace_sync())
+                log_once("poll-evf:" + std::to_string(uid) + ":" + psprecomp::hex32(bits),
+                         "[sync] PollEventFlag " + std::to_string(uid) + " " + flag.name + " bits=" +
+                             psprecomp::hex32(bits) + " pattern=" + psprecomp::hex32(flag.pattern) + " (not met)");
             kernel().finish(ctx, error::kEvfCond);
             return true;
         }
