@@ -79,6 +79,7 @@ void register_media(HleRegistrar &hle);
 void register_atrac(HleRegistrar &hle);
 void register_mpeg(HleRegistrar &hle);
 void register_psmfplayer(HleRegistrar &hle);
+void register_psmf(HleRegistrar &hle);
 void register_font(HleRegistrar &hle);
 void register_utility(HleRegistrar &hle, const std::filesystem::path &memory_stick);
 void register_savedata(HleRegistrar &hle, const std::filesystem::path &memory_stick);

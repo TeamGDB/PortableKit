@@ -244,6 +244,16 @@ if(PSPRECOMP_BUILD_TESTS)
     add_test(NAME portablekit_pipe_tests COMMAND portablekit_pipe_tests)
 endif()
 
+# The PSMF header as scePsmf reads it.
+if(PSPRECOMP_BUILD_TESTS)
+    add_executable(portablekit_psmf_tests
+        "${PORTABLEKIT_ROOT}/tests/psmf_tests.cpp"
+        "${PORTABLEKIT_ROOT}/host/movie/psmf_header.cpp")
+    target_include_directories(portablekit_psmf_tests PRIVATE "${PORTABLEKIT_ROOT}/host")
+    set_target_properties(portablekit_psmf_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME portablekit_psmf_tests COMMAND portablekit_psmf_tests)
+endif()
+
 # Each platform's settings defaults.
 if(PSPRECOMP_BUILD_TESTS)
     add_executable(portablekit_settings_tests
