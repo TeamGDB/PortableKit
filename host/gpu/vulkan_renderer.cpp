@@ -112,7 +112,7 @@ constexpr std::uint32_t kGpuTimerSegments = 16u;
 struct PushConstants {
     std::array<float, 16> transform{};
     std::array<float, 4> viewport{};        // x,y: target size; z: through flag; w: 1 fog + 2 lighting
-    std::array<float, 4> texture_params{};  // x: enabled, y: function, z: alpha ref, w: alpha func
+    std::array<float, 4> texture_params{};  // x: enabled + 2 clamp u + 4 clamp v, y: function, z: alpha ref, w: alpha func
     std::array<float, 4> uv_transform{1.0f, 1.0f, 0.0f, 0.0f};
     std::array<float, 4> view_z{};          // row of view * world that gives view-space z, for fog
 };
@@ -6009,7 +6009,15 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     push.viewport = {static_cast<float>(kPspWidth), static_cast<float>(kPspHeight), call.through ? 1.0f : 0.0f,
                      (fogged ? kPushFog : 0.0f) + (lit ? kPushLighting : 0.0f)};
     push.view_z = {view_world[2], view_world[6], view_world[10], view_world[14]};
-    push.texture_params = {call.texture.enabled ? 1.0f : 0.0f, static_cast<float>(call.texture.function),
+    // The GE's texture wrap register: clamp in u, in v, or repeat. The
+    // sampler repeats; the fragment shader clamps the axes flagged here
+    // (bits 1 and 2 of texture_params.x) to the texture's edge texels.
+    // <prefix>_NO_TEXTURE_CLAMP repeats every texture, as before.
+    static const bool no_texture_clamp = portablekit::env("NO_TEXTURE_CLAMP") != nullptr;
+    const float wrap_flags = no_texture_clamp ? 0.0f
+                                              : (call.texture.wrap_s != 0u ? 2.0f : 0.0f) +
+                                                    (call.texture.wrap_t != 0u ? 4.0f : 0.0f);
+    push.texture_params = {call.texture.enabled ? 1.0f + wrap_flags : 0.0f, static_cast<float>(call.texture.function),
                            static_cast<float>(call.alpha_test.enabled ? call.alpha_test.reference : 0u),
                            static_cast<float>(call.alpha_test.enabled ? call.alpha_test.function : 0u)};
     // Through-mode texture coordinates are in texels, transformed ones in [0,1].
@@ -6036,6 +6044,9 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
             // is pixel (x, y) of a target that holds 480x272 guest pixels at
             // any internal scale.
             texture_descriptor = copy;
+            // The copy's sampler clamps at the target's edges; the shader's
+            // clamp would take the whole target for the texture.
+            push.texture_params[0] = 1.0f;
             const float width = static_cast<float>(call.texture.width);
             const float height = static_cast<float>(call.texture.height);
             const std::array<float, 4> uv = push.uv_transform;
