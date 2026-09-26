@@ -187,6 +187,9 @@ KeysReport read_keys_file(const std::filesystem::path &path) {
             report.problems.push_back(raw_name + " is not the right key: its fingerprint does not match.");
             continue;
         }
+        // Every key that passed is also kept by its name, so a look-up by
+        // name (hle_extension::key) finds it whatever structure it goes to.
+        report.keys.named[name] = *bytes;
         if (name.starts_with("kirk.aes.")) {
             const unsigned long slot = std::strtoul(name.substr(9).c_str(), nullptr, 16);
             report.keys.kirk_aes[static_cast<std::uint8_t>(slot)] = to_key(*bytes);

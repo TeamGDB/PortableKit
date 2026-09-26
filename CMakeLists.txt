@@ -485,3 +485,26 @@ if(PSPRECOMP_BUILD_TESTS)
     set_target_properties(portablekit_io_filter_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
     add_test(NAME portablekit_io_filter_tests COMMAND portablekit_io_filter_tests)
 endif()
+
+# The desktop app's keys file as extension modules look keys up in it. The
+# values of PortableKit's own keys come from crypto_keys_builtin.cpp, compiled
+# under other names (tests/builtin_keys_renamed.cpp) beside the app's own.
+if(PSPRECOMP_BUILD_TESTS)
+    add_executable(portablekit_keys_file_tests
+        "${PORTABLEKIT_ROOT}/tests/keys_file_tests.cpp"
+        "${PORTABLEKIT_ROOT}/tests/builtin_keys_renamed.cpp"
+        "${PORTABLEKIT_ROOT}/apps/portablekit/src/keys_file.cpp"
+        "${PORTABLEKIT_ROOT}/apps/portablekit/src/app_home.cpp"
+        "${PORTABLEKIT_ROOT}/apps/portablekit/src/text_format.cpp"
+        "${PORTABLEKIT_ROOT}/host/app_paths.cpp"
+        "${PORTABLEKIT_ROOT}/host/install/user_data.cpp"
+        "${PORTABLEKIT_ROOT}/host/extension_keys.cpp"
+        "${PORTABLEKIT_ROOT}/host/profile.cpp"
+        "${PORTABLEKIT_ROOT}/tests/test_profile.cpp")
+    target_compile_features(portablekit_keys_file_tests PRIVATE cxx_std_20)
+    target_include_directories(portablekit_keys_file_tests PRIVATE
+        "${PORTABLEKIT_ROOT}/host" "${PORTABLEKIT_ROOT}/apps/portablekit/src" "${PORTABLEKIT_ROOT}/include")
+    target_link_libraries(portablekit_keys_file_tests PRIVATE psprecomp_core)
+    set_target_properties(portablekit_keys_file_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME portablekit_keys_file_tests COMMAND portablekit_keys_file_tests)
+endif()
