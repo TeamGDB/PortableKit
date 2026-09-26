@@ -29,7 +29,7 @@ cmake --build out-release --target <RELEASE_TARGET>
 
 It builds SDL3 and the Vulkan loader from pinned sources for the deployment target, takes MoltenVK's pinned release, assembles `<Name>.app`, links everything inside the bundle, checks the system imports against the macOS 13 SDK, signs ad hoc (no notarization) and packs a disk image into `out/release-macos/dist`, with the FFmpeg source archive and `SHA256SUMS`.
 
-`--packaging DIR` reads `release.env`, the notices and `macos/` from another directory than `<game>/packaging`. `--license NAME=FILE`, `--notices FILE` and `--extra PATH` (each repeatable) add what a build brings beyond the game and the framework: a licence as `licenses/NAME-LICENSE.txt`, a notices file in `licenses/`, and files or folders beside the app in the disk image and the zip.
+`--packaging DIR` reads `release.env`, the notices and `macos/` from another directory than `<game>/packaging`. `--license NAME=FILE`, `--notices FILE` and `--extra PATH` (each repeatable) add what a build brings beyond the game and the framework: a licence as `licenses/NAME-LICENSE.txt`, a notices file in `licenses/`, and files or folders beside the app in the disk image and the zip. `--top-license FILE` puts `FILE` as `LICENSE.txt` beside the app there too (by default there is none; the licences are in the bundle's `licenses/`).
 
 ## The desktop app
 
@@ -51,11 +51,11 @@ On Windows, with a build of the app made with llvm-mingw (see [DESKTOP_APP.md](D
 scripts\package_desktop_windows.ps1 -BuildDir C:\path\to\build -Toolchain C:\path\to\llvm-mingw
 ```
 
-It assembles the portable folder -- the program, the recompiler, their DLLs, the headers, an empty `data\` and the part of llvm-mingw that compiling a game for x86_64 needs, in `toolchain\` -- checks it for game data and for paths of the build machine, starts the packed program to check that it runs and finds its toolchain, and packs `portablekit-<version>-windows-x64.zip` with `SHA256SUMS` and `BUILDINFO.txt` into `out\package-windows\dist`. `-License NAME=FILE`, `-Notices FILE` and `-Extra PATH` work as on macOS, and `-Packaging DIR` names another release description.
+It assembles the portable folder -- the program, the recompiler, their DLLs, the headers, an empty `data\` and the part of llvm-mingw that compiling a game for x86_64 needs, in `toolchain\` -- checks it for game data and for paths of the build machine, starts the packed program to check that it runs and finds its toolchain, and packs `portablekit-<version>-windows-x64.zip` with `SHA256SUMS` and `BUILDINFO.txt` into `out\package-windows\dist`. `-License NAME=FILE`, `-Notices FILE` and `-Extra PATH` work as on macOS, `-Packaging DIR` names another release description, and `-TopLicense FILE` replaces the `LICENSE.txt` at the top of the folder (PortableKit's by default).
 
 ### A build with other components
 
-A build that links more than PortableKit's own code, such as [HLE extension modules](HLE_EXTENSIONS.md), is packed with the same scripts: set `PORTABLEKIT_BUILD_LABEL` so it is recognisable (window title, library header, `portablekit --version`), pass each component's licence with `--license`/`-License`, and point `--packaging`/`-Packaging` at a copy of `apps/portablekit/packaging` whose notices list the components. Such a build is distributed under the terms its combination of licences requires.
+A build that links more than PortableKit's own code, such as [HLE extension modules](HLE_EXTENSIONS.md), is packed with the same scripts: set `PORTABLEKIT_BUILD_LABEL` so it is recognisable (window title, library header, `portablekit --version`), pass each component's licence with `--license`/`-License`, the licence of the combination with `--top-license`/`-TopLicense` where it is not PortableKit's MIT licence, and point `--packaging`/`-Packaging` at a copy of `apps/portablekit/packaging` whose notices list the components. Such a build is distributed under the terms its combination of licences requires.
 
 ## Linux
 
