@@ -309,6 +309,18 @@ void register_net(HleRegistrar &hle) {
         if (arg(ctx, 0) != 0u) write_mac(rt.memory(), arg(ctx, 0), own_mac());
         done(ctx, "sceNetGetLocalEtherAddr", 1, 0u, adhoc::format_mac(own_mac()));
     });
+    // sceNetEtherNtostr(const mac *, char *out): "xx:xx:xx:xx:xx:xx".
+    hle.add("sceNet", "sceNetEtherNtostr", [](Runtime &rt, AllegrexContext &ctx) {
+        auto &memory = rt.memory();
+        if (arg(ctx, 0) == 0u || arg(ctx, 1) == 0u) return done(ctx, "sceNetEtherNtostr", 2, err::kInvalidArg);
+        log_once("net-ether-ntostr", "[adhoc] sceNetEtherNtostr (UNVERIFIED: no game traced yet)");
+        Mac mac{};
+        for (std::size_t i = 0; i < mac.size(); ++i) mac[i] = memory.load8(arg(ctx, 0) + static_cast<std::uint32_t>(i));
+        char text[18];
+        std::snprintf(text, sizeof(text), "%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        write_cstring(memory, arg(ctx, 1), text, 18u);
+        done(ctx, "sceNetEtherNtostr", 2, 0u, text);
+    });
     hle.add("sceWlanDrv", "sceWlanGetEtherAddr", [](Runtime &rt, AllegrexContext &ctx) {
         if (arg(ctx, 0) != 0u) write_mac(rt.memory(), arg(ctx, 0), own_mac());
         done(ctx, "sceWlanGetEtherAddr", 1, 0u, adhoc::format_mac(own_mac()));
@@ -392,6 +404,56 @@ void register_adhocctl(HleRegistrar &hle) {
         pump_events();
         if (was_connected) notify_handlers(kEventDisconnect, 0u);
         done(ctx, "sceNetAdhocctlDisconnect", 0, 0u);
+    });
+    // Joining a group directly, without the netconf dialog: Create names a
+    // group to host, Connect a group to join or host, Join an entry of the
+    // scan results (SceNetAdhocctlScanInfo, the group name at +8). The relay
+    // server makes no difference between hosting and joining: the first in
+    // a group hosts it. The connect event comes to the handlers when the
+    // server confirms, as with netconf. No game has been traced using these.
+    const auto join_group = [](const char *name, const std::string &group) {
+        return [name, group](AllegrexContext &ctx) {
+            State &s = state();
+            if (!s.ctl_initialized) return done(ctx, name, 1, err::kCtlNotInitialized);
+            log_once(std::string("adhocctl-") + name, std::string("[adhoc] ") + name + " (UNVERIFIED: no game traced yet)");
+            if (!settings::current().adhoc || adhoc_server_address().empty()) {
+                Client::log("[adhoc] no server is set up (menu: Network); joining fails", true);
+                notify_handlers(kEventError, err::kCtlTimeout);
+                return done(ctx, name, 1, 0u, "group \"" + group + "\", no server");
+            }
+            start_client();
+            Client::get().join(group);
+            done(ctx, name, 1, 0u, "group \"" + group + "\"");
+        };
+    };
+    hle.add("sceNetAdhocctl", "sceNetAdhocctlCreate", [join_group](Runtime &rt, AllegrexContext &ctx) {
+        if (arg(ctx, 0) == 0u) return done(ctx, "sceNetAdhocctlCreate", 1, err::kCtlInvalidArg);
+        join_group("sceNetAdhocctlCreate", read_cstring(rt.memory(), arg(ctx, 0), 8u))(ctx);
+    });
+    hle.add("sceNetAdhocctl", "sceNetAdhocctlConnect", [join_group](Runtime &rt, AllegrexContext &ctx) {
+        if (arg(ctx, 0) == 0u) return done(ctx, "sceNetAdhocctlConnect", 1, err::kCtlInvalidArg);
+        join_group("sceNetAdhocctlConnect", read_cstring(rt.memory(), arg(ctx, 0), 8u))(ctx);
+    });
+    hle.add("sceNetAdhocctl", "sceNetAdhocctlJoin", [join_group](Runtime &rt, AllegrexContext &ctx) {
+        if (arg(ctx, 0) == 0u) return done(ctx, "sceNetAdhocctlJoin", 1, err::kCtlInvalidArg);
+        join_group("sceNetAdhocctlJoin", read_cstring(rt.memory(), arg(ctx, 0) + 8u, 8u))(ctx);
+    });
+    // sceNetAdhocctlGetNameByAddr(const mac *, SceNetAdhocctlNickname *): the
+    // nickname of a peer in the group, or this player's own.
+    hle.add("sceNetAdhocctl", "sceNetAdhocctlGetNameByAddr", [](Runtime &rt, AllegrexContext &ctx) {
+        auto &memory = rt.memory();
+        if (!state().ctl_initialized) return done(ctx, "sceNetAdhocctlGetNameByAddr", 2, err::kCtlNotInitialized);
+        if (arg(ctx, 0) == 0u || arg(ctx, 1) == 0u) return done(ctx, "sceNetAdhocctlGetNameByAddr", 2, err::kCtlInvalidArg);
+        log_once("adhocctl-getnamebyaddr", "[adhoc] sceNetAdhocctlGetNameByAddr (UNVERIFIED: no game traced yet)");
+        Mac mac{};
+        for (std::size_t i = 0; i < mac.size(); ++i) mac[i] = memory.load8(arg(ctx, 0) + static_cast<std::uint32_t>(i));
+        std::optional<std::string> name;
+        if (mac == own_mac()) name = nickname();
+        for (const auto &peer : Client::get().peers())
+            if (peer.mac == mac) name = peer.nickname;
+        if (!name) return done(ctx, "sceNetAdhocctlGetNameByAddr", 2, err::kCtlIdNotFound, adhoc::format_mac(mac));
+        write_cstring(memory, arg(ctx, 1), *name, 128u);
+        done(ctx, "sceNetAdhocctlGetNameByAddr", 2, 0u, adhoc::format_mac(mac) + " " + *name);
     });
     hle.add("sceNetAdhocctl", "sceNetAdhocctlGetPeerList", [](Runtime &rt, AllegrexContext &ctx) {
         auto &memory = rt.memory();
