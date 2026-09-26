@@ -100,6 +100,13 @@ struct AtracContext {
     // to tell the game where to write next.
     bool streaming{};
     std::uint32_t written{};              // bytes of the file delivered, from its start
+    // Where the game adds data next. It follows `written` until the whole
+    // file has been added; a track that loops then asks again from the frame
+    // the loop starts in, as many times as it loops (`wraps`), while the
+    // decoder has gone round the loop `loops_done` times.
+    std::uint32_t cursor{};
+    std::uint32_t wraps{};
+    std::uint32_t loops_done{};
     std::uint32_t stored_from{};          // file offset of stored[0]
     std::vector<std::uint8_t> stored;
 
@@ -213,6 +220,21 @@ bool looping(const AtracContext &context) {
     return context.track.loop_start >= 0 && context.loop_num != 0;
 }
 
+// The file offset of the frame the loop starts in.
+std::uint32_t loop_offset(const AtracContext &context) {
+    const TrackInfo &track = context.track;
+    const auto frame_samples = static_cast<std::int64_t>(audio::atrac_frame_samples(track.codec));
+    const std::int64_t frame = (static_cast<std::int64_t>(std::max(track.loop_start, 0)) + track.skip) / frame_samples;
+    return track.data_offset + static_cast<std::uint32_t>(frame) * track.block_align;
+}
+
+// A file offset as a position in the order the track plays: each pass round
+// the loop adds the loop's length.
+std::uint64_t play_order(const AtracContext &context, std::uint32_t offset, std::uint32_t passes) {
+    const std::uint32_t loop_bytes = context.track.file_size - std::min(loop_offset(context), context.track.file_size);
+    return offset + static_cast<std::uint64_t>(passes) * loop_bytes;
+}
+
 // Decodes stream frame `frame` into the cache, reseeding the decoder when the
 // request is not the frame that follows the last one it decoded.
 bool load_frame(const psprecomp::GuestMemory &memory, AtracContext &context, std::int64_t frame) {
@@ -267,7 +289,13 @@ std::uint32_t current_frame_offset(const AtracContext &context) {
 void trim_stored(AtracContext &context) {
     const std::uint32_t keep_from_wanted = current_frame_offset(context);
     const std::uint32_t warm_up = 2u * context.track.block_align;
-    const std::uint32_t keep_from = keep_from_wanted > warm_up ? keep_from_wanted - warm_up : 0u;
+    std::uint32_t keep_from = keep_from_wanted > warm_up ? keep_from_wanted - warm_up : 0u;
+    // A track that loops decodes its loop again from these bytes: the game
+    // is asked for them again too, but what it adds then is not needed.
+    if (context.track.loop_start >= 0) {
+        const std::uint32_t loop_from = loop_offset(context);
+        keep_from = std::min(keep_from, loop_from > warm_up ? loop_from - warm_up : 0u);
+    }
     if (keep_from <= context.stored_from) return;
     const std::uint32_t drop = std::min<std::uint32_t>(keep_from - context.stored_from,
                                                        static_cast<std::uint32_t>(context.stored.size()));
@@ -279,20 +307,28 @@ void trim_stored(AtracContext &context) {
 // bytes from `written` on.
 void store_added(const psprecomp::GuestMemory &memory, AtracContext &context, std::uint32_t address,
                  std::uint32_t size) {
-    if (context.stored.empty()) context.stored_from = context.written;
-    const std::size_t at = context.stored.size();
-    context.stored.resize(at + size);
-    memory.copy_out(address, std::span(context.stored).subspan(at, size));
-    context.written += size;
+    if (context.cursor >= context.written) {
+        if (context.stored.empty()) context.stored_from = context.written;
+        const std::size_t at = context.stored.size();
+        context.stored.resize(at + size);
+        memory.copy_out(address, std::span(context.stored).subspan(at, size));
+        context.written += size;
+    }
+    context.cursor += size;
+    if (context.cursor >= context.track.file_size && looping(context)) {
+        context.cursor = loop_offset(context);
+        ++context.wraps;
+    }
 }
 
 // Frames in the buffer the game has not decoded yet, or "all of it" once the
 // whole file has been delivered.
 std::int32_t remain_frames(const AtracContext &context) {
-    if (!context.streaming || context.written >= context.track.file_size) return kRemainAllDataOnMemory;
-    const std::uint32_t from = current_frame_offset(context);
-    if (context.written <= from) return 0;
-    return static_cast<std::int32_t>((context.written - from) / context.track.block_align);
+    if (!context.streaming || context.cursor >= context.track.file_size) return kRemainAllDataOnMemory;
+    const std::uint64_t delivered = play_order(context, context.cursor, context.wraps);
+    const std::uint64_t from = play_order(context, current_frame_offset(context), context.loops_done);
+    if (delivered <= from) return 0;
+    return static_cast<std::int32_t>((delivered - from) / context.track.block_align);
 }
 
 // Where the game writes next, how much fits without overwriting a byte not
@@ -330,11 +366,13 @@ std::uint32_t ring_address(const AtracContext &context, std::uint32_t offset) {
 StreamWrite stream_write(const AtracContext &context) {
     const TrackInfo &track = context.track;
     const std::uint32_t frames = ring_frames(context);
-    if (frames == 0u) return {context.buffer, 0u, context.written};
+    if (frames == 0u) return {context.buffer, 0u, context.cursor};
     const std::uint32_t ring = frames * track.block_align;
-    const std::uint32_t written = std::max(context.written, track.data_offset);
-    const std::uint32_t pending = written - std::min(written, current_frame_offset(context));
-    std::uint32_t writable = pending < ring ? ring - pending : 0u;
+    const std::uint32_t written = std::max(context.cursor, track.data_offset);
+    const std::uint64_t delivered = play_order(context, written, context.wraps);
+    const std::uint64_t playing = play_order(context, current_frame_offset(context), context.loops_done);
+    const std::uint64_t pending = delivered - std::min(delivered, playing);
+    std::uint32_t writable = pending < ring ? ring - static_cast<std::uint32_t>(pending) : 0u;
     // Contiguous: up to the end of the last slot.
     const std::uint32_t into_ring = (written - track.data_offset) % ring;
     writable = std::min(writable, ring - into_ring);
@@ -589,6 +627,7 @@ void register_atrac_functions(HleRegistrar &hle) {
         context->position += count;
         if (context->position > stop && loops) {
             context->position = track.loop_start;
+            ++context->loops_done;
             if (context->loop_num > 0) --context->loop_num;
         }
         const bool ended = context->position > track.end_sample;
@@ -662,6 +701,12 @@ void register_atrac_functions(HleRegistrar &hle) {
             return;
         }
         context->loop_num = static_cast<std::int32_t>(arg(ctx, 1));
+        // Loops set after the whole file was added: the next data the game
+        // adds is the loop's again.
+        if (context->streaming && context->cursor >= context->track.file_size && looping(*context)) {
+            context->cursor = loop_offset(*context);
+            ++context->wraps;
+        }
         finish_traced(ctx, "sceAtracSetLoopNum", 0u);
     });
 
@@ -736,7 +781,8 @@ void register_atrac_functions(HleRegistrar &hle) {
             return;
         }
         store_added(rt.memory(), *context, write.address, added);
-        finish_traced(ctx, "sceAtracAddStreamData", 0u, "written=" + std::to_string(context->written));
+        finish_traced(ctx, "sceAtracAddStreamData", 0u,
+                      "written=" + std::to_string(context->written) + " next=" + std::to_string(context->cursor));
     });
     // sceAtracGetNextSample(id, outSamples): how many samples the next
     // DecodeData returns.
@@ -820,6 +866,9 @@ void register_atrac_functions(HleRegistrar &hle) {
             const std::uint32_t address = ring_address(*context, from);
             context->stored.clear();
             context->written = from;
+            context->cursor = from;
+            context->wraps = 0u;
+            context->loops_done = 0u;
             store_added(rt.memory(), *context, address, added);
             context->cached_frame = -1;
             context->next_frame = -1;
