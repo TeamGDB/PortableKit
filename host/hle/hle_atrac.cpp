@@ -1,7 +1,8 @@
 // sceAtrac3plus: a game's music. A track is an ATRAC3 or ATRAC3plus WAVE file,
 // either read whole into guest memory (sceAtracSetDataAndGetID) or streamed:
 // the start of the file in a buffer, and the rest added by the game as it
-// plays (sceAtracSetHalfwayBufferAndGetID, sceAtracAddStreamData). The library
+// plays (sceAtracSetHalfwayBufferAndGetID, sceAtracAddStreamData, or a
+// SetData whose buffer is smaller than the file). The library
 // decodes it one frame per call into 16-bit stereo PCM, which the game's own
 // decode threads then hand to sceAudio. Frames are decoded with FFmpeg (audio/atrac_decoder),
 // so without it nothing here is bound and the imports stay logging stubs.
@@ -371,8 +372,10 @@ LoadResult load_track(const psprecomp::GuestMemory &memory, std::optional<std::u
     if (read_size > buffer_size) return {atrac_error::kSizeTooSmall, "read size past the buffer"};
     if (auto failed = parse_header(memory, buffer, read_size, context->track)) return {*failed, "bad header"};
     const TrackInfo &track = context->track;
-    if (!streaming && buffer_size < track.file_size)
-        log_once("atrac-partial", "[atrac] a track does not fit its buffer and is not streamed; it is cut short");
+    // A whole-file call (SetData, SetDataAndGetID) given a buffer smaller
+    // than the file streams too: the buffer holds its first bufferSize bytes
+    // and the game refills it through GetStreamDataInfo/AddStreamData.
+    if (!streaming && buffer_size < track.file_size) streaming = true;
     if (!context->decoder.open(track.codec, track.channels, track.block_align, track.extradata))
         return {atrac_error::kBadCodecParam, "decoder refused the stream"};
     auto &table = contexts();
