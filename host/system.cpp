@@ -91,6 +91,7 @@ void install_system(Runtime &runtime, const psprecomp::Elf32Image &elf, const Pr
     register_mpeg(hle);
     register_psmfplayer(hle);
     register_psmf(hle);
+    register_net_offline(hle);
     register_font(hle);
     register_utility(hle, paths.memory_stick);
     register_adhoc(hle);

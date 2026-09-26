@@ -141,6 +141,8 @@ sceHttp,0xEDEEB999,sceHttpReadData
 sceHttp,0xF49934F6,sceHttpSetMallocFunction
 sceHttp,0xF9D8EB63,sceHttpsEnd
 sceHttp,0xFCF8C055,sceHttpDeleteTemplate
+sceHttp,0x76D1363B,sceHttpSaveSystemCookie
+sceHttp,0xF1657B22,sceHttpLoadSystemCookie
 sceImpose,0x36AA6E91,sceImposeSetLanguageMode
 sceImpose,0x72189C48,sceImposeSetUMDPopup
 sceImpose,0x24FD7BCF,sceImposeGetLanguageMode
@@ -249,6 +251,8 @@ sceNetApctl,0x5963991B,sceNetApctlDelHandler
 sceNetApctl,0x8ABADD51,sceNetApctlAddHandler
 sceNetApctl,0xB3EDD0EC,sceNetApctlTerm
 sceNetApctl,0xE2F91F9B,sceNetApctlInit
+sceNetApctl,0xCFB957C6,sceNetApctlConnect
+sceNetApctl,0x5DEAC81B,sceNetApctlGetState
 sceNetInet,0x17943399,sceNetInetInit
 sceNetInet,0x1A33F9AE,sceNetInetBind
 sceNetInet,0x2FE71FE7,sceNetInetSetsockopt
@@ -265,6 +269,14 @@ sceNetInet,0xCDA85C99,sceNetInetRecv
 sceNetInet,0xD10A1A7A,sceNetInetListen
 sceNetInet,0xDB094E1B,sceNetInetAccept
 sceNetInet,0xE247B6D6,sceNetInetGetpeername
+sceNetInet,0x4CFE4E56,sceNetInetShutdown
+sceNetInet,0x05038FC7,sceNetInetSendto
+sceNetInet,0xC91142E4,sceNetInetRecvfrom
+sceNetInet,0x4A114C7C,sceNetInetGetsockopt
+sceNetInet,0x162E6FD5,sceNetInetGetsockname
+sceNetInet,0x5BE8D595,sceNetInetSelect
+sceNetInet,0xFBABE411,sceNetInetGetErrno
+sceNetInet,0xD0792666,sceNetInetInetNtop
 sceOpenPSID,0xC69BEBCE,sceOpenPSIDGetOpenPSID
 scePower,0x04B7766E,scePowerRegisterCallback
 scePower,0x469989AD,scePowerSetClockFrequency630
@@ -375,6 +387,12 @@ sceUtility,0xC492F751,sceUtilityGameSharingInitStart
 sceUtility,0xD81957B7,sceUtilityScreenshotGetStatus
 sceUtility,0xEFC6F80F,sceUtilityGameSharingShutdownStart
 sceUtility,0xF9E0008C,sceUtilityScreenshotShutdownStart
+sceUtility,0x1579A159,sceUtilityLoadNetModule
+sceUtility,0x64D50C56,sceUtilityUnloadNetModule
+sceUtility,0xCDC3AA41,sceUtilityHtmlViewerInitStart
+sceUtility,0x05AFB9E4,sceUtilityHtmlViewerUpdate
+sceUtility,0xBDA7D894,sceUtilityHtmlViewerGetStatus
+sceUtility,0xF5CE1134,sceUtilityHtmlViewerShutdownStart
 sceWlanDrv,0x0C622081,sceWlanGetEtherAddr
 sceWlanDrv,0xD7763699,sceWlanGetSwitchState
 StdioForUser,0x172D316E,sceKernelStdin
@@ -527,3 +545,8 @@ scePsmfPlayer,0xB9848A74,scePsmfPlayerGetAudioData
 scePsmfPlayer,0xDF089680,scePsmfPlayerGetPsmfInfo
 scePsmfPlayer,0xE792CD94,scePsmfPlayerReleasePsmf
 scePsmfPlayer,0xF8EF08A6,scePsmfPlayerGetCurrentStatus
+sceNetResolver,0xF3370E61,sceNetResolverInit
+sceNetResolver,0x6138194A,sceNetResolverTerm
+sceNetResolver,0x94523E09,sceNetResolverDelete
+sceNetResolver,0x244172AF,sceNetResolverCreate
+sceNetResolver,0x224C5F44,sceNetResolverStartNtoA
