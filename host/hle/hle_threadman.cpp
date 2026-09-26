@@ -172,6 +172,10 @@ void register_time(HleRegistrar &hle) {
     hle.add("ThreadManForUser", "sceKernelGetSystemTimeLow", [](Runtime &, AllegrexContext &ctx) {
         kernel().finish(ctx, static_cast<std::uint32_t>(kernel().now_us()));
     });
+    // The system clock counts microseconds, so the conversion is the value.
+    hle.add("ThreadManForUser", "sceKernelUSec2SysClockWide", [](Runtime &, AllegrexContext &ctx) {
+        kernel().finish64(ctx, arg(ctx, 0));
+    });
     hle.add("ThreadManForUser", "sceKernelSysClock2USecWide", [](Runtime &rt, AllegrexContext &ctx) {
         const std::uint64_t clock = arg64(ctx, 0);
         if (arg(ctx, 2) != 0u) rt.memory().store32(arg(ctx, 2), static_cast<std::uint32_t>(clock / 1'000'000u));
@@ -412,6 +416,36 @@ void register_mutexes(HleRegistrar &hle) {
         wait.value = static_cast<std::uint32_t>(count);
         wait.timeout_address = arg(ctx, 2);
         kernel().block(ctx, wait, 0u);
+    });
+    // The same as sceKernelLockMutex, but a mutex another thread holds is
+    // SCE_KERNEL_ERROR_MUTEX_LOCKED instead of a wait.
+    hle.add("ThreadManForUser", "sceKernelTryLockMutex", [](Runtime &, AllegrexContext &ctx) {
+        const SceUID uid = as_signed(arg(ctx, 0));
+        const auto count = as_signed(arg(ctx, 1));
+        auto found = kernel().mutexes.find(uid);
+        if (found == kernel().mutexes.end()) {
+            kernel().finish(ctx, error::kMutexNotFound);
+            return;
+        }
+        if (count <= 0) {
+            kernel().finish(ctx, error::kIllegalCount);
+            return;
+        }
+        Mutex &mutex = found->second;
+        if (mutex.lock_count == 0) {
+            mutex.owner = kernel().current_uid();
+            mutex.lock_count = count;
+            kernel().finish(ctx, 0u);
+        } else if (mutex.owner == kernel().current_uid()) {
+            if ((mutex.attributes & kMutexAttrRecursive) == 0u) {
+                kernel().finish(ctx, error::kMutexRecursiveNotAllowed);
+                return;
+            }
+            mutex.lock_count += count;
+            kernel().finish(ctx, 0u);
+        } else {
+            kernel().finish(ctx, error::kMutexLocked);
+        }
     });
     hle.add("ThreadManForUser", "sceKernelUnlockMutex", [](Runtime &, AllegrexContext &ctx) {
         const SceUID uid = as_signed(arg(ctx, 0));
@@ -765,10 +799,13 @@ void register_kernel_library(HleRegistrar &hle) {
         kernel().set_interrupts_enabled(false);
         kernel().finish(ctx, was_enabled ? 1u : 0u);
     });
-    hle.add("Kernel_Library", "sceKernelCpuResumeIntr", [](Runtime &, AllegrexContext &ctx) {
+    const auto resume_interrupts = [](Runtime &, AllegrexContext &ctx) {
         kernel().set_interrupts_enabled(arg(ctx, 0) != 0u);
         kernel().finish(ctx, 0u);
-    });
+    };
+    hle.add("Kernel_Library", "sceKernelCpuResumeIntr", resume_interrupts);
+    // With a pipeline sync on a PSP, which has nothing to wait for here.
+    hle.add("Kernel_Library", "sceKernelCpuResumeIntrWithSync", resume_interrupts);
     hle.add("Kernel_Library", "sceKernelMemset", [](Runtime &rt, AllegrexContext &ctx) {
         const std::uint32_t address = arg(ctx, 0);
         const auto value = static_cast<std::uint8_t>(arg(ctx, 1));

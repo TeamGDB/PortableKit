@@ -8,6 +8,7 @@
 
 #include <cstdlib>
 #include <iostream>
+#include <optional>
 
 namespace portablekit {
 namespace {
@@ -93,12 +94,44 @@ void register_sysmem(HleRegistrar &hle) {
     });
 
     hle.add("sceSuspendForUser", "sceKernelPowerTick", success);
-    hle.add("sceSuspendForUser", "sceKernelVolatileMemLock", [](Runtime &rt, AllegrexContext &ctx) {
+    // The 4 MiB at kVolatileMemoryBase that a PSP lends a game while it is
+    // not suspending: (unused, void **address, int *size). One holder at a
+    // time; Lock waits for it, TryLock fails with ..._POWER_VMEM_IN_USE.
+    static bool volatile_locked = false;
+    const auto grant = [](Runtime &rt, AllegrexContext &ctx) {
+        volatile_locked = true;
         if (arg(ctx, 1) != 0u) rt.memory().store32(arg(ctx, 1), kVolatileMemoryBase);
         if (arg(ctx, 2) != 0u) rt.memory().store32(arg(ctx, 2), kVolatileMemorySize);
+    };
+    hle.add("sceSuspendForUser", "sceKernelVolatileMemLock", [grant](Runtime &rt, AllegrexContext &ctx) {
+        if (!volatile_locked) {
+            grant(rt, ctx);
+            kernel().finish(ctx, 0u);
+            return;
+        }
+        const std::uint32_t address_out = arg(ctx, 1);
+        const std::uint32_t size_out = arg(ctx, 2);
+        auto &memory = rt.memory();
+        kernel().wait_host(ctx, std::nullopt, [address_out, size_out, &memory](bool) -> std::optional<std::uint32_t> {
+            if (volatile_locked) return std::nullopt;
+            volatile_locked = true;
+            if (address_out != 0u) memory.store32(address_out, kVolatileMemoryBase);
+            if (size_out != 0u) memory.store32(size_out, kVolatileMemorySize);
+            return 0u;
+        });
+    });
+    hle.add("sceSuspendForUser", "sceKernelVolatileMemTryLock", [grant](Runtime &rt, AllegrexContext &ctx) {
+        if (volatile_locked) {
+            kernel().finish(ctx, 0x802B0200u);  // SCE_KERNEL_ERROR_POWER_VMEM_IN_USE
+            return;
+        }
+        grant(rt, ctx);
         kernel().finish(ctx, 0u);
     });
-    hle.add("sceSuspendForUser", "sceKernelVolatileMemUnlock", success);
+    hle.add("sceSuspendForUser", "sceKernelVolatileMemUnlock", [](Runtime &, AllegrexContext &ctx) {
+        volatile_locked = false;
+        kernel().finish(ctx, 0u);
+    });
 
     hle.add("sceDmac", "sceDmacMemcpy", [](Runtime &rt, AllegrexContext &ctx) {
         const std::uint32_t destination = arg(ctx, 0);
