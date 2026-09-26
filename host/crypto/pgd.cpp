@@ -4,9 +4,8 @@
 #include "save_data/savedata_crypto.hpp"
 
 #include <algorithm>
-#include <cstdlib>
-#include <cstring>
-#include <sstream>
+#include <cstdio>
+#include <string>
 
 namespace portablekit::pgd {
 namespace {
@@ -40,6 +39,25 @@ std::string slot_name(std::uint8_t slot) {
     return text;
 }
 
+// The fixed keys (KeySource::fixed): amctrl.1CD4, 1CE4, 1CF4.
+constexpr int kMacMask = 1;
+constexpr int kMaskOut = 2;
+constexpr int kMaskIn = 3;
+
+const char *fixed_key_name(int index) {
+    switch (index) {
+    case kMacMask: return "amctrl.1CD4";
+    case kMaskOut: return "amctrl.1CE4";
+    case kMaskIn: return "amctrl.1CF4";
+    default: return "amctrl.?";
+    }
+}
+
+// The only kind checked against a real file (see pgd.hpp).
+constexpr std::uint32_t kKeyIndex = 1u;
+constexpr std::uint32_t kDrmType = 1u;
+constexpr std::size_t kMacSpan = 0x70u;
+
 } // namespace
 
 KeySource player_keys() {
@@ -55,87 +73,48 @@ KeySource player_keys() {
                      }};
 }
 
-std::string CipherScheme::describe() const {
-    char text[96];
-    std::snprintf(text, sizeof(text), "h%02X-m%d-%c-s%02X-%c-%c-c%u-%c", header_slot, header_mask, vkey_after ? 'a' : 'b',
-                  stream_slot, stream_encrypts ? 'e' : 'd', chained ? 'x' : 'n', counter_start,
-                  block_counters_restart ? 'r' : 'f');
-    return text;
-}
-
-std::vector<std::uint8_t> kirk_slots_used() { return {0x38u, 0x39u, 0x3Au, 0x63u}; }
-
-const char *fixed_key_name(int index) {
-    switch (index) {
-    case 1: return "amctrl.1CD4";
-    case 2: return "amctrl.1CE4";
-    case 3: return "amctrl.1CF4";
-    case 4: return "amctrl.dnas.1A90";
-    case 5: return "amctrl.dnas.1AA0";
-    default: return "amctrl.?";
-    }
-}
-
-std::vector<CipherScheme> candidate_schemes() {
-    std::vector<CipherScheme> schemes;
-    for (const std::uint8_t header : kirk_slots_used())
-        for (int mask = 0; mask <= kFixedKeysUsed; ++mask)
-            for (const bool after : {false, true})
-                for (const std::uint8_t stream : kirk_slots_used())
-                    for (const bool encrypts : {false, true})
-                        for (const bool chained : {false, true})
-                            for (const std::uint32_t start : {0u, 1u})
-                                schemes.push_back(CipherScheme{header, mask, after, stream, encrypts, chained, start, false});
-    return schemes;
-}
-
-CipherScheme active_scheme() {
-    if (const char *text = std::getenv("PORTABLEKIT_PGD_SCHEME"); text != nullptr && *text != '\0') {
-        for (CipherScheme scheme : candidate_schemes()) {
-            for (const bool restart : {false, true}) {
-                scheme.block_counters_restart = restart;
-                if (scheme.describe() == text) return scheme;
-            }
-        }
-    }
-    // Not yet established against a real file: see the file comment.
-    return CipherScheme{0x39u, 0, false, 0x39u, false, true, 1u, false};
-}
-
-std::optional<std::string> bb_cipher(const CipherScheme &scheme, const KeySource &keys, const Block &key,
-                                     const Block &vkey, std::uint32_t seed, std::span<std::uint8_t> data) {
-    const Key16 *header_key = keys.kirk ? keys.kirk(scheme.header_slot) : nullptr;
-    if (header_key == nullptr) return slot_name(scheme.header_slot);
-    const Key16 *stream_key = keys.kirk ? keys.kirk(scheme.stream_slot) : nullptr;
-    if (stream_key == nullptr) return slot_name(scheme.stream_slot);
-    Block context = key;
-    if (scheme.header_mask != 0) {
-        const Key16 *mask = keys.fixed ? keys.fixed(scheme.header_mask) : nullptr;
-        if (mask == nullptr) return fixed_key_name(scheme.header_mask);
-        context = xor_block(context, *mask);
-    }
-    if (!scheme.vkey_after) context = xor_block(context, vkey);
-    Block prefix = Aes128(*header_key).decrypt(context);
-    if (scheme.vkey_after) prefix = xor_block(prefix, vkey);
+std::optional<std::string> bb_cipher(const KeySource &keys, const Block &key, const Block &vkey,
+                                     std::uint32_t position, std::span<std::uint8_t> data) {
+    const Key16 *header_key = keys.kirk ? keys.kirk(0x39u) : nullptr;
+    if (header_key == nullptr) return slot_name(0x39u);
+    const Key16 *stream_key = keys.kirk ? keys.kirk(0x63u) : nullptr;
+    if (stream_key == nullptr) return slot_name(0x63u);
+    const Key16 *mask_in = keys.fixed ? keys.fixed(kMaskIn) : nullptr;
+    if (mask_in == nullptr) return std::string(fixed_key_name(kMaskIn));
+    const Key16 *mask_out = keys.fixed ? keys.fixed(kMaskOut) : nullptr;
+    if (mask_out == nullptr) return std::string(fixed_key_name(kMaskOut));
+    const Block prefix = xor_block(Aes128(*header_key).decrypt(xor_block(xor_block(key, vkey), *mask_in)), *mask_out);
+    const auto counter_block = [&prefix](std::uint32_t n) {
+        Block block = prefix;
+        put32(block, 12u, n);
+        return block;
+    };
     const Aes128 stream(*stream_key);
-    Block previous{};
-    for (std::size_t offset = 0, index = 0; offset < data.size(); offset += 16u, ++index) {
-        Block counter = prefix;
-        put32(counter, 12u, scheme.counter_start + seed + static_cast<std::uint32_t>(index));
-        Block key_stream = scheme.stream_encrypts ? stream.encrypt(counter) : stream.decrypt(counter);
-        if (scheme.chained) key_stream = xor_block(key_stream, previous);
+    Block previous = position == 0u ? Block{} : counter_block(position);
+    for (std::size_t offset = 0; offset < data.size(); offset += 16u) {
+        ++position;
+        const Block counter = counter_block(position);
+        const Block key_stream = xor_block(stream.decrypt(counter), previous);
         previous = counter;
         for (std::size_t i = 0; i < 16u && offset + i < data.size(); ++i) data[offset + i] ^= key_stream[i];
     }
     return std::nullopt;
 }
 
-std::optional<Block> bb_mac(const KeySource &keys, std::uint8_t slot, std::span<const std::uint8_t> data,
-                            const Block &vkey) {
-    const Key16 *key = keys.kirk ? keys.kirk(slot) : nullptr;
-    if (key == nullptr) return std::nullopt;
+std::optional<Block> header_mac(const KeySource &keys, std::span<const std::uint8_t> data, const Block &vkey,
+                                std::string &missing) {
+    const Key16 *key = keys.kirk ? keys.kirk(0x38u) : nullptr;
+    if (key == nullptr) {
+        missing = slot_name(0x38u);
+        return std::nullopt;
+    }
+    const Key16 *mask = keys.fixed ? keys.fixed(kMacMask) : nullptr;
+    if (mask == nullptr) {
+        missing = fixed_key_name(kMacMask);
+        return std::nullopt;
+    }
     const Aes128 cipher(*key);
-    return cipher.encrypt(xor_block(savedata::cmac(cipher, data), vkey));
+    return cipher.encrypt(xor_block(xor_block(savedata::cmac(cipher, data), vkey), *mask));
 }
 
 bool desc_plausible(const Desc &desc, std::uint64_t file_size) {
@@ -144,27 +123,31 @@ bool desc_plausible(const Desc &desc, std::uint64_t file_size) {
 }
 
 std::optional<PgdFile> PgdFile::open(std::span<const std::uint8_t> header, const Block &vkey, std::uint64_t file_size,
-                                     const KeySource &keys, const CipherScheme &scheme,
-                                     std::optional<std::uint8_t> mac_slot, std::string &error) {
+                                     const KeySource &keys, std::string &error) {
     if (header.size() < kHeaderSize || header[0] != 0u || header[1] != 'P' || header[2] != 'G' || header[3] != 'D') {
         error = "not a PGD file";
         return std::nullopt;
     }
-    if (mac_slot) {
-        const auto mac = bb_mac(keys, *mac_slot, header.subspan(0, 0x80u), vkey);
-        if (!mac) {
-            error = "the keys file has no " + slot_name(*mac_slot);
-            return std::nullopt;
-        }
-        if (*mac != read_block(header, 0x80u)) {
-            error = "the header MAC does not match: a wrong key, or not this file's key";
-            return std::nullopt;
-        }
+    const std::uint32_t key_index = le32(header, 0x04u), drm_type = le32(header, 0x08u);
+    if (key_index != kKeyIndex || drm_type != kDrmType) {
+        error = "a kind of PGD not supported yet (key index " + std::to_string(key_index) + ", DRM type " +
+                std::to_string(drm_type) + ")";
+        return std::nullopt;
+    }
+    std::string missing;
+    const auto mac = header_mac(keys, header.subspan(0, kMacSpan), vkey, missing);
+    if (!mac) {
+        error = "the keys file has no " + missing;
+        return std::nullopt;
+    }
+    if (*mac != read_block(header, kMacSpan)) {
+        error = "the header MAC does not match: a wrong key, or not this file's key";
+        return std::nullopt;
     }
     std::array<std::uint8_t, 0x30> desc_bytes{};
     std::copy_n(header.begin() + 0x30, desc_bytes.size(), desc_bytes.begin());
-    if (const auto missing = bb_cipher(scheme, keys, read_block(header, 0x10u), vkey, 0u, desc_bytes)) {
-        error = "the keys file has no " + *missing;
+    if (const auto absent = bb_cipher(keys, read_block(header, 0x10u), vkey, 0u, desc_bytes)) {
+        error = "the keys file has no " + *absent;
         return std::nullopt;
     }
     PgdFile file;
@@ -174,12 +157,11 @@ std::optional<PgdFile> PgdFile::open(std::span<const std::uint8_t> header, const
     file.desc_.block_size = le32(desc_bytes, 0x18u);
     file.desc_.data_offset = le32(desc_bytes, 0x1Cu);
     if (!desc_plausible(file.desc_, file_size)) {
-        error = "the header does not decrypt to a valid description: a wrong key, or not this file's key";
+        error = "the header does not decrypt to a valid description";
         return std::nullopt;
     }
     file.vkey_ = vkey;
     file.keys_ = keys;
-    file.scheme_ = scheme;
     return file;
 }
 
@@ -193,8 +175,8 @@ std::size_t PgdFile::read(std::uint64_t offset, std::span<std::uint8_t> out, con
             cache_.assign(block_size, 0u);
             const std::size_t got = read_raw(desc_.data_offset + block * block_size, cache_);
             if (got == 0u) break;
-            const auto seed = scheme_.block_counters_restart ? 0u : static_cast<std::uint32_t>(block * block_size / 16u);
-            if (bb_cipher(scheme_, keys_, desc_.data_key, vkey_, seed, cache_)) break;
+            if (bb_cipher(keys_, desc_.data_key, vkey_, static_cast<std::uint32_t>(block * block_size / 16u), cache_))
+                break;
             cached_block_ = block;
         }
         const std::size_t within = static_cast<std::size_t>(position % block_size);
@@ -207,31 +189,27 @@ std::size_t PgdFile::read(std::uint64_t offset, std::span<std::uint8_t> out, con
 }
 
 std::vector<std::uint8_t> PgdFile::build(std::span<const std::uint8_t> plain, const Block &desc_key,
-                                         const Block &data_key, const Block &vkey, const KeySource &keys,
-                                         const CipherScheme &scheme, std::uint8_t mac_slot) {
+                                         const Block &data_key, const Block &vkey, const KeySource &keys) {
     constexpr std::uint32_t kBlock = 0x400u;
     const std::size_t blocks = (plain.size() + kBlock - 1u) / kBlock;
     std::vector<std::uint8_t> file(kHeaderSize + blocks * kBlock, 0u);
     file[1] = 'P';
     file[2] = 'G';
     file[3] = 'D';
-    put32(file, 0x04u, 1u);
-    put32(file, 0x08u, 1u);
+    put32(file, 0x04u, kKeyIndex);
+    put32(file, 0x08u, kDrmType);
     std::copy(desc_key.begin(), desc_key.end(), file.begin() + 0x10);
     std::span<std::uint8_t> desc(file.data() + 0x30, 0x30);
     std::copy(data_key.begin(), data_key.end(), desc.begin());
     put32(desc, 0x14u, static_cast<std::uint32_t>(plain.size()));
     put32(desc, 0x18u, kBlock);
     put32(desc, 0x1Cu, kHeaderSize);
-    (void)bb_cipher(scheme, keys, desc_key, vkey, 0u, desc);
+    (void)bb_cipher(keys, desc_key, vkey, 0u, desc);
     std::copy(plain.begin(), plain.end(), file.begin() + kHeaderSize);
-    for (std::size_t b = 0; b < blocks; ++b) {
-        std::span<std::uint8_t> block(file.data() + kHeaderSize + b * kBlock, kBlock);
-        const auto seed = scheme.block_counters_restart ? 0u : static_cast<std::uint32_t>(b * kBlock / 16u);
-        (void)bb_cipher(scheme, keys, data_key, vkey, seed, block);
-    }
-    if (const auto mac = bb_mac(keys, mac_slot, std::span<const std::uint8_t>(file.data(), 0x80u), vkey))
-        std::copy(mac->begin(), mac->end(), file.begin() + 0x80);
+    (void)bb_cipher(keys, data_key, vkey, 0u, std::span<std::uint8_t>(file.data() + kHeaderSize, blocks * kBlock));
+    std::string missing;
+    if (const auto mac = header_mac(keys, std::span<const std::uint8_t>(file.data(), kMacSpan), vkey, missing))
+        std::copy(mac->begin(), mac->end(), file.begin() + kMacSpan);
     return file;
 }
 

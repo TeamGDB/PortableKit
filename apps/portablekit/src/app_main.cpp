@@ -42,6 +42,7 @@
 
 #include "psprecomp/interpreter.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -431,11 +432,11 @@ int command_keys(const Arguments &args) {
         }
         return ok ? 0 : kKeysRejected;
     }
-    // keys pgd-check <game> <path on the disc> <key, 32 hex digits>: which
-    // way of running the PGD cipher (crypto/pgd.hpp) turns this file's
-    // header into a valid description, with the keys file's keys. The key is
-    // the one the game passes to sceIoIoctl 0x04100001 (<prefix>_TRACE_IO
-    // shows it). Prints scheme names and the start of the first data block,
+    // keys pgd-check <game> <path on the disc> <key, 32 hex digits>: whether
+    // this PGD file (crypto/pgd.hpp) opens with the keys file's keys: its
+    // header MAC matches and its description is valid. The key is the one the
+    // game passes to sceIoIoctl 0x04100001 (<prefix>_TRACE_IO shows it).
+    // Prints the description and how much of the first data block is zero,
     // never a key.
     if (action == "pgd-check") {
         if (args.positional.size() < 5) return report_error(kUsage, "keys pgd-check needs <game> <path on the disc> <key>");
@@ -453,32 +454,21 @@ int command_keys(const Arguments &args) {
         const std::uint64_t base = static_cast<std::uint64_t>(entry->lba) * IsoImage::kSectorSize;
         std::vector<std::uint8_t> header(pgd::kHeaderSize);
         iso.read(base, header);
-        const pgd::KeySource keys = pgd::player_keys();
-        std::size_t matches = 0;
-        std::set<std::string> missing;
-        for (pgd::CipherScheme scheme : pgd::candidate_schemes()) {
-            std::string error;
-            auto file = pgd::PgdFile::open(header, vkey, entry->size, keys, scheme, std::nullopt, error);
-            if (!file) {
-                if (error.find("keys file has no") != std::string::npos) missing.insert(error);
-                continue;
-            }
-            ++matches;
-            for (const bool restart : {false, true}) {
-                scheme.block_counters_restart = restart;
-                auto view = pgd::PgdFile::open(header, vkey, entry->size, keys, scheme, std::nullopt, error);
-                std::vector<std::uint8_t> first(32);
-                view->read(0, first, [&iso, base](std::uint64_t offset, std::span<std::uint8_t> out) {
-                    return iso.read(base + offset, out);
-                });
-                std::cout << scheme.describe() << ": data size " << view->size() << ", first bytes";
-                for (const std::uint8_t byte : first) std::printf(" %02x", byte);
-                std::cout << "\n";
-            }
+        std::string error;
+        auto file = pgd::PgdFile::open(header, vkey, entry->size, pgd::player_keys(), error);
+        if (!file) {
+            std::cout << "does not open: " << error << "\n";
+            return 1;
         }
-        for (const std::string &error : missing) std::cout << "some schemes could not be tried: " << error << "\n";
-        std::cout << matches << " scheme(s) give a valid description\n";
-        return matches != 0u ? 0 : 1;
+        std::vector<std::uint8_t> first(file->desc().block_size);
+        const std::size_t got = file->read(0, first, [&iso, base](std::uint64_t offset, std::span<std::uint8_t> out) {
+            return iso.read(base + offset, out);
+        });
+        first.resize(got);
+        std::cout << "header MAC matches; data size " << file->size() << ", blocks of " << file->desc().block_size
+                  << " from " << file->desc().data_offset << "; first block: "
+                  << std::count(first.begin(), first.end(), std::uint8_t{0}) << " of " << got << " bytes zero\n";
+        return 0;
     }
     if (action != "status") return report_error(kUsage, "keys takes import, status or pgd-check");
     const KeysReport &report = active_keys();

@@ -106,11 +106,6 @@ struct OpenFile {
     bool release_after_async{};
     SceUID async_callback{};
     std::uint32_t async_callback_argument{};
-    // PGD (crypto/pgd.hpp): opened with flag 0x40000000, the file becomes a
-    // decrypted view once the game gives its key with ioctl 0x04100001;
-    // position and size then count decrypted bytes.
-    bool pgd_requested{};
-    std::shared_ptr<pgd::PgdFile> pgd;
 };
 
 // A read-ahead the game asked the drive for: a range of sectors it wants in
@@ -219,7 +214,6 @@ std::int64_t open_file(const std::string &full_path, std::uint32_t flags) {
     const SplitPath split = split_path(full_path);
     OpenFile file;
     file.path = full_path;
-    file.pgd_requested = (flags & pgd::kOpenFlag) != 0u;
     if (split.device == Device::Disc) {
         if (!io().disc) return static_cast<std::int32_t>(io_error::kDeviceNotFound);
         if ((flags & kOpenWrite) != 0u) return static_cast<std::int32_t>(io_error::kReadOnly);
@@ -361,6 +355,25 @@ static std::uint32_t read_filtered(Runtime &rt, std::uint32_t fd, OpenFile &file
     return static_cast<std::uint32_t>(buffer.size());
 }
 
+// A PGD file's decrypted data as a file filter, reading the encrypted bytes
+// through read_open_file.
+class PgdFilter final : public hle_extension::FileFilter {
+public:
+    PgdFilter(std::uint32_t fd, pgd::PgdFile file) : fd_(fd), file_(std::move(file)) {}
+    [[nodiscard]] std::uint64_t size() const override { return file_.size(); }
+    std::size_t read(std::uint64_t offset, std::uint8_t *destination, std::size_t length) override {
+        const std::uint32_t fd = fd_;
+        return file_.read(offset, std::span<std::uint8_t>(destination, length),
+                          [fd](std::uint64_t at, std::span<std::uint8_t> out) {
+                              return read_open_file(fd, at, out.data(), out.size());
+                          });
+    }
+
+private:
+    std::uint32_t fd_;
+    pgd::PgdFile file_;
+};
+
 std::int64_t read_guest_file(const std::string &path, std::uint64_t offset, std::uint8_t *output, std::size_t size) {
     const std::int64_t fd = open_file(path, kOpenRead);
     if (fd < 0) return fd;
@@ -373,21 +386,6 @@ namespace {
 
 // The work of sceIoRead, sceIoWrite and sceIoLseek, shared with their
 // asynchronous forms.
-// The file's own bytes at `offset`, before any PGD decryption.
-std::size_t read_raw(OpenFile &file, std::uint64_t offset, std::span<std::uint8_t> out) {
-    if (file.kind == OpenFile::Kind::Disc) {
-        if (!io().disc) return 0u;
-        return io().disc->read(file.disc_offset + offset, out);
-    }
-    if (file.kind != OpenFile::Kind::Host) return 0u;
-    file.host->clear();
-    file.host->seekg(static_cast<std::streamoff>(offset));
-    file.host->read(reinterpret_cast<char *>(out.data()), static_cast<std::streamsize>(out.size()));
-    const auto count = static_cast<std::size_t>(file.host->gcount());
-    file.host->clear();
-    return count;
-}
-
 std::uint32_t read_file_op(Runtime &rt, std::uint32_t fd, std::uint32_t address, std::uint32_t requested) {
     auto found = io().files.find(fd);
     if (found == io().files.end() ||
@@ -397,16 +395,7 @@ std::uint32_t read_file_op(Runtime &rt, std::uint32_t fd, std::uint32_t address,
     if (file.filter) return read_filtered(rt, fd, file, address, requested);
     std::vector<std::uint8_t> buffer;
     std::uint32_t result = 0u;
-    if (file.pgd) {
-        const std::uint64_t available = file.position < file.size ? file.size - file.position : 0u;
-        buffer.resize(static_cast<std::size_t>(std::min<std::uint64_t>(requested, available)));
-        OpenFile *raw_file = &file;
-        const std::size_t count = file.pgd->read(file.position, buffer, [raw_file](std::uint64_t offset, std::span<std::uint8_t> out) {
-            return read_raw(*raw_file, offset, out);
-        });
-        buffer.resize(count);
-        result = static_cast<std::uint32_t>(count);
-    } else if (file.kind == OpenFile::Kind::Disc) {
+    if (file.kind == OpenFile::Kind::Disc) {
         const std::uint64_t available = file.position < file.size ? file.size - file.position : 0u;
         requested = static_cast<std::uint32_t>(std::min<std::uint64_t>(requested, available));
         const std::uint64_t unit = file.sector_units ? IsoImage::kSectorSize : 1u;
@@ -547,9 +536,10 @@ std::uint32_t ioctl_op(Runtime &rt, AllegrexContext &ctx) {
     if (found == io().files.end()) return io_error::kBadFileDescriptor;
     OpenFile &file = found->second;
     // PGD: the key of a file opened with flag 0x40000000. The header is read
-    // and checked; from here on reads and seeks see the decrypted data.
-    // Phantasy Star Portable 2 Infinity opens INSDIR/MEDIA.FPB this way.
-    if (command == pgd::kIoctlSetKey && input != 0u && input_size >= 16u &&
+    // and checked; from here on reads and seeks see the decrypted data, through
+    // a file filter (hle_extension::set_file_filter). Phantasy Star Portable 2
+    // Infinity opens INSDIR/MEDIA.FPB this way.
+    if (command == pgd::kIoctlSetKey && input != 0u && input_size >= 16u && !file.sector_units &&
         (file.kind == OpenFile::Kind::Disc || file.kind == OpenFile::Kind::Host)) {
         // What a PSP answers for a PGD file it cannot use has not been
         // traced: the I/O error.
@@ -557,19 +547,17 @@ std::uint32_t ioctl_op(Runtime &rt, AllegrexContext &ctx) {
         pgd::Block vkey{};
         for (std::uint32_t i = 0; i < 16u; ++i) vkey[i] = memory.load8(input + i);
         std::vector<std::uint8_t> header(pgd::kHeaderSize);
-        header.resize(read_raw(file, 0u, header));
+        header.resize(read_open_file(fd, 0u, header.data(), header.size()));
+        const std::uint64_t raw_size = file.filter ? file.unfiltered_size : file.size;
         std::string error;
-        auto opened = pgd::PgdFile::open(header, vkey, file.size, pgd::player_keys(), pgd::active_scheme(), std::nullopt, error);
+        auto opened = pgd::PgdFile::open(header, vkey, raw_size, pgd::player_keys(), error);
         if (!opened) {
             log_once("pgd-" + file.path, "[pgd] " + file.path + ": cannot decrypt: " + error +
-                                             " (see docs/DESKTOP_APP.md, \"Keys\", for the PGD keys)");
+                                             " (see docs/DESKTOP_APP.md, \"PGD data\")");
             return kPgdUnusable;
         }
-        if (trace_io())
-            std::cerr << "[io] pgd " << file.path << " size " << opened->size() << " scheme "
-                      << pgd::active_scheme().describe() << "\n";
-        file.pgd = std::make_shared<pgd::PgdFile>(std::move(*opened));
-        file.size = file.pgd->size();
+        if (trace_io()) std::cerr << "[io] pgd " << file.path << " size " << opened->size() << "\n";
+        (void)set_open_file_filter(fd, std::make_shared<PgdFilter>(fd, std::move(*opened)));
         file.position = 0u;
         return 0u;
     }

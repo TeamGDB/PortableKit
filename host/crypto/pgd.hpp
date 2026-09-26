@@ -14,17 +14,25 @@
 //   0x30  desc (0x30 bytes, encrypted with descKey and the version key):
 //           dataKey (16), version (0), dataSize, blockSize (0x400),
 //           dataOffset (0x90), padding (16)
-//   0x60  table MAC        0x70  header MAC (device key)   0x80  header MAC (fixed key)
-//   0x90  data: blocks of blockSize, each encrypted with dataKey and the
-//         version key, with a block-number counter
+//   0x60  table MAC        0x70  header MAC     0x80  header MAC (device key)
+//   0x90  data: blocks of blockSize, encrypted with dataKey and the version key
 //
-// The cipher is the console's "BB" cipher: a key stream of AES blocks under
-// a KIRK key slot, from a prefix made by decrypting the header key; the MAC
-// is a CMAC under a KIRK key slot. Which slots, masks and counter conventions
-// a PSP uses are not given by the public descriptions, so they are
-// parameters here (CipherScheme). The one the app uses is the one that turns
-// a real PGD header's desc into its known values (version 0, block size
-// 0x400, data offset 0x90); `portablekit keys pgd-check <file>` finds it.
+// The "BB" cipher and MAC, as established against PSP2i's MEDIA.FPB (key
+// index 1, DRM type 1) with `portablekit keys pgd-check`; `vkey` is the key
+// the game passes to the ioctl:
+//
+//   prefix  = AES-decrypt[kirk.aes.39](key ^ vkey ^ amctrl.1CF4) ^ amctrl.1CE4
+//   counter block n = prefix[0..11], then n as 32 bits little-endian
+//   16 bytes at stream position n (from 0) are XORed with
+//       AES-decrypt[kirk.aes.63](counter block n + 1) ^ counter block n
+//   (counter block 0 counts as zero). The desc is the stream of descKey
+//   from position 0; the data is the stream of dataKey, position = its
+//   offset / 16, running on through the whole file.
+//
+//   header MAC at 0x70 = AES-encrypt[kirk.aes.38](CMAC[kirk.aes.38](bytes
+//   0x00-0x6F) ^ vkey ^ amctrl.1CD4)
+//
+// Other key indices and DRM types are refused: none has been checked.
 //
 // No key value appears here: every key comes from the player's keys file
 // (crypto_keys()), and a missing one is named.
@@ -48,9 +56,8 @@ inline constexpr std::uint32_t kIoctlSetKey = 0x04100001u;
 inline constexpr std::uint32_t kOpenFlag = 0x40000000u;
 
 // Where the keys come from: KIRK AES key slots, and the DRM library's fixed
-// keys, numbered here 1 to 5: amctrl.1CD4, amctrl.1CE4, amctrl.1CF4,
-// amctrl.dnas.1A90 and amctrl.dnas.1AA0 in the keys file. Null when the
-// player's file does not have it.
+// keys, numbered here 1 to 3: amctrl.1CD4, amctrl.1CE4 and amctrl.1CF4 in the
+// keys file. Null when the player's file does not have it.
 struct KeySource {
     std::function<const Key16 *(std::uint8_t slot)> kirk;
     std::function<const Key16 *(int index)> fixed;
@@ -59,42 +66,15 @@ struct KeySource {
 // The keys from crypto_keys().
 [[nodiscard]] KeySource player_keys();
 
-// One way of running the BB cipher; see the file comment.
-struct CipherScheme {
-    std::uint8_t header_slot{};     // KIRK slot that decrypts the header key into the stream prefix
-    int header_mask{};              // fixed key (1-5) XORed into the header key first (0: none)
-    bool vkey_after{};              // the version key XORed into the decrypted prefix, else into the header key
-    std::uint8_t stream_slot{};     // KIRK slot of the key stream
-    bool stream_encrypts{};         // key stream = AES-encrypt(counter block), else AES-decrypt
-    bool chained{};                 // each key stream block is also XORed with the previous counter block
-    std::uint32_t counter_start{};  // counter of the first 16 bytes of a run
-    bool block_counters_restart{};  // each data block's counter starts afresh, else runs on through the file
+// XORs `data` with the key stream of (key, vkey) from 16-byte stream position
+// `position`. Its own inverse. Empty on success, else the missing key's name.
+[[nodiscard]] std::optional<std::string> bb_cipher(const KeySource &keys, const Block &key, const Block &vkey,
+                                                   std::uint32_t position, std::span<std::uint8_t> data);
 
-    [[nodiscard]] std::string describe() const;
-};
-
-// The slots and masks every scheme may use: what `keys status` checks.
-[[nodiscard]] std::vector<std::uint8_t> kirk_slots_used();
-inline constexpr int kFixedKeysUsed = 5;
-// The keys file's name of fixed key `index` (1-5).
-[[nodiscard]] const char *fixed_key_name(int index);
-
-// Every scheme `pgd-check` tries.
-[[nodiscard]] std::vector<CipherScheme> candidate_schemes();
-
-// The scheme the app decrypts with: PORTABLEKIT_PGD_SCHEME (as `describe`
-// prints it) or the built-in default.
-[[nodiscard]] CipherScheme active_scheme();
-
-// XORs `data` with the key stream of (key, vkey) starting at 16-byte
-// counter `seed`. Its own inverse. Empty on success, else the missing key.
-[[nodiscard]] std::optional<std::string> bb_cipher(const CipherScheme &scheme, const KeySource &keys, const Block &key,
-                                                   const Block &vkey, std::uint32_t seed, std::span<std::uint8_t> data);
-
-// The BB MAC of `data` under KIRK slot `slot`, finished with the version key:
-// CMAC, XOR vkey, encrypt once more.
-[[nodiscard]] std::optional<Block> bb_mac(const KeySource &keys, std::uint8_t slot, std::span<const std::uint8_t> data,
-                                          const Block &vkey);
+// The header MAC of `data` (a header's first 0x70 bytes) with the version key.
+// Empty with `missing` set when a key is missing.
+[[nodiscard]] std::optional<Block> header_mac(const KeySource &keys, std::span<const std::uint8_t> data,
+                                              const Block &vkey, std::string &missing);
 
 struct Desc {
     Block data_key{};
@@ -111,33 +91,30 @@ struct Desc {
 class PgdFile {
 public:
     // Reads the header (the file's first 0x90 bytes) with the version key.
-    // `mac_slot` set: the header MAC at 0x80 must match (the MAC check is
-    // off until the slot is known). Empty with `error` set when the header
-    // is not PGD, a key is missing, or it does not decrypt to a valid desc.
+    // Empty with `error` set when the header is not PGD or of a kind not
+    // supported, a key is missing, the MAC does not match, or it does not
+    // decrypt to a valid desc.
     static std::optional<PgdFile> open(std::span<const std::uint8_t> header, const Block &vkey, std::uint64_t file_size,
-                                       const KeySource &keys, const CipherScheme &scheme,
-                                       std::optional<std::uint8_t> mac_slot, std::string &error);
+                                       const KeySource &keys, std::string &error);
 
     [[nodiscard]] const Desc &desc() const noexcept { return desc_; }
     [[nodiscard]] std::uint32_t size() const noexcept { return desc_.data_size; }
 
-    // Decrypts `count` bytes at plain offset `offset`, reading the encrypted
-    // file through `read_raw(offset, out)` (which returns the bytes read).
+    // Decrypts up to `out.size()` bytes at plain offset `offset`, reading the
+    // encrypted file through `read_raw(offset, out)` (which returns the bytes
+    // read). Returns how many, fewer at the end.
     using RawReader = std::function<std::size_t(std::uint64_t offset, std::span<std::uint8_t> out)>;
     std::size_t read(std::uint64_t offset, std::span<std::uint8_t> out, const RawReader &read_raw);
 
     // A PGD made here, for tests: `plain` encrypted with `data_key` and
-    // `vkey` under `scheme`, with a desc key and the MAC at 0x80 under
-    // `mac_slot`.
+    // `vkey`, with a desc key and the header MAC.
     static std::vector<std::uint8_t> build(std::span<const std::uint8_t> plain, const Block &desc_key,
-                                           const Block &data_key, const Block &vkey, const KeySource &keys,
-                                           const CipherScheme &scheme, std::uint8_t mac_slot);
+                                           const Block &data_key, const Block &vkey, const KeySource &keys);
 
 private:
     Desc desc_;
     Block vkey_{};
     KeySource keys_;
-    CipherScheme scheme_;
     std::uint64_t cached_block_{~0ull};
     std::vector<std::uint8_t> cache_;
 };
