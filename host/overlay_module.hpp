@@ -11,12 +11,14 @@
 #include <cstdint>
 
 namespace psprecomp {
-class Runtime;
+class CorpusRuntime;
 }
 
 namespace portablekit {
 
-inline constexpr std::uint32_t kOverlayAbiVersion = 1u;
+// 2: the corpus ABI (psprecomp/corpus_abi.hpp); libraries built before it
+// reference the runtime's own symbols and are refused.
+inline constexpr std::uint32_t kOverlayAbiVersion = 2u;
 
 // An overlay image starts with "MWo3" and a 64-byte header: id, load address,
 // code size, data size, bss size, two end-of-image addresses and a 32-byte
@@ -52,5 +54,5 @@ struct OverlayModuleInfo {
 
 extern "C" {
 PORTABLEKIT_OVERLAY_EXPORT const portablekit::OverlayModuleInfo *portablekit_overlay_info();
-PORTABLEKIT_OVERLAY_EXPORT void portablekit_register_overlay(psprecomp::Runtime &runtime);
+PORTABLEKIT_OVERLAY_EXPORT void portablekit_register_overlay(psprecomp::CorpusRuntime &runtime);
 }

@@ -27,7 +27,8 @@ static void require(bool condition, const char *message) {
 }
 
 static int same_pc_redispatch_count = 0;
-static void same_pc_redispatch_test(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx) {
+static void same_pc_redispatch_test(psprecomp::CorpusRuntime &corpus, psprecomp::AllegrexContext &ctx) {
+    auto &runtime = static_cast<psprecomp::Runtime &>(corpus);
     ++same_pc_redispatch_count;
     if (same_pc_redispatch_count == 3) runtime.stop("same-pc redispatch complete");
     else ctx.pc = 0x08804000u;
@@ -42,14 +43,15 @@ static void post_dispatch_observer(psprecomp::Runtime &, psprecomp::AllegrexCont
     post_dispatch_observed_pc = dispatch_pc;
     post_dispatch_observed_uid = dispatch_thread_uid;
 }
-static void post_dispatch_source(psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+static void post_dispatch_source(psprecomp::CorpusRuntime &, psprecomp::AllegrexContext &ctx) {
     ctx.pc = 0x08804010u;
 }
-static void post_dispatch_stop(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &) {
+static void post_dispatch_stop(psprecomp::CorpusRuntime &corpus, psprecomp::AllegrexContext &) {
+    auto &runtime = static_cast<psprecomp::Runtime &>(corpus);
     runtime.stop("post-dispatch hook complete");
 }
 
-static void chained_same_context(psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+static void chained_same_context(psprecomp::CorpusRuntime &, psprecomp::AllegrexContext &ctx) {
     ctx.pc = 0x08804120u;
 }
 
@@ -63,7 +65,7 @@ static void chained_tick(psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) 
     }
 }
 
-static void chained_switch_context(psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+static void chained_switch_context(psprecomp::CorpusRuntime &, psprecomp::AllegrexContext &ctx) {
     // Scheduler regression: a guest callee reaches an HLE wait and the
     // scheduler restores another PSP thread while native caller frames remain
     // on the host stack.  Even if that thread happens to resume at the caller's
@@ -148,10 +150,10 @@ static void nested_direct_tick(psprecomp::Runtime &, psprecomp::AllegrexContext 
         ctx.pc = 0x08801020u;
     }
 }
-static void nested_direct_leaf(psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+static void nested_direct_leaf(psprecomp::CorpusRuntime &, psprecomp::AllegrexContext &ctx) {
     ctx.pc = 0x08801020u;
 }
-static void nested_direct_middle(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx) {
+static void nested_direct_middle(psprecomp::CorpusRuntime &runtime, psprecomp::AllegrexContext &ctx) {
     if (!runtime.invoke_chained_direct<&nested_direct_leaf, 1u>(ctx)) return;
     nested_direct_middle_resumed = true;
 }
@@ -201,7 +203,8 @@ static constexpr std::uint32_t kInterpreterScratch = 0x08820000u;
 
 static std::uint32_t interpreter_exit_hits = 0u;
 static std::uint32_t interpreter_exit_ra = 0u;
-static void interpreter_exit_function(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx) {
+static void interpreter_exit_function(psprecomp::CorpusRuntime &corpus, psprecomp::AllegrexContext &ctx) {
+    auto &runtime = static_cast<psprecomp::Runtime &>(corpus);
     ++interpreter_exit_hits;
     interpreter_exit_ra = ctx.gpr[31];
     runtime.stop("interpreter reached registered code");
@@ -1082,11 +1085,9 @@ static void test_codegen_extra_instructions() {
         std::ifstream generated(cpp_path);
         text.assign((std::istreambuf_iterator<char>(generated)), std::istreambuf_iterator<char>());
     }
-    require(text.find("void execute_extra_instruction(Runtime &, AllegrexContext &, std::uint32_t, std::uint32_t);") != std::string::npos,
-            "a unit with an extra instruction does not declare execute_extra_instruction");
-    require(text.find("execute_extra_instruction(rt, ctx, 0x08804000u, 0xC0880004u)") != std::string::npos,
+    require(text.find("rt.execute_extra_instruction(ctx, 0x08804000u, 0xC0880004u)") != std::string::npos,
             "LL was not lowered to execute_extra_instruction");
-    require(text.find("execute_extra_instruction(rt, ctx, 0x08804004u, ") != std::string::npos,
+    require(text.find("rt.execute_extra_instruction(ctx, 0x08804004u, ") != std::string::npos,
             "VSBN was not lowered to execute_extra_instruction");
     require(text.find("not lowered yet") == std::string::npos, "an extra instruction was left unsupported");
     std::filesystem::remove_all(root);
@@ -1244,7 +1245,7 @@ static void test_automatic_cross_unit_tail_chaining() {
             "Automatic codegen did not emit a direct-entry native chain across AOT units");
     require(text.find("ctx.pc = 0x08804040u; (void)rt.invoke_chained_direct") == std::string::npos,
             "Direct-entry chain still dirties ctx.pc on its successful hot path");
-    require(text.find("GuestMemory::AotFastView &aot_mem)") != std::string::npos &&
+    require(text.find("AotFastView &aot_mem)") != std::string::npos &&
             text.find("_entry(rt, ctx, 0u, aot_mem)") != std::string::npos,
             "Shared AOT memory was not threaded across generated-unit direct chains");
     // The register-cache lowering passes were removed: generated units must

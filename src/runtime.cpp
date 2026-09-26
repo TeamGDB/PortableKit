@@ -1,5 +1,6 @@
 #include "psprecomp/runtime.hpp"
 #include "psprecomp/common.hpp"
+#include "psprecomp/extra_instructions.hpp"
 #include "psprecomp/interpreter.hpp"
 
 #include <algorithm>
@@ -16,8 +17,9 @@ namespace psprecomp {
 // See Runtime::invoke_chained_direct(). Diagnostics deliberately make this
 // sticky: once instrumentation has been requested, correctness matters more
 // than returning to the production fast path later in the process.
-bool g_runtime_chain_observers_active = false;
-std::uint64_t g_runtime_starvation_interval_fast = 0u;
+// Every Runtime's CorpusRuntime base points here (process_), so the inline
+// direct chain in generated code reads these without a symbol of its own.
+CorpusProcessState g_corpus_process{};
 std::uint64_t g_runtime_thread_switch_generation_fast = 0u;
 
 namespace {
@@ -71,7 +73,7 @@ void load_counted_pcs() {
         if (comma == std::string::npos) break;
         begin = comma + 1u;
     }
-    if (g_counted_pc_size != 0u) g_runtime_chain_observers_active = true;
+    if (g_counted_pc_size != 0u) g_corpus_process.chain_observers_active = true;
 }
 
 inline void count_pc(std::uint32_t pc) noexcept {
@@ -100,7 +102,7 @@ void set_runtime_missing_function_hook(RuntimeMissingFunctionHook hook) noexcept
 void set_runtime_starvation_hook(RuntimeStarvationHook hook, std::uint64_t interval) noexcept {
     g_starvation_hook = interval != 0u ? hook : nullptr;
     g_starvation_interval = interval;
-    g_runtime_starvation_interval_fast = g_starvation_hook != nullptr ? interval : 0u;
+    g_corpus_process.starvation_interval = g_starvation_hook != nullptr ? interval : 0u;
 }
 
 void set_runtime_pre_dispatch_hook(RuntimePreDispatchHook hook) noexcept {
@@ -111,11 +113,11 @@ void set_runtime_post_dispatch_hook(RuntimePostDispatchHook hook) noexcept {
 }
 void set_runtime_pre_chained_call_hook(RuntimePreChainedCallHook hook) noexcept {
     g_pre_chained_call_hook = hook;
-    if (hook != nullptr) g_runtime_chain_observers_active = true;
+    if (hook != nullptr) g_corpus_process.chain_observers_active = true;
 }
 void set_runtime_post_chained_call_hook(RuntimePostChainedCallHook hook) noexcept {
     g_post_chained_call_hook = hook;
-    if (hook != nullptr) g_runtime_chain_observers_active = true;
+    if (hook != nullptr) g_corpus_process.chain_observers_active = true;
 }
 
 void set_runtime_post_import_hook(RuntimePostImportHook hook) noexcept { g_post_import_hook = hook; }
@@ -143,7 +145,10 @@ bool runtime_thread_switch_generation_matches(std::uint64_t generation) noexcept
     return generation == g_runtime_thread_switch_generation_fast;
 }
 
-Runtime::Runtime(std::uint32_t ram_size) : memory_(ram_size) {
+Runtime::Runtime(std::uint32_t ram_size)
+    : CorpusRuntime(&corpus_host_api(), &g_corpus_process), memory_(ram_size) {
+    // RAM never moves after construction, so one view serves every unit.
+    fast_view_ = memory_.aot_fast_view();
     // Most commercial PSP titles use a few hundred import stubs. Seed a small
     // binding table so first use of a late-numbered import does not reallocate
     // in the middle of guest execution; larger profiles can still grow it.
@@ -192,7 +197,7 @@ void append_gpr_dump(std::ostringstream &message, const AllegrexContext &ctx) {
 }
 
 bool Runtime::run_starvation_boundary(AllegrexContext &ctx) {
-    const std::uint64_t interval = g_runtime_starvation_interval_fast;
+    const std::uint64_t interval = g_corpus_process.starvation_interval;
     if (g_starvation_hook == nullptr || interval == 0u) return true;
     // Preserve excess work if a context switch deferred several boundaries.
     dispatches_since_import_ -= std::min(dispatches_since_import_, interval);
@@ -214,7 +219,7 @@ bool Runtime::account_dispatch_work(AllegrexContext &ctx, bool allow_preemption)
 #if !defined(PSPRECOMP_AOT_PRODUCTION_FASTPATHS)
     if (track_dispatch_counters_) ++dispatch_work_count_;
 #endif
-    const std::uint64_t interval = g_runtime_starvation_interval_fast;
+    const std::uint64_t interval = g_corpus_process.starvation_interval;
     if (interval == 0u) return true;
     ++dispatches_since_import_;
     if (!allow_preemption || dispatches_since_import_ < interval) return true;
@@ -362,7 +367,7 @@ void Runtime::register_generated_unit(std::uint32_t unit_index,
         // Mixed automatic-codegen layouts are unsupported. Permanently disable
         // the optional dense path for this Runtime; exact PC dispatch remains.
         generated_units_.fill(nullptr);
-        generated_unit_disabled_.fill(0u);
+        std::fill(std::begin(generated_unit_disabled_), std::end(generated_unit_disabled_), std::uint8_t{0});
         generated_unit_base_ = 0u;
         generated_unit_span_ = 0u;
         generated_unit_layout_valid_ = false;
@@ -519,7 +524,8 @@ std::unordered_map<std::uint32_t, ImportStub> &import_stubs() {
     return table;
 }
 
-void call_import_stub(Runtime &rt, AllegrexContext &ctx) {
+void call_import_stub(CorpusRuntime &corpus, AllegrexContext &ctx) {
+    Runtime &rt = static_cast<Runtime &>(corpus);
     const auto found = import_stubs().find(ctx.pc);
     if (found == import_stubs().end()) {
         rt.stop("No import bound at " + hex32(ctx.pc));
@@ -1300,5 +1306,62 @@ void Runtime::invoke_import(std::string_view library, std::uint32_t nid, Allegre
 
 AllegrexContext &Runtime::cpu() noexcept { return cpu_; }
 const AllegrexContext &Runtime::cpu() const noexcept { return cpu_; }
+
+// The table generated code calls the runtime through (corpus_abi.hpp). Each
+// entry turns the CorpusRuntime it is given back into the Runtime it is.
+struct RuntimeCorpusHost {
+    static Runtime &host(CorpusRuntime &corpus) { return static_cast<Runtime &>(corpus); }
+    static const Runtime &host(const CorpusRuntime &corpus) { return static_cast<const Runtime &>(corpus); }
+
+    static const CorpusHostApi &table() {
+        static const CorpusHostApi api{
+            kCorpusAbiVersion,
+            [](CorpusRuntime &rt, AllegrexContext &ctx, AotFastView *view) {
+                return host(rt).invoke_chained_call(ctx, view);
+            },
+            [](CorpusRuntime &rt, AllegrexContext &ctx, std::uint32_t unit, AotFastView *view) {
+                return host(rt).invoke_chained_unit(ctx, unit, view);
+            },
+            [](CorpusRuntime &rt, AllegrexContext &ctx) { return host(rt).run_starvation_boundary(ctx); },
+            [](CorpusRuntime &rt, std::uint32_t pc, std::uint32_t instruction, const char *reason) {
+                host(rt).unsupported(pc, instruction, reason);
+            },
+            [](CorpusRuntime &rt, std::uint32_t pc, std::uint32_t instruction) {
+                host(rt).arithmetic_overflow(pc, instruction);
+            },
+            [](const CorpusRuntime &rt) { return host(rt).stopped(); },
+            [](CorpusRuntime &rt, std::uint32_t slot, const char *library, std::uint32_t nid, AllegrexContext &ctx) {
+                host(rt).invoke_import_cached(slot, library, nid, ctx);
+            },
+            []() { return capture_runtime_execution_context(); },
+            [](RuntimeExecutionContextToken token) { return runtime_execution_context_matches(token); },
+            [](CorpusRuntime &rt, AllegrexContext &ctx, std::uint32_t pc, std::uint32_t word) {
+                execute_extra_instruction(host(rt), ctx, pc, word);
+            },
+            [](CorpusRuntime &rt, std::uint32_t address, std::uint32_t existing) {
+                return host(rt).memory().aot_load_word_left(address, existing);
+            },
+            [](CorpusRuntime &rt, std::uint32_t address, std::uint32_t existing) {
+                return host(rt).memory().aot_load_word_right(address, existing);
+            },
+            [](CorpusRuntime &rt, std::uint32_t address, std::uint32_t value) {
+                host(rt).memory().aot_store_word_left(address, value);
+            },
+            [](CorpusRuntime &rt, std::uint32_t address, std::uint32_t value) {
+                host(rt).memory().aot_store_word_right(address, value);
+            },
+            [](CorpusRuntime &rt, std::uint32_t address, CorpusFunction function, const char *name) {
+                host(rt).register_function(address, function, name);
+            },
+            [](CorpusRuntime &rt, std::uint32_t unit_index, std::uint32_t unit_address, std::uint32_t unit_span,
+               CorpusFunction function, CorpusEntryFunction entry_function) {
+                host(rt).register_generated_unit(unit_index, unit_address, unit_span, function, entry_function);
+            },
+        };
+        return api;
+    }
+};
+
+const CorpusHostApi &corpus_host_api() { return RuntimeCorpusHost::table(); }
 
 } // namespace psprecomp
