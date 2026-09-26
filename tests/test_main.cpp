@@ -279,6 +279,32 @@ static void test_interpreter_unaligned_word_access() {
             "SWR wrote the wrong bytes");
 }
 
+static void test_interpreter_vcrs() {
+    // VCRS.T C020, C000, C010: (s.y*t.z, s.z*t.x, s.x*t.y). The words the
+    // game has at 0x0889ABA4 are this instruction with other registers.
+    psprecomp::Runtime runtime;
+    runtime.register_function(kInterpreterExit, &interpreter_exit_function, "interpreter_exit");
+    load_program(runtime, kInterpreterBase, {
+        0x66800000u | (1u << 16u) | 0x8000u | (0u << 8u) | 2u,  // vcrs.t C020, C000, C010
+        mips_r(31u, 0u, 0u, 0u, 0x08u),                          // jr ra
+        0u,                                                      // nop
+    });
+    psprecomp::AllegrexContext ctx{};
+    ctx.eat_vfpu_prefixes();
+    const float source[4]{2.0f, 3.0f, 5.0f, 0.0f};
+    const float target[4]{7.0f, 11.0f, 13.0f, 0.0f};
+    ctx.write_vfpu_vector_with_destination_prefix(source, 0u, 3u);
+    ctx.write_vfpu_vector_with_destination_prefix(target, 1u, 3u);
+    ctx.pc = kInterpreterBase;
+    ctx.gpr[31] = kInterpreterExit;
+    require(psprecomp::interpret_allegrex(runtime, ctx) == psprecomp::InterpreterExit::Dispatch,
+            "VCRS.T fixture did not reach the registered exit");
+    float result[4]{};
+    ctx.read_vfpu_vector(result, 2u, 3u);
+    require(result[0] == 39.0f && result[1] == 35.0f && result[2] == 22.0f, "VCRS.T produced the wrong result");
+    require(psprecomp::decode_allegrex(0x66818102u).kind == psprecomp::OpcodeKind::Vcrs, "VCRS.T classification failed");
+}
+
 static void test_interpreter_hi_lo() {
     psprecomp::Runtime runtime;
     runtime.register_function(kInterpreterExit, &interpreter_exit_function, "interpreter_exit");
@@ -1037,6 +1063,7 @@ int main() {
         test_interpreter_delay_slots_and_branch_likely();
         test_interpreter_unaligned_word_access();
         test_interpreter_hi_lo();
+        test_interpreter_vcrs();
         test_interpreter_floating_point();
         test_interpreter_dispatch_fallback();
         test_interpreter_budget_and_disable();

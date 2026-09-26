@@ -710,6 +710,18 @@ std::string emit_regular(const psprecomp::DecodedInstruction &d, std::uint32_t p
             << target << "u, " << length << "u);\n";
         break;
     }
+    case psprecomp::OpcodeKind::Vcrs: {
+        // VCRS.T: (s.y*t.z, s.z*t.x, s.x*t.y), with the usual prefixes.
+        const std::uint32_t destination = d.word & 0x7Fu;
+        const std::uint32_t source = (d.word >> 8u) & 0x7Fu;
+        const std::uint32_t target = (d.word >> 16u) & 0x7Fu;
+        out << "    { float s[4]{}; float t[4]{};\n"
+            << "      ctx.read_vfpu_vector_with_source_prefix(s, " << source << "u, 3u, 0u);\n"
+            << "      ctx.read_vfpu_vector_with_source_prefix(t, " << target << "u, 3u, 1u);\n"
+            << "      const float r[4]{s[1] * t[2], s[2] * t[0], s[0] * t[1], 0.0f};\n"
+            << "      ctx.write_vfpu_vector_with_destination_prefix(r, " << destination << "u, 3u); }\n";
+        break;
+    }
     case psprecomp::OpcodeKind::VcrossQuat: {
         const std::uint32_t size_code = ((d.word >> 7u) & 1u) | (((d.word >> 15u) & 1u) << 1u);
         const std::uint32_t length = size_code + 1u;
