@@ -309,6 +309,12 @@ void register_net(HleRegistrar &hle) {
         if (arg(ctx, 0) != 0u) write_mac(rt.memory(), arg(ctx, 0), own_mac());
         done(ctx, "sceNetGetLocalEtherAddr", 1, 0u, adhoc::format_mac(own_mac()));
     });
+    // sceNetAdhocDiscoverRequestSuspend(): nothing is being discovered to
+    // suspend. MHP2G imports it.
+    hle.try_add("sceNetAdhocDiscover", "sceNetAdhocDiscoverRequestSuspend", [](Runtime &, AllegrexContext &ctx) {
+        log_once("adhoc-discover-suspend", "[adhoc] sceNetAdhocDiscoverRequestSuspend (UNVERIFIED: no game traced yet)");
+        kernel().finish(ctx, 0u);
+    });
     // sceNetEtherNtostr(const mac *, char *out): "xx:xx:xx:xx:xx:xx".
     hle.add("sceNet", "sceNetEtherNtostr", [](Runtime &rt, AllegrexContext &ctx) {
         auto &memory = rt.memory();

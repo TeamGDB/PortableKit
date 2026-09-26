@@ -30,6 +30,9 @@ IoFileMgrForUser,0xE3EB004C,sceIoDread
 IoFileMgrForUser,0xEB092469,sceIoDclose
 IoFileMgrForUser,0xB8A740F4,sceIoChstat
 IoFileMgrForUser,0x55F4717D,sceIoChdir
+IoFileMgrForUser,0x06A70004,sceIoMkdir
+IoFileMgrForUser,0x1117C65F,sceIoRmdir
+IoFileMgrForUser,0xF27A9C51,sceIoRemove
 Kernel_Library,0x092968F4,sceKernelCpuSuspendIntr
 Kernel_Library,0x15B6446B,sceKernelUnlockLwMutex
 Kernel_Library,0x1839852A,sceKernelMemcpy
@@ -72,6 +75,7 @@ sceAtrac3plus,0x0FAE370E,sceAtracSetHalfwayBufferAndGetID
 sceAtrac3plus,0x36FAABFB,sceAtracGetNextSample
 sceAtrac3plus,0x7DB31251,sceAtracAddStreamData
 sceAtrac3plus,0x83E85EA0,sceAtracGetSecondBufferInfo
+sceAtrac3plus,0xE88F759B,sceAtracGetInternalErrorInfo
 sceAudio,0x01562BA3,sceAudioOutput2Reserve
 sceAudio,0x136CAF51,sceAudioOutputBlocking
 sceAudio,0x13F592BC,sceAudioOutputPannedBlocking
@@ -84,6 +88,7 @@ sceAudio,0xB011922F,sceAudioGetChannelRestLength
 sceAudio,0xB7E1D8E7,sceAudioChangeChannelVolume
 sceAudio,0xCB2E439E,sceAudioSetChannelDataLen
 sceAudio,0xE2D56B2D,sceAudioOutputPanned
+sceAudio,0x63F2889C,sceAudioOutput2ChangeLength
 sceCtrl,0x1F4011E6,sceCtrlSetSamplingMode
 sceCtrl,0x1F803938,sceCtrlReadBufferPositive
 sceCtrl,0x6A2774F3,sceCtrlSetSamplingCycle
@@ -100,6 +105,8 @@ sceDisplay,0x9C6EAAD7,sceDisplayGetVcount
 sceDisplay,0x36CDFADE,sceDisplayWaitVblank
 sceDisplay,0xEEDA2E54,sceDisplayGetFrameBuf
 sceDisplay,0xDBA6C4C4,sceDisplayGetFramePerSec
+sceDisplay,0x773DD3A3,sceDisplayGetCurrentHcount
+sceDisplay,0x4D4E10EC,sceDisplayIsVblank
 sceDmac,0x617F3FE6,sceDmacMemcpy
 sceGe_user,0x03444EB4,sceGeListSync
 sceGe_user,0x05DB22CE,sceGeUnsetCallback
@@ -233,6 +240,7 @@ sceNetAdhocDiscover,0x941B3877,sceNetAdhocDiscoverInitStart
 sceNetAdhocDiscover,0x944DDBC6,sceNetAdhocDiscoverGetStatus
 sceNetAdhocDiscover,0xA2246614,sceNetAdhocDiscoverTerm
 sceNetAdhocDiscover,0xF7D13214,sceNetAdhocDiscoverStop
+sceNetAdhocDiscover,0xA423A21B,sceNetAdhocDiscoverRequestSuspend
 sceNetAdhocMatching,0x2A2A1E07,sceNetAdhocMatchingInit
 sceNetAdhocMatching,0x32B156B3,sceNetAdhocMatchingStop
 sceNetAdhocMatching,0x5E3D4B79,sceNetAdhocMatchingSelectTarget
@@ -341,6 +349,8 @@ sceSuspendForUser,0x090CCB3F,sceKernelPowerTick
 sceSuspendForUser,0x3E0271D3,sceKernelVolatileMemLock
 sceSuspendForUser,0xA14F40B2,sceKernelVolatileMemTryLock
 sceSuspendForUser,0xA569E425,sceKernelVolatileMemUnlock
+sceSuspendForUser,0xEADB1BD7,sceKernelPowerLock
+sceSuspendForUser,0x3AEE7261,sceKernelPowerUnlock
 sceUmdUser,0x20628E6F,sceUmdGetErrorStat
 sceUmdUser,0x46EBB729,sceUmdCheckMedium
 sceUmdUser,0x4A9E5E29,sceUmdWaitDriveStatCB
@@ -351,6 +361,7 @@ sceUmdUser,0xAEE7404D,sceUmdRegisterUMDCallBack
 sceUmdUser,0xBD2BDE07,sceUmdUnRegisterUMDCallBack
 sceUmdUser,0xC6183D47,sceUmdActivate
 sceUmdUser,0x6AF9B50A,sceUmdCancelWaitDriveStat
+sceUmdUser,0xE83742BA,sceUmdDeactivate
 sceUtility,0x180F7B62,sceUtilityGamedataInstallAbort
 sceUtility,0x24AC31EB,sceUtilityGamedataInstallInitStart
 sceUtility,0x2A2B3DE0,sceUtilityLoadModule
@@ -503,6 +514,7 @@ ThreadManForUser,0x33BE4024,sceKernelReferMsgPipeStatus
 ThreadManForUser,0x17C1684E,sceKernelReferThreadStatus
 ThreadManForUser,0xA66B0120,sceKernelReferEventFlagStatus
 ThreadManForUser,0x2C34E053,sceKernelReleaseWaitThread
+ThreadManForUser,0xD13BDE95,sceKernelCheckThreadStack
 UtilsForUser,0x27CC57F0,sceKernelLibcTime
 UtilsForUser,0x3EE30821,sceKernelDcacheWritebackRange
 UtilsForUser,0x6AD345D7,sceKernelSetGPO
@@ -550,3 +562,5 @@ sceNetResolver,0x6138194A,sceNetResolverTerm
 sceNetResolver,0x94523E09,sceNetResolverDelete
 sceNetResolver,0x244172AF,sceNetResolverCreate
 sceNetResolver,0x224C5F44,sceNetResolverStartNtoA
+scePspNpDrm_user,0xA1336091,sceNpDrmSetLicenseeKey
+scePspNpDrm_user,0x08D98894,sceNpDrmEdataSetupKey

@@ -18,6 +18,7 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <set>
 #include <vector>
 
 namespace portablekit {
@@ -784,6 +785,34 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
     hle.add("IoFileMgrForUser", "sceIoDclose", [](Runtime &, AllegrexContext &ctx) {
         kernel().finish(ctx, io().files.erase(arg(ctx, 0)) != 0u ? 0u : io_error::kBadFileDescriptor);
     });
+    // sceIoMkdir(path, mode), sceIoRmdir(path), sceIoRemove(path): on the
+    // memory stick, which is a host folder; the disc is read-only. God of
+    // War and Vice City Stories import them; no game has been seen calling
+    // them yet.
+    const auto stick_op = [](const char *name, int op) {
+        return [name, op](Runtime &rt, AllegrexContext &ctx) {
+            static std::set<std::string> said;
+            if (said.insert(name).second) std::cerr << "[io] " << name << " (UNVERIFIED: no game traced yet)\n";
+            const std::string path = read_cstring(rt.memory(), arg(ctx, 0), 256u);
+            const SplitPath split = split_path(path);
+            if (split.device != Device::MemoryStick) {
+                kernel().finish(ctx, split.device == Device::Disc ? io_error::kReadOnly : io_error::kDeviceNotFound);
+                return;
+            }
+            std::error_code ec;
+            const auto host = host_path(split.path);
+            bool ok = false;
+            if (op == 0) ok = std::filesystem::create_directory(host, ec) && !ec;
+            else if (op == 1) ok = std::filesystem::is_directory(host, ec) && std::filesystem::is_empty(host, ec) &&
+                                   std::filesystem::remove(host, ec);
+            else ok = std::filesystem::is_regular_file(host, ec) && std::filesystem::remove(host, ec);
+            if (trace_io()) std::cerr << "[io] " << name << " " << path << (ok ? " ok" : " failed") << "\n";
+            kernel().finish(ctx, ok ? 0u : io_error::kFileNotFound);
+        };
+    };
+    hle.add("IoFileMgrForUser", "sceIoMkdir", stick_op("sceIoMkdir", 0));
+    hle.add("IoFileMgrForUser", "sceIoRmdir", stick_op("sceIoRmdir", 1));
+    hle.add("IoFileMgrForUser", "sceIoRemove", stick_op("sceIoRemove", 2));
     hle.add("IoFileMgrForUser", "sceIoRename", [](Runtime &rt, AllegrexContext &ctx) {
         const SplitPath from = split_path(read_cstring(rt.memory(), arg(ctx, 0), 256u));
         const SplitPath to = split_path(read_cstring(rt.memory(), arg(ctx, 1), 256u));
@@ -915,6 +944,8 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
     });
 
     hle.add("sceUmdUser", "sceUmdActivate", [](Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, 0u); });
+    // The disc is never taken away, so letting go of it changes nothing.
+    hle.add("sceUmdUser", "sceUmdDeactivate", [](Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, 0u); });
     hle.add("sceUmdUser", "sceUmdGetDriveStat",
             [](Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, drive_status()); });
     hle.add("sceUmdUser", "sceUmdGetErrorStat", [](Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, 0u); });

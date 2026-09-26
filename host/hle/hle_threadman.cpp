@@ -956,6 +956,26 @@ void register_kernel_library(HleRegistrar &hle) {
     // Bytes left on the current thread's stack, which a game checks before it
     // recurses. A stub returning 0 says the stack is exhausted, and the game
     // believes it.
+    // sceKernelGetThreadStackFreeSize(uid), 0 the calling thread: the space
+    // between the stack's bottom and where the thread's stack pointer is.
+    // A PSP measures the part never written (its fill pattern); this is the
+    // part not in use now, never less. Patapon and Chinatown Wars import it.
+    hle.add("ThreadManForUser", "sceKernelGetThreadStackFreeSize", [](Runtime &, AllegrexContext &ctx) {
+        log_once("thread-stack-free", "[kernel] sceKernelGetThreadStackFreeSize (UNVERIFIED: no game traced yet)");
+        const SceUID uid = as_signed(arg(ctx, 0));
+        const Thread *thread = kernel().find_thread(uid == 0 ? kernel().current_uid() : uid);
+        if (thread == nullptr) {
+            kernel().finish(ctx, error::kUnknownThid);
+            return;
+        }
+        const std::uint32_t sp = thread->uid == kernel().current_uid() ? ctx.gpr[29] : thread->context.gpr[29];
+        kernel().finish(ctx, sp > thread->stack_bottom ? sp - thread->stack_bottom : 0u);
+    });
+    hle.add("ThreadManForUser", "sceKernelCheckThreadStack", [](Runtime &, AllegrexContext &ctx) {
+        const Thread *thread = kernel().current_thread();
+        const std::uint32_t sp = ctx.gpr[29];
+        kernel().finish(ctx, thread != nullptr && sp > thread->stack_bottom ? sp - thread->stack_bottom : 0u);
+    });
     hle.add("Kernel_Library", "sceKernelCheckThreadStack", [](Runtime &, AllegrexContext &ctx) {
         const Thread *thread = kernel().current_thread();
         if (thread == nullptr) {

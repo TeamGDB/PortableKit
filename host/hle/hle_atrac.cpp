@@ -761,6 +761,18 @@ void register_atrac_functions(HleRegistrar &hle) {
                 << " from=" << write.file_offset;
         finish_traced(ctx, "sceAtracGetStreamDataInfo", 0u, details.str());
     });
+    // sceAtracGetInternalErrorInfo(id, int *error): the decoder's last error;
+    // none is ever kept here. Chinatown Wars, Vice City Stories and God of War
+    // import it.
+    hle.add("sceAtrac3plus", "sceAtracGetInternalErrorInfo", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t id = arg(ctx, 0);
+        if (find_context(id) == nullptr) {
+            finish_traced(ctx, "sceAtracGetInternalErrorInfo", context_error(id));
+            return;
+        }
+        write_s32(rt.memory(), arg(ctx, 1), 0);
+        finish_traced(ctx, "sceAtracGetInternalErrorInfo", 0u);
+    });
     // sceAtracGetSecondBufferInfo(id, outPosition, outBytes): where a
     // looping streamed track wants the file's end kept, when its buffer
     // cannot hold it. Tracks loop here from the bytes the game added the

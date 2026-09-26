@@ -230,6 +230,19 @@ void register_platform(HleRegistrar &hle) {
         kernel().finish(ctx, 0u);
     });
     register_rtc_calendar(hle);
+    // The power switch is never used here, so holding it off changes nothing.
+    hle.add("sceSuspendForUser", "sceKernelPowerLock", success);
+    hle.add("sceSuspendForUser", "sceKernelPowerUnlock", success);
+    // A disc game's licensee key and a PSN title's data key: nothing here
+    // decrypts with them yet. Chinatown Wars imports both.
+    hle.add("scePspNpDrm_user", "sceNpDrmSetLicenseeKey", [](Runtime &, AllegrexContext &ctx) {
+        log_once("npdrm-licensee", "[npdrm] sceNpDrmSetLicenseeKey (UNVERIFIED: no game traced yet)");
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("scePspNpDrm_user", "sceNpDrmEdataSetupKey", [](Runtime &, AllegrexContext &ctx) {
+        log_once("npdrm-edata", "[npdrm] sceNpDrmEdataSetupKey (UNVERIFIED: no game traced yet)");
+        kernel().finish(ctx, 0u);
+    });
     hle.add("sceImpose", "sceImposeSetLanguageMode", success);
     // (int *language, int *button): the console's, as GetSystemParamInt says.
     hle.add("sceImpose", "sceImposeGetLanguageMode", [](Runtime &rt, AllegrexContext &ctx) {
@@ -246,6 +259,18 @@ void register_platform(HleRegistrar &hle) {
     hle.add("sceImpose", "sceImposeSetUMDPopup", success);
     hle.add("sceOpenPSID", "sceOpenPSIDGetOpenPSID", [](Runtime &rt, AllegrexContext &ctx) {
         for (std::uint32_t i = 0; i < 16u; ++i) rt.memory().store8(arg(ctx, 0) + i, static_cast<std::uint8_t>(0x10u + i));
+        kernel().finish(ctx, 0u);
+    });
+    // sceUtilityGetSystemParamString(id, char *buffer, int length): id 1 is
+    // the console's nickname. Vice City Stories and Chinatown Wars import it.
+    hle.add("sceUtility", "sceUtilityGetSystemParamString", [](Runtime &rt, AllegrexContext &ctx) {
+        constexpr std::uint32_t kInvalidId = 0x80110103u;  // not traced
+        log_once("utility-param-string", "[utility] sceUtilityGetSystemParamString (UNVERIFIED: no game traced yet)");
+        if (arg(ctx, 0) != 1u || arg(ctx, 1) == 0u || arg(ctx, 2) == 0u) {
+            kernel().finish(ctx, kInvalidId);
+            return;
+        }
+        write_cstring(rt.memory(), arg(ctx, 1), "PortableKit", arg(ctx, 2));
         kernel().finish(ctx, 0u);
     });
     hle.add("sceUtility", "sceUtilityGetSystemParamInt", [](Runtime &rt, AllegrexContext &ctx) {

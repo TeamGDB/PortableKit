@@ -662,6 +662,29 @@ void register_vblank_waits(HleRegistrar &hle) {
         ctx.fpr[0] = 60000.0f / 1001.0f;
         kernel().finish(ctx, 0u);
     });
+    // sceDisplayGetFrameBuf(void **top, int *width, int *format, sync): what
+    // sceDisplaySetFrameBuf was last given.
+    hle.add("sceDisplay", "sceDisplayGetFrameBuf", [](Runtime &rt, AllegrexContext &ctx) {
+        auto &memory = rt.memory();
+        if (arg(ctx, 0) != 0u) memory.store32(arg(ctx, 0), media().display.framebuffer);
+        if (arg(ctx, 1) != 0u) memory.store32(arg(ctx, 1), media().display.buffer_width);
+        if (arg(ctx, 2) != 0u) memory.store32(arg(ctx, 2), media().display.pixel_format);
+        kernel().finish(ctx, 0u);
+    });
+    // The display's position in its frame, from emulated time since the last
+    // vblank: 286 lines a frame, the last 14 of them the vertical blank.
+    // Chinatown Wars and Vice City Stories import these; no game has been
+    // seen calling them yet.
+    hle.add("sceDisplay", "sceDisplayGetCurrentHcount", [](Runtime &, AllegrexContext &ctx) {
+        log_once("display-hcount", "[display] sceDisplayGetCurrentHcount (UNVERIFIED: no game traced yet)");
+        const std::uint64_t since = kernel().now_us() - kernel().last_vblank_us();
+        kernel().finish(ctx, static_cast<std::uint32_t>(since * 286u / 16683u % 286u));
+    });
+    hle.add("sceDisplay", "sceDisplayIsVblank", [](Runtime &, AllegrexContext &ctx) {
+        log_once("display-isvblank", "[display] sceDisplayIsVblank (UNVERIFIED: no game traced yet)");
+        const std::uint64_t since = kernel().now_us() - kernel().last_vblank_us();
+        kernel().finish(ctx, since * 286u / 16683u % 286u >= 272u ? 1u : 0u);
+    });
     hle.add("sceDisplay", "sceDisplayGetVcount", [](Runtime &, AllegrexContext &ctx) {
         trace_pacing("sceDisplayGetVcount", static_cast<std::int64_t>(kernel().vblank_count()));
         kernel().finish(ctx, static_cast<std::uint32_t>(kernel().vblank_count()));
@@ -905,6 +928,16 @@ void register_audio(HleRegistrar &hle) {
         // Output2 is always stereo 16-bit; format 0 is the stereo pair.
         channels[static_cast<std::size_t>(channel)] = AudioChannel{true, arg(ctx, 0), 0u, 0u, 0u};
         media().output2_channel = channel;
+        kernel().finish(ctx, 0u);
+    });
+    // sceAudioOutput2ChangeLength(samples): the output's block size.
+    hle.add("sceAudio", "sceAudioOutput2ChangeLength", [](Runtime &, AllegrexContext &ctx) {
+        if (media().output2_channel < 0) {
+            kernel().finish(ctx, 0x80260002u);
+            return;
+        }
+        log_once("audio-output2-length", "[audio] sceAudioOutput2ChangeLength (UNVERIFIED: no game traced yet)");
+        media().audio[static_cast<std::size_t>(media().output2_channel)].samples = arg(ctx, 0);
         kernel().finish(ctx, 0u);
     });
     hle.add("sceAudio", "sceAudioOutput2Release", [](Runtime &, AllegrexContext &ctx) {
