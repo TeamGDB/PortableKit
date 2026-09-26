@@ -1,6 +1,7 @@
 // UtilsForUser, LoadExecForUser, StdioForUser, ModuleMgrForUser,
 // InterruptManager, scePower, sceRtc, sceImpose, sceOpenPSID and the parameter
 // part of sceUtility. sceWlanDrv is with the ad hoc calls in hle_adhoc.cpp.
+#include "../profile.hpp"
 #include "hle_common.hpp"
 
 #include "overlays.hpp"
@@ -161,6 +162,7 @@ void register_platform(HleRegistrar &hle) {
     // reporting; the slot is simply forgotten.
     hle.add("scePower", "scePowerUnregisterCallback", success);
     hle.add("scePower", "scePowerSetClockFrequency630", success);
+    hle.add("scePower", "scePowerSetClockFrequency", success);
     hle.add("scePower", "scePowerCheckWlanCoexistenceClock", success);
 
     hle.add("sceRtc", "sceRtcGetCurrentClockLocalTime", [](Runtime &rt, AllegrexContext &ctx) {
@@ -191,6 +193,16 @@ void register_platform(HleRegistrar &hle) {
         kernel().finish(ctx, 0u);
     });
     hle.add("sceImpose", "sceImposeSetLanguageMode", success);
+    // (int *language, int *button): the console's, as GetSystemParamInt says.
+    hle.add("sceImpose", "sceImposeGetLanguageMode", [](Runtime &rt, AllegrexContext &ctx) {
+        if (arg(ctx, 0) != 0u) rt.memory().store32(arg(ctx, 0), portablekit::game().system_language);
+        if (arg(ctx, 1) != 0u) rt.memory().store32(arg(ctx, 1), portablekit::game().confirm_button);
+        kernel().finish(ctx, 0u);
+    });
+    // Microseconds the console has been on, as the RTC counts them.
+    hle.add("sceRtc", "sceRtcGetAccumulativeTime", [](Runtime &, AllegrexContext &ctx) {
+        kernel().finish64(ctx, kernel().now_us());
+    });
     // The shell's "the disc has been ejected" popup. There is no shell and no
     // disc to eject, so whether the game wants it makes no difference.
     hle.add("sceImpose", "sceImposeSetUMDPopup", success);
@@ -204,8 +216,8 @@ void register_platform(HleRegistrar &hle) {
         case 2u: value = 1u; break;  // ad hoc channel: automatic
         case 4u: value = 0u; break;  // date format YYYYMMDD
         case 5u: value = 0u; break;  // 24-hour clock
-        case 8u: value = 0u; break;  // language: Japanese
-        case 9u: value = 0u; break;  // confirm button: circle
+        case 8u: value = portablekit::game().system_language; break;
+        case 9u: value = portablekit::game().confirm_button; break;
         default: break;
         }
         rt.memory().store32(arg(ctx, 1), value);
@@ -214,6 +226,10 @@ void register_platform(HleRegistrar &hle) {
     hle.add("sceUtility", "sceUtilityLoadModule", success);
     // The dialogs themselves live in hle_utility.cpp.
     hle.add("sceUtility", "sceUtilityUnloadModule", success);
+    // The audio and video modules (sceUtilityLoadAvModule(id)): the codecs
+    // are the host's, always there.
+    hle.add("sceUtility", "sceUtilityLoadAvModule", success);
+    hle.add("sceUtility", "sceUtilityUnloadAvModule", success);
 }
 
 } // namespace

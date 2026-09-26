@@ -15,6 +15,9 @@
 
 #if defined(_WIN32)
 #include <iphlpapi.h>
+// The COM headers iphlpapi.h pulls in under MinGW define `interface` as
+// `struct`; this file names a parameter and a member so.
+#undef interface
 #else
 #include <arpa/inet.h>
 #include <ifaddrs.h>

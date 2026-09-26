@@ -294,7 +294,7 @@ Thread *Kernel::best_ready_thread() noexcept {
     Thread *best = nullptr;
     for (auto &[uid, thread] : threads_) {
         (void)uid;
-        if (thread->status != ThreadStatus::Ready) continue;
+        if (thread->status != ThreadStatus::Ready || thread->suspended) continue;
         if (best == nullptr || thread->priority < best->priority ||
             (thread->priority == best->priority && thread->ready_sequence < best->ready_sequence))
             best = thread.get();

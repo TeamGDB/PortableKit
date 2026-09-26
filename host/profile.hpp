@@ -247,6 +247,14 @@ struct GameProfile {
     // the emulation thread. Null: the framework's own guards decide alone.
     bool (*fast_loading_allowed)() = nullptr;
 
+    // --- The console's settings the game reads ----------------------------
+    // What sceUtilityGetSystemParamInt and sceImposeGetLanguageMode report: the
+    // system language (0 Japanese, 1 English, 2 French, ...) and the confirm
+    // button (0 circle, 1 cross). A console of the release's region is what
+    // the game expects; the defaults are a Japanese one.
+    std::uint32_t system_language = 0u;
+    std::uint32_t confirm_button = 0u;
+
     // --- Text ----------------------------------------------------------------
     // Where the game caches the glyphs it has drawn. Null: a font changed while
     // the game runs applies to text the game has not drawn yet.

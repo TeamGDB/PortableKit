@@ -549,6 +549,10 @@ void register_display_ctrl(HleRegistrar &hle) {
         kernel().finish(ctx, 0u);
     });
 
+    // When pad input cancels the console's idle timer: there is none here.
+    hle.add("sceCtrl", "sceCtrlSetIdleCancelThreshold", [](Runtime &, AllegrexContext &ctx) {
+        kernel().finish(ctx, 0u);
+    });
     hle.add("sceCtrl", "sceCtrlSetSamplingCycle", [](Runtime &, AllegrexContext &ctx) {
         const std::uint32_t previous = media().ctrl_cycle;
         media().ctrl_cycle = arg(ctx, 0);
