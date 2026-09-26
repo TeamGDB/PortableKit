@@ -1,5 +1,5 @@
-// An example HLE extension module: one function filled in, one overridden and
-// one wrapped (a chained override that passes every call on).
+// An example HLE extension module: one function filled in, one overridden, one
+// wrapped (a chained override that passes every call on) and one key declared.
 // Both behave as PortableKit already does, so building it into a program
 // changes nothing a game can see; it shows the mechanism and is what
 // tests/hle_extension_tests.cpp checks it with.
@@ -32,6 +32,9 @@ void watch_writeback_invalidate(ext::Runtime &rt, ext::AllegrexContext &ctx, con
 } // namespace
 
 PORTABLEKIT_HLE_EXTENSION(example) {
+    // A key the module would read with ext::key("example.demo"). Its value is
+    // not secret, it only shows the mechanism: 00112233445566778899AABBCCDDEEFF.
+    registry.declare_key("example.demo", "a8faed6abbf35c12a4b26e40f6feb19d736d90045c83b9f9a31f638d323e6811");
     registry.add("sceHttp", 0x87797BDDu, "sceHttpsLoadDefaultCert", load_default_cert);
     registry.override_builtin("UtilsForUser", 0x79D1C3FAu, "sceKernelDcacheWritebackAll", writeback_data_cache);
     registry.override_chained("UtilsForUser", 0xB435DEC5u, "sceKernelDcacheWritebackInvalidateAll",

@@ -65,6 +65,7 @@ set(PORTABLEKIT_HOST_SOURCES
     host/hle/hle_adhoc.cpp
     host/hle/hle_extensions.cpp
     host/hle/hle_extension_host.cpp
+    host/extension_keys.cpp
     host/adhoc/client.cpp
     host/adhoc/discovery.cpp
     host/adhoc/host.cpp
