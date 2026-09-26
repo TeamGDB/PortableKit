@@ -2,6 +2,7 @@
 #include "ge_state.hpp"
 
 #include "perf/frame_stats.hpp"
+#include "psprecomp/common.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1356,10 +1357,28 @@ std::uint32_t GeState::execute(const GuestMemory &memory, std::uint32_t pc, std:
         identity(texture_matrix_);
     }
 
+    // <prefix>_TRACE_GE_LIST=N[:M]: every command word of display list runs
+    // N to N+M-1 (default one), counted from the first, to read what a
+    // screen is built from when it draws nothing sensible.
+    static const auto list_trace = []() -> std::pair<std::uint64_t, std::uint64_t> {
+        const char *text = portablekit::env("TRACE_GE_LIST");
+        if (text == nullptr) return {~0ull, 0ull};
+        char *end = nullptr;
+        const std::uint64_t first = std::strtoull(text, &end, 0);
+        const std::uint64_t count = end != nullptr && *end == ':' ? std::strtoull(end + 1, nullptr, 0) : 1ull;
+        return {first, count};
+    }();
+    static std::uint64_t runs = 0;
+    const std::uint64_t run = runs++;
+    const bool dump = run >= list_trace.first && run - list_trace.first < list_trace.second;
+    if (dump) std::cerr << "[ge-list] run " << run << " from " << psprecomp::hex32(pc) << "\n";
+
     for (std::uint32_t steps = 0; steps < 2'000'000u; ++steps) {
         if (stall != 0u && pc == stall) return pc;
         if (!memory.contains(pc, 4u)) return pc;
         const std::uint32_t word = memory.load32(pc);
+        if (dump && steps < 20000u)
+            std::cerr << "[ge-list] " << psprecomp::hex32(pc) << " " << psprecomp::hex32(word) << "\n";
         const std::uint32_t command = word >> 24u;
         const std::uint32_t data = word & 0x00FFFFFFu;
         // Where the camera came from: the display list the game built holds the
@@ -1396,9 +1415,47 @@ std::uint32_t GeState::execute(const GuestMemory &memory, std::uint32_t pc, std:
         case kFinish:
             if (signal_sink_) signal_sink_(0x10000u | (data & 0xFFFFu), pc);
             continue;
-        case kSignal:
+        case kSignal: {
+            // SIGNAL's top byte is its behaviour. 0x01-0x03 interrupt the CPU
+            // with the low 16 bits; 0x10 and up are list flow the GE does
+            // itself, with a target address split between this command
+            // (high half) and the END that follows (low half). Patapon's
+            // frame list ends in behaviour 0x11 into a list inside a loaded
+            // archive (0x0E1108ED, 0x0C11CAC0: to 0x08EDCAC0), which is
+            // where its screens are.
+            const std::uint32_t behaviour = data >> 16u;
+            if (behaviour >= 0x10u && behaviour <= 0x13u && memory.contains(pc, 4u) &&
+                (memory.load32(pc) >> 24u) == kEnd) {
+                const std::uint32_t target = ((data & 0xFFFFu) << 16u | (memory.load32(pc) & 0xFFFFu)) & 0x0FFFFFFCu;
+                pc += 4u;  // the END is part of the signal
+                switch (behaviour) {
+                case 0x11u:  // jump
+                    pc = target;
+                    break;
+                case 0x12u:  // call
+                    call_stack_.push_back(pc);
+                    pc = target;
+                    break;
+                case 0x13u:  // return
+                    if (!call_stack_.empty()) {
+                        pc = call_stack_.back();
+                        call_stack_.pop_back();
+                    }
+                    break;
+                default:  // 0x10: a sync point
+                    break;
+                }
+                continue;
+            }
+            if (behaviour >= 0x10u) {
+                // Relative and origin-relative jumps and calls, and the
+                // table forms, have not been traced in a game yet.
+                trace_unhandled(0x0E00u | behaviour, data);
+                continue;
+            }
             if (signal_sink_) signal_sink_(data & 0xFFFFu, pc);
             continue;
+        }
         case kPrimitive:
             draw_primitive(memory, data);
             continue;
