@@ -519,6 +519,12 @@ int compile_corpus(const GameRecord &game, const CompileOptions &options) {
     status.pid = 0;
     status.message = "Ready";
     publish();
+    // Corpora of other builds of the program can never be loaded again by
+    // this one: once it has its own, their space is given back.
+    for (const auto &entry : fs::directory_iterator(cache_root() / game.id, ec)) {
+        const std::string name = entry.path().filename().string();
+        if (entry.is_directory() && !name.starts_with(abi_prefix())) fs::remove_all(entry.path(), ec);
+    }
     return 0;
 }
 
