@@ -86,6 +86,7 @@ sceCtrl,0x6A2774F3,sceCtrlSetSamplingCycle
 sceCtrl,0x3A622550,sceCtrlPeekBufferPositive
 sceCtrl,0xB1D0E5CD,sceCtrlPeekLatch
 sceCtrl,0x0B588501,sceCtrlReadLatch
+sceCtrl,0xA7144800,sceCtrlSetIdleCancelThreshold
 sceDisplay,0x0E20F177,sceDisplaySetMode
 sceDisplay,0x289D82FE,sceDisplaySetFrameBuf
 sceDisplay,0x46F186C3,sceDisplayWaitVblankStartCB
@@ -137,6 +138,7 @@ sceHttp,0xF9D8EB63,sceHttpsEnd
 sceHttp,0xFCF8C055,sceHttpDeleteTemplate
 sceImpose,0x36AA6E91,sceImposeSetLanguageMode
 sceImpose,0x72189C48,sceImposeSetUMDPopup
+sceImpose,0x24FD7BCF,sceImposeGetLanguageMode
 sceJpeg,0x67F0ED84,sceJpegCsc
 sceLibFont,0x099EF33C,sceFontFindOptimumFont
 sceLibFont,0x0DA7535E,sceFontGetFontInfo
@@ -259,8 +261,10 @@ scePower,0x04B7766E,scePowerRegisterCallback
 scePower,0x469989AD,scePowerSetClockFrequency630
 scePower,0xA85880D0,scePowerCheckWlanCoexistenceClock
 scePower,0xDFA8BAF8,scePowerUnregisterCallback
+scePower,0x737486F2,scePowerSetClockFrequency
 sceRtc,0xE7C27D1B,sceRtcGetCurrentClockLocalTime
 sceRtc,0x3F7AD767,sceRtcGetCurrentTick
+sceRtc,0x011F03C1,sceRtcGetAccumulativeTime
 sceSasCore,0x019B25EB,__sceSasSetADSR
 sceSasCore,0x07F58C24,__sceSasGetAllEnvelopeHeights
 sceSasCore,0x267A6DD2,__sceSasRevParam
