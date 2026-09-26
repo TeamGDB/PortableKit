@@ -10,6 +10,7 @@
 #include "text_format.hpp"
 
 #include "hle/hle_common.hpp"
+#include "portablekit_build_label.hpp"
 #include "ui/file_browser.hpp"
 #include "ui/layer.hpp"
 #include "ui/widgets.hpp"
@@ -166,7 +167,8 @@ bool Launcher::frame() {
 void Launcher::library() {
     Layer &layer = Layer::get();
     if (layer.take_back()) quit_ = true;
-    begin_panel("##library", "PortableKit", "Your games", false);
+    begin_panel("##library", *kBuildLabel != '\0' ? std::string("PortableKit (") + kBuildLabel + ")" : "PortableKit",
+                "Your games", false);
     begin_content();
     if (first_) focus_next_row();
     first_ = false;

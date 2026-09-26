@@ -2,14 +2,18 @@
 # Package a PortableKit game's macOS release (Apple Silicon) from a finished
 # build directory: <Name>.app in a disk image, and optionally in a zip archive.
 #
-#   release_macos.sh [--game DIR] [--version VERSION] [--executable FILE]
-#                    [--jobs N] [--zip] [--no-dmg] BUILD_DIR
+#   release_macos.sh [--game DIR] [--packaging DIR] [--version VERSION]
+#                    [--executable FILE] [--jobs N] [--zip] [--no-dmg]
+#                    [--license NAME=FILE]... [--notices FILE]... [--extra PATH]...
+#                    BUILD_DIR
 #
 # The game's repository (--game, by default the checkout the current
 # directory is in) describes its release in packaging/release.env (see
 # docs/RELEASING.md) and brings its own notices, icon and read-me:
 # packaging/THIRD_PARTY_NOTICES.md, packaging/macos/<Name>.icns and
-# packaging/macos/README.txt.
+# packaging/macos/README.txt. --packaging names another directory holding
+# them, such as apps/portablekit/packaging for the desktop app, or a
+# downstream build's own.
 #
 # BUILD_DIR is a build of that checkout configured with
 # -DPORTABLEKIT_RELEASE=ON whose executable and overlay libraries are built
@@ -34,6 +38,8 @@
 #
 #   --game DIR         the game's checkout (default: the one around the
 #                      current directory)
+#   --packaging DIR    release.env, the notices and macos/ (default:
+#                      <game>/packaging)
 #   --version VERSION  name the artifacts after VERSION instead of git describe
 #   --executable FILE  package FILE, built with -DPORTABLEKIT_RELEASE=ON,
 #                      instead of BUILD_DIR/bin/<target> (for a build
@@ -41,6 +47,11 @@
 #   --jobs N           parallel compile jobs for SDL3 and the loader (default 4)
 #   --zip              also pack <Name>.app as a zip archive
 #   --no-dmg           do not build the disk image
+#   --license NAME=FILE  also ship FILE as licenses/NAME-LICENSE.txt, for a
+#                      component the build added (repeatable)
+#   --notices FILE     also ship FILE in licenses/ as it is named (repeatable)
+#   --extra PATH       also put PATH (a file or a folder) beside the app in
+#                      the disk image and the zip (repeatable)
 set -euo pipefail
 # Byte-wise text tools: the checks read binary files.
 export LC_ALL=C
@@ -51,6 +62,10 @@ kit_dir="$(cd "$(dirname "$0")/.." && pwd)"
 source "$kit_dir/packaging/sources.sh"
 
 repo_dir=""
+packaging_dir=""
+extra_licenses=()
+extra_notices=()
+extra_paths=()
 version=""
 executable=""
 jobs=4
@@ -60,6 +75,10 @@ build_dir=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --game) repo_dir="${2:?--game needs a value}"; shift 2 ;;
+        --packaging) packaging_dir="${2:?--packaging needs a value}"; shift 2 ;;
+        --license) extra_licenses+=("${2:?--license needs NAME=FILE}"); shift 2 ;;
+        --notices) extra_notices+=("${2:?--notices needs a file}"); shift 2 ;;
+        --extra) extra_paths+=("${2:?--extra needs a path}"); shift 2 ;;
         --version) version="${2:?--version needs a value}"; shift 2 ;;
         --executable) executable="${2:?--executable needs a value}"; shift 2 ;;
         --jobs) jobs="${2:?--jobs needs a value}"; shift 2 ;;
@@ -74,13 +93,22 @@ done
 build_dir="$(cd "$build_dir" && pwd)"
 [[ -n "$repo_dir" ]] || repo_dir="$(git rev-parse --show-toplevel)"
 repo_dir="$(cd "$repo_dir" && pwd)"
-[[ -f "$repo_dir/packaging/release.env" ]] || { echo "error: no packaging/release.env in $repo_dir" >&2; exit 1; }
+[[ -n "$packaging_dir" ]] || packaging_dir="$repo_dir/packaging"
+packaging_dir="$(cd "$packaging_dir" && pwd)"
+[[ -f "$packaging_dir/release.env" ]] || { echo "error: no release.env in $packaging_dir" >&2; exit 1; }
 # shellcheck disable=SC1091
-source "$repo_dir/packaging/release.env"
+source "$packaging_dir/release.env"
 : "${RELEASE_NAME:?release.env sets RELEASE_NAME}" "${RELEASE_SLUG:?release.env sets RELEASE_SLUG}"
 : "${RELEASE_TARGET:?release.env sets RELEASE_TARGET}" "${RELEASE_APP_ID:?release.env sets RELEASE_APP_ID}"
 RELEASE_OVERLAYS="${RELEASE_OVERLAYS:-0}"
-packaging="$repo_dir/packaging/macos"
+# Optional: more programs from BUILD_DIR/bin to put beside the executable, and
+# folders of BUILD_DIR/bin to ship in Contents/Resources as <from>=<to>.
+RELEASE_EXTRA_EXECUTABLES="${RELEASE_EXTRA_EXECUTABLES:-}"
+RELEASE_RESOURCES="${RELEASE_RESOURCES:-}"
+# Where the profile lives in the checkout, whose game/ a developer build
+# falls back to.
+RELEASE_PROFILE_DIR="${RELEASE_PROFILE_DIR:-.}"
+packaging="$packaging_dir/macos"
 
 work="${PORTABLEKIT_RELEASE_WORK:-$repo_dir/out/release-macos}"
 sources="$work/sources"
@@ -132,7 +160,7 @@ FFMPEG_FLAGS="$(sed -n '/^set(PORTABLEKIT_FFMPEG_CONFIGURE_FLAGS/,/)/p' "$ffmpeg
 [[ -n "$FFMPEG_VERSION" && -n "$FFMPEG_FLAGS" ]] || fail "cannot read the FFmpeg pins from $ffmpeg_cmake"
 
 # The notices must describe exactly what is bundled.
-notices="$repo_dir/packaging/THIRD_PARTY_NOTICES.md"
+notices="$packaging_dir/THIRD_PARTY_NOTICES.md"
 for pinned in "SDL3 $SDL3_VERSION" "FFmpeg $FFMPEG_VERSION" "$FFMPEG_URL" "$SDL3_URL" \
               "./configure --prefix=<prefix> $FFMPEG_FLAGS" \
               "MoltenVK $MOLTENVK_VERSION" "$MOLTENVK_URL" "$MOLTENVK_SHA256" \
@@ -226,9 +254,20 @@ fi
 lipo -archs "$executable" | grep -qx arm64 || fail "$executable is not an arm64 executable"
 # A developer build falls back to its checkout's game directory; a release
 # must not depend on the machine it was built on.
-if strings -a "$executable" | grep -qF "$repo_dir/game"; then
+if strings -a "$executable" | grep -qF "$(cd "$repo_dir/$RELEASE_PROFILE_DIR" && pwd)/game"; then
     fail "$executable is a developer build; configure with -DPORTABLEKIT_RELEASE=ON, build $RELEASE_TARGET and pass it with --executable"
 fi
+for program in $RELEASE_EXTRA_EXECUTABLES; do
+    [[ -x "$build_dir/bin/$program" ]] || fail "no $program in $build_dir/bin"
+done
+for resource in $RELEASE_RESOURCES; do
+    [[ -d "$build_dir/bin/${resource%%=*}" ]] || fail "no ${resource%%=*} in $build_dir/bin"
+done
+for entry in ${extra_licenses[@]+"${extra_licenses[@]}"}; do
+    [[ "$entry" == *=* && -f "${entry#*=}" ]] || fail "--license $entry: expected NAME=FILE with an existing file"
+done
+for file in ${extra_notices[@]+"${extra_notices[@]}"}; do [[ -f "$file" ]] || fail "--notices $file: no such file"; done
+for path in ${extra_paths[@]+"${extra_paths[@]}"}; do [[ -e "$path" ]] || fail "--extra $path: no such file or folder"; done
 overlay_count=0
 [[ -d "$build_dir/bin/overlays" ]] && overlay_count="$(find "$build_dir/bin/overlays" -name '*.dylib' | wc -l | tr -d ' ')"
 [[ "$overlay_count" -eq "$RELEASE_OVERLAYS" ]] ||
@@ -323,6 +362,13 @@ frameworks="$contents/Frameworks"
 resources="$contents/Resources"
 
 install -m 755 "$executable" "$contents/MacOS/$RELEASE_NAME"
+for program in $RELEASE_EXTRA_EXECUTABLES; do
+    install -m 755 "$build_dir/bin/$program" "$contents/MacOS/$program"
+done
+for resource in $RELEASE_RESOURCES; do
+    mkdir -p "$resources/${resource#*=}"
+    ditto "$build_dir/bin/${resource%%=*}" "$resources/${resource#*=}"
+done
 [[ "$overlay_count" -eq 0 ]] || cp "$build_dir/bin/overlays/"*.dylib "$frameworks/overlays/"
 for lib in libavcodec.61.dylib libavutil.59.dylib; do
     cp "$build_dir/bin/lib/$lib" "$frameworks/"
@@ -356,11 +402,15 @@ sed -e "s/@VERSION@/$version/g" -e "s/@SHORT_VERSION@/$short_version/" \
     "$kit_dir/packaging/macos/Info.plist.in" > "$contents/Info.plist"
 plutil -lint "$contents/Info.plist" > /dev/null
 printf 'APPL????' > "$contents/PkgInfo"
-cp "$packaging/$RELEASE_NAME.icns" "$resources/$RELEASE_NAME.icns"
+if [[ -f "$packaging/$RELEASE_NAME.icns" ]]; then
+    cp "$packaging/$RELEASE_NAME.icns" "$resources/$RELEASE_NAME.icns"
+else
+    echo "note: no $packaging/$RELEASE_NAME.icns; the app gets the system's default icon"
+fi
 
 cp "$sources/NotoSansCJKjp-Regular.otf" "$resources/fonts/"
 licenses="$resources/licenses"
-cp "$repo_dir/LICENSE" "$licenses/$RELEASE_NAME-LICENSE.txt"
+[[ "$repo_dir" -ef "$kit_dir" ]] || cp "$repo_dir/LICENSE" "$licenses/$RELEASE_NAME-LICENSE.txt"
 cp "$kit_dir/LICENSE" "$licenses/PortableKit-LICENSE.txt"
 cp "$notices" "$licenses/THIRD_PARTY_NOTICES.md"
 cp "$deps_build/SDL3-$SDL3_VERSION/LICENSE.txt" "$licenses/SDL3-LICENSE.txt"
@@ -371,6 +421,10 @@ cp "$kit_dir/third_party/imgui/LICENSE.txt" "$licenses/DearImGui-LICENSE.txt"
 cp "$kit_dir/third_party/tiny_aes/UNLICENSE" "$licenses/tiny-AES-c-UNLICENSE.txt"
 cp "$kit_dir/third_party/xxhash/LICENSE" "$licenses/xxHash-LICENSE.txt"
 cp "$sources/NotoSansCJK-LICENSE.txt" "$licenses/NotoSansCJK-OFL.txt"
+for entry in ${extra_licenses[@]+"${extra_licenses[@]}"}; do
+    cp "${entry#*=}" "$licenses/${entry%%=*}-LICENSE.txt"
+done
+for file in ${extra_notices[@]+"${extra_notices[@]}"}; do cp "$file" "$licenses/"; done
 
 # ---------------------------------------------------------------------------
 step "Linking inside the bundle"
@@ -396,6 +450,7 @@ done
 # Symbols the executable exports to the overlay libraries stay; only local
 # symbols and debug information go.
 strip -x "$exe" "$frameworks/"*.dylib 2> /dev/null
+for program in $RELEASE_EXTRA_EXECUTABLES; do strip -x "$contents/MacOS/$program" 2> /dev/null; done
 [[ "$overlay_count" -eq 0 ]] || strip -x "$frameworks/overlays/"*.dylib 2> /dev/null
 
 # ---------------------------------------------------------------------------
@@ -429,6 +484,7 @@ step "Signing (ad hoc)"
 # No hardened runtime: it would refuse to load the ad hoc signed overlays.
 sign() { codesign --force --sign - --timestamp=none "$@" 2>&1 | { grep -v ': replacing existing signature$' || true; }; }
 while IFS= read -r -d '' lib; do sign "$lib"; done < <(find "$frameworks" -name '*.dylib' -print0)
+for program in $RELEASE_EXTRA_EXECUTABLES; do sign "$contents/MacOS/$program"; done
 sign "$app"
 
 step "Checking the bundle"
@@ -464,6 +520,7 @@ if [[ $make_zip -eq 1 ]]; then
     mkdir -p "$zip_root"
     ditto "$app" "$zip_root/$RELEASE_NAME.app"
     cp "$readme" "$zip_root/"
+    for path in ${extra_paths[@]+"${extra_paths[@]}"}; do ditto "$path" "$zip_root/$(basename "$path")"; done
     (cd "$work/zip" && ditto -c -k --sequesterRsrc --keepParent "$name" "$dist/$name.zip")
     rm -rf "$work/zip"
 
@@ -483,6 +540,7 @@ if [[ $make_dmg -eq 1 ]]; then
     mkdir -p "$dmg_root"
     ditto "$app" "$dmg_root/$RELEASE_NAME.app"
     cp "$readme" "$dmg_root/"
+    for path in ${extra_paths[@]+"${extra_paths[@]}"}; do ditto "$path" "$dmg_root/$(basename "$path")"; done
     ln -s /Applications "$dmg_root/Applications"
     hdiutil create -quiet -volname "$RELEASE_NAME $version" -srcfolder "$dmg_root" -fs APFS \
         -format ULMO -ov "$dist/$name.dmg"

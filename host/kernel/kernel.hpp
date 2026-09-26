@@ -210,10 +210,24 @@ struct SubInterruptHandler {
     bool enabled{};
 };
 
+// The argument registers of a call into the game: a0-a3, then t0-t3 for a
+// function that takes more than four, such as a handler given an old state,
+// a new state, an event, an error and its own argument.
+inline constexpr std::uint32_t kGuestCallMaxArguments = 8u;
+using GuestCallArguments = std::array<std::uint32_t, kGuestCallMaxArguments>;
+// Loads a0-a3 always, as every call into the game did before calls took more
+// than four, and t0 onwards only as far as `count` asks.
+inline void load_guest_call_arguments(AllegrexContext &ctx, const GuestCallArguments &arguments,
+                                      std::uint32_t count) noexcept {
+    for (std::uint32_t i = 0; i < 4u; ++i) ctx.set_gpr(4u + i, arguments[i]);
+    for (std::uint32_t i = 4u; i < count && i < kGuestCallMaxArguments; ++i) ctx.set_gpr(8u + (i - 4u), arguments[i]);
+}
+
 // A guest function queued for execution in interrupt context.
 struct InterruptCall {
     std::uint32_t function{};
-    std::array<std::uint32_t, 4> arguments{};
+    GuestCallArguments arguments{};
+    std::uint32_t argument_count = 4u; // how many of `arguments` it takes
     // Invoked on the host after the guest handler returns, with its v0.
     std::function<void(std::uint32_t)> on_return;
 };
@@ -291,9 +305,10 @@ public:
     // its v0 with `ctx` back at the import's return address. `on_return` then
     // either finishes the import or makes another call. Use it instead of
     // finish(), as the last thing the import does.
+    // `argument_count` above four also passes t0 onwards (GuestCallArguments).
     using GuestCallReturn = std::function<void(AllegrexContext &, std::uint32_t)>;
-    void call_guest(AllegrexContext &ctx, std::uint32_t function, const std::array<std::uint32_t, 4> &arguments,
-                    GuestCallReturn on_return);
+    void call_guest(AllegrexContext &ctx, std::uint32_t function, const GuestCallArguments &arguments,
+                    GuestCallReturn on_return, std::uint32_t argument_count = 4u);
     void set_dispatch_enabled(bool enabled) noexcept { dispatch_enabled_ = enabled; }
     [[nodiscard]] bool dispatch_enabled() const noexcept { return dispatch_enabled_; }
 

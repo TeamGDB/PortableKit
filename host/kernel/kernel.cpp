@@ -936,7 +936,7 @@ bool Kernel::begin_pending_interrupt(AllegrexContext &ctx) {
     interrupt_active_ = true;
     interrupt_on_return_ = std::move(call.on_return);
     ctx = pristine_context_;
-    for (std::uint32_t i = 0; i < 4u; ++i) ctx.set_gpr(4u + i, call.arguments[i]);
+    load_guest_call_arguments(ctx, call.arguments, call.argument_count);
     ctx.set_gpr(29, kInterruptStackTop - kThreadArgumentHome);
     ctx.set_gpr(31, kInterruptReturnStub);
     ctx.pc = call.function;
@@ -978,10 +978,10 @@ void Kernel::thread_exit_stub(AllegrexContext &ctx) {
                                                                          current_thread()->name == "module_start");
 }
 
-void Kernel::call_guest(AllegrexContext &ctx, std::uint32_t function, const std::array<std::uint32_t, 4> &arguments,
-                        GuestCallReturn on_return) {
+void Kernel::call_guest(AllegrexContext &ctx, std::uint32_t function, const GuestCallArguments &arguments,
+                        GuestCallReturn on_return, std::uint32_t argument_count) {
     guest_calls_[current_uid_].push_back(GuestCall{ctx.gpr[31], std::move(on_return)});
-    for (std::uint32_t i = 0; i < 4u; ++i) ctx.set_gpr(4u + i, arguments[i]);
+    load_guest_call_arguments(ctx, arguments, argument_count);
     ctx.set_gpr(31, kGuestCallReturnStub);
     // A pc other than the import's own tells the import wrapper not to return.
     ctx.pc = function;

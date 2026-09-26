@@ -69,6 +69,8 @@ Measured on an Apple M1 with 8 GB, from a fresh clone with an empty compiler cac
 | `PORTABLEKIT_FFMPEG` | `bundled` | `bundled` builds FFmpeg with the project, `system` uses one found through pkg-config, `OFF` drops music and movies |
 | `PORTABLEKIT_RELEASE` | `OFF` | Build for distribution: no paths into the checkout, libraries from `lib/` next to the executable |
 | `PSPRECOMP_LTO` | `OFF` | Whole-program optimisation |
+| `PORTABLEKIT_BUILD_LABEL` | empty | A name for the build, shown beside the version: in the window title, the menu's About section, the desktop app's library header and `portablekit --version`. For telling a build made with other components (see below) from the plain one without patching sources |
+| `PORTABLEKIT_HLE_EXTENSION_DIRS` | empty | Directories of [HLE extension modules](HLE_EXTENSIONS.md) to link into every program |
 
 ## Dependencies
 

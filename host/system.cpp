@@ -4,6 +4,7 @@
 #include "profile.hpp"
 
 #include "hle/hle_common.hpp"
+#include "hle/hle_extensions.hpp"
 #include "kernel/kernel.hpp"
 #include "overlays.hpp"
 
@@ -94,6 +95,10 @@ void install_system(Runtime &runtime, const psprecomp::Elf32Image &elf, const Pr
     register_utility(hle, paths.memory_stick);
     register_adhoc(hle);
     if (const ExtraHleHook hook = active_register_extra_hle(); hook != nullptr) hook(hle);
+    // Extension modules the build linked in (docs/HLE_EXTENSIONS.md): after
+    // everything above, so they fill in what it leaves and override only what
+    // they say they override.
+    const HleExtensionReport extensions = install_linked_hle_extensions(runtime, hle);
 
     const bool strict = env_set("STRICT_HLE");
     std::size_t stubbed = 0u;
@@ -120,6 +125,7 @@ void install_system(Runtime &runtime, const psprecomp::Elf32Image &elf, const Pr
             std::cout << "  " << library << " (" << names.size() << ")\n";
             for (const std::string &name : names) std::cout << "    " << name << "\n";
         }
+        print_hle_extension_imports(std::cout, extensions, imports);
     }
     // Without a corpus there is nothing at the import stubs, so the
     // interpreter would run their own two instructions and carry on with
@@ -129,7 +135,14 @@ void install_system(Runtime &runtime, const psprecomp::Elf32Image &elf, const Pr
         if (runtime.register_import_stub(import.stub_address, import.library, import.nid)) ++bound_stubs;
     if (bound_stubs != 0u) std::cout << "Import stubs: " << bound_stubs << " bound for interpretation\n";
     std::cout << "HLE imports: " << imports.size() << " total, " << hle.count() << " implemented, " << stubbed
-              << " logging stubs" << (strict ? " (strict mode)" : "") << "\n";
+              << " logging stubs" << (strict ? " (strict mode)" : "");
+    if (!extensions.active.empty()) {
+        std::size_t served = 0u;
+        for (const auto &import : imports)
+            if (extensions.find(import.library, import.nid) != nullptr) ++served;
+        std::cout << "; " << served << " imports served by HLE extensions";
+    }
+    std::cout << "\n";
 
     auto &ctx = runtime.cpu();
     auto &memory = runtime.memory();
