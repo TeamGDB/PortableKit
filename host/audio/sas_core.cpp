@@ -71,6 +71,26 @@ struct EnvelopeRate {
     return static_cast<std::int16_t>(voice.noise_register);
 }
 
+constexpr std::uint32_t kErrorInvalidGrain = 0x80420001u;
+constexpr std::uint32_t kErrorInvalidOutputMode = 0x80420003u;
+constexpr std::uint32_t kErrorInvalidVoice = 0x80420010u;
+constexpr std::uint32_t kErrorInvalidCurve = 0x80420013u;
+constexpr std::uint32_t kErrorInvalidRate = 0x80420019u;
+
+// The packed words of __sceSasSetSimpleADSR, read as the explicit envelope's
+// rates and curves, so a voice switching from one to the other keeps its
+// sound. A 7-bit rate code of 0x7F means no movement at all; otherwise the low
+// two bits pick a step and the rest a right shift of it.
+std::int64_t simple_rate(std::uint32_t code, int base_shift) noexcept {
+    code &= 0x7Fu;
+    if (code == 0x7Fu) return 0;
+    const std::int64_t rate = (static_cast<std::int64_t>(7u - (code & 3u)) << base_shift) >> (code >> 2u);
+    return rate == 0 ? 1 : rate;
+}
+std::int64_t shifted_rate(std::uint32_t shift) noexcept {
+    return shift == 0u ? 0x7FFFFFFF : (static_cast<std::int64_t>(0x80000000u) >> shift);
+}
+
 [[nodiscard]] bool envelopes_disabled() {
     static const bool disabled = portablekit::env("SAS_NO_ENV") != nullptr;
     return disabled;
@@ -153,6 +173,95 @@ void SasCore::set_simple_adsr(std::uint32_t voice, std::uint32_t adsr1, std::uin
     voices_[voice].adsr1 = adsr1 & 0xFFFFu;
     voices_[voice].adsr2 = adsr2 & 0xFFFFu;
     voices_[voice].have_adsr = true;
+    voices_[voice].explicit_envelope = false;
+}
+
+void SasCore::make_envelope_explicit(SasVoice &v) {
+    if (v.explicit_envelope) return;
+    v.explicit_envelope = true;
+    if (!v.have_adsr) {
+        // Wide open until the game says otherwise: an instant attack and a
+        // sustain that holds.
+        v.rates = {kEnvelopeHeightMax, 0, 0, kEnvelopeHeightMax};
+        v.curves = {static_cast<std::uint8_t>(SasCurve::Direct), static_cast<std::uint8_t>(SasCurve::LinearDecrease),
+                    static_cast<std::uint8_t>(SasCurve::LinearDecrease), static_cast<std::uint8_t>(SasCurve::LinearDecrease)};
+        v.sustain_level = kEnvelopeHeightMax;
+        return;
+    }
+    const std::uint32_t adsr1 = v.adsr1;
+    const std::uint32_t adsr2 = v.adsr2;
+    const auto sustain_curve = static_cast<std::uint8_t>((adsr2 >> 14u) & 3u);
+    const bool release_exponential = (adsr2 & 0x20u) != 0u;
+    const std::uint32_t release_code = adsr2 & 0x1Fu;
+    std::int64_t release = 0;
+    if (release_code != 31u) {
+        if (release_exponential) release = shifted_rate(release_code);
+        else release = release_code == 30u ? 0x40000000 : release_code == 29u ? 1 : (0x10000000 >> release_code);
+    }
+    v.rates = {simple_rate(adsr1 >> 8u, 26), shifted_rate((adsr1 >> 4u) & 0xFu),
+               sustain_curve == static_cast<std::uint8_t>(SasCurve::ExponentDecrease) ? simple_rate(adsr2 >> 6u, 24)
+                                                                                    : simple_rate(adsr2 >> 6u, 26),
+               release};
+    v.curves = {static_cast<std::uint8_t>((adsr1 & 0x8000u) != 0u ? SasCurve::LinearBent : SasCurve::LinearIncrease),
+                static_cast<std::uint8_t>(SasCurve::ExponentDecrease), sustain_curve,
+                static_cast<std::uint8_t>(release_exponential ? SasCurve::ExponentDecrease : SasCurve::LinearDecrease)};
+    v.sustain_level = static_cast<std::int64_t>((adsr1 & 0xFu) + 1u) << 26u;
+}
+
+std::uint32_t SasCore::set_adsr_rates(std::uint32_t voice, std::uint32_t flag, const std::array<std::int32_t, 4> &rates) {
+    if (voice >= kSasMaxVoices) return kErrorInvalidVoice;
+    for (std::uint32_t stage = 0; stage < 4u; ++stage)
+        if ((flag & (1u << stage)) != 0u && rates[stage] < 0) return kErrorInvalidRate;
+    SasVoice &v = voices_[voice];
+    make_envelope_explicit(v);
+    for (std::uint32_t stage = 0; stage < 4u; ++stage)
+        if ((flag & (1u << stage)) != 0u) v.rates[stage] = rates[stage];
+    return 0u;
+}
+
+std::uint32_t SasCore::set_adsr_curves(std::uint32_t voice, std::uint32_t flag, std::array<std::uint32_t, 4> curves) {
+    if (voice >= kSasMaxVoices) return kErrorInvalidVoice;
+    // Attack may only rise (an even curve), decay and release only fall (an
+    // odd one); sustain may be any of the six. The top bit is ignored.
+    for (std::uint32_t stage = 0; stage < 4u; ++stage) {
+        curves[stage] &= 0x7FFFFFFFu;
+        if ((flag & (1u << stage)) == 0u) continue;
+        const std::uint32_t c = curves[stage];
+        const bool valid = c <= 5u && (stage == 2u || (stage == 0u ? (c & 1u) == 0u : (c & 1u) == 1u));
+        if (!valid) return kErrorInvalidCurve;
+    }
+    SasVoice &v = voices_[voice];
+    make_envelope_explicit(v);
+    for (std::uint32_t stage = 0; stage < 4u; ++stage)
+        if ((flag & (1u << stage)) != 0u) v.curves[stage] = static_cast<std::uint8_t>(curves[stage]);
+    return 0u;
+}
+
+std::uint32_t SasCore::set_sustain_level(std::uint32_t voice, std::int32_t level) {
+    if (voice >= kSasMaxVoices) return kErrorInvalidVoice;
+    SasVoice &v = voices_[voice];
+    make_envelope_explicit(v);
+    v.sustain_level = level;
+    return 0u;
+}
+
+std::uint32_t SasCore::set_grain(std::uint32_t grain) {
+    if (grain < 0x40u || grain > 0x800u || (grain & 0x1Fu) != 0u) return kErrorInvalidGrain;
+    grain_ = grain;
+    return 0u;
+}
+
+std::uint32_t SasCore::set_output_mode(std::uint32_t mode) {
+    if (mode > 1u) return kErrorInvalidOutputMode;
+    output_mode_ = mode;
+    return 0u;
+}
+
+std::uint32_t SasCore::pause_flag() const noexcept {
+    std::uint32_t flags = 0u;
+    for (std::uint32_t voice = 0; voice < max_voices_; ++voice)
+        if (voices_[voice].paused) flags |= 1u << voice;
+    return flags;
 }
 
 void SasCore::set_pause(std::uint32_t mask, bool paused) {
@@ -178,7 +287,11 @@ void SasCore::key_on(std::uint32_t voice) {
     v.playing = !v.source_ended;
     v.envelope_counter = 0;
     if (tracing()) ++trace().key_ons;
-    if (v.have_adsr && !envelopes_disabled()) {
+    if (v.explicit_envelope && !envelopes_disabled()) {
+        v.stage = EnvelopeStage::Attack;
+        v.height = 0;
+        v.envelope = 0;
+    } else if (v.have_adsr && !envelopes_disabled()) {
         v.stage = EnvelopeStage::Attack;
         v.envelope = 0;
     } else {
@@ -191,7 +304,7 @@ void SasCore::key_off(std::uint32_t voice) {
     if (voice >= kSasMaxVoices) return;
     SasVoice &v = voices_[voice];
     if (!v.playing) return;
-    if (v.have_adsr && !envelopes_disabled()) {
+    if ((v.have_adsr || v.explicit_envelope) && !envelopes_disabled()) {
         v.stage = EnvelopeStage::Release;
         v.envelope_counter = 0;
     } else {
@@ -210,6 +323,7 @@ std::uint32_t SasCore::end_flag() const noexcept {
 
 std::int32_t SasCore::envelope_height(std::uint32_t voice) const noexcept {
     if (voice >= kSasMaxVoices) return 0;
+    if (voices_[voice].explicit_envelope) return static_cast<std::int32_t>(voices_[voice].height);
     return voices_[voice].envelope << 15;
 }
 
@@ -287,8 +401,69 @@ void SasCore::advance_source(const psprecomp::GuestMemory &memory, SasVoice &voi
     voice.current = voice.decoded[static_cast<std::size_t>(voice.index++)];
 }
 
+// One sample of the explicit envelope: the current stage's curve moved by its
+// rate, then the stage's end test.
+void SasCore::step_explicit_envelope(SasVoice &voice) {
+    const auto stage_index = static_cast<std::size_t>(voice.stage) - 1u;  // Attack is 1
+    const std::int64_t rate = voice.rates[stage_index];
+    std::int64_t &h = voice.height;
+    switch (static_cast<SasCurve>(voice.curves[stage_index])) {
+    case SasCurve::LinearIncrease: h += rate; break;
+    case SasCurve::LinearDecrease: h -= rate; break;
+    case SasCurve::LinearBent: h += h <= kEnvelopeHeightMax * 3 / 4 ? rate : rate / 4; break;
+    case SasCurve::ExponentDecrease: {
+        // The distance below full scale grows by rate/2^32 of itself, then a
+        // small fixed fall, so the level falls fast near the top and slowly
+        // near zero.
+        std::int64_t below = h - kEnvelopeHeightMax;
+        below += (-below * rate) >> 32;
+        h = below + kEnvelopeHeightMax - (rate + 3) / 4;
+        break;
+    }
+    case SasCurve::ExponentIncrease: {
+        std::int64_t below = h - kEnvelopeHeightMax;
+        below += (-below * rate) >> 32;
+        h = below + 0x4000 + kEnvelopeHeightMax;
+        break;
+    }
+    case SasCurve::Direct: h = rate; break;
+    }
+    switch (voice.stage) {
+    case EnvelopeStage::Attack:
+        if (h >= kEnvelopeHeightMax || h < 0) {
+            h = std::min(h, kEnvelopeHeightMax);
+            voice.stage = EnvelopeStage::Decay;
+        }
+        break;
+    case EnvelopeStage::Decay:
+        if (h < voice.sustain_level) voice.stage = EnvelopeStage::Sustain;
+        break;
+    case EnvelopeStage::Sustain:
+        if (h <= 0) {
+            h = 0;
+            voice.stage = EnvelopeStage::Release;
+        }
+        h = std::min(h, kEnvelopeHeightMax);
+        break;
+    case EnvelopeStage::Release:
+        if (h <= 0) {
+            h = 0;
+            voice.stage = EnvelopeStage::Off;
+            voice.playing = false;
+        }
+        break;
+    case EnvelopeStage::Off:
+        break;
+    }
+    voice.envelope = static_cast<std::int32_t>(std::clamp<std::int64_t>(h >> 15, 0, kEnvelopeMax));
+}
+
 void SasCore::step_envelope(SasVoice &voice) {
     if (voice.stage == EnvelopeStage::Off) return;
+    if (voice.explicit_envelope && !envelopes_disabled()) {
+        step_explicit_envelope(voice);
+        return;
+    }
     // Without an ADSR the guest drives the level with SetVolume alone, so the
     // envelope stays wide open.
     if (!voice.have_adsr || envelopes_disabled()) return;

@@ -57,7 +57,26 @@ struct SasVoice {
     EnvelopeStage stage{EnvelopeStage::Off};
     std::int32_t envelope{};
     std::int32_t envelope_counter{};
+
+    // The explicit envelope a game sets stage by stage with __sceSasSetADSR,
+    // __sceSasSetADSRmode and __sceSasSetSL, instead of the packed words of
+    // __sceSasSetSimpleADSR: for attack, decay, sustain and release a rate
+    // and a curve (SasCurve), stepped once a sample, with heights of
+    // 0..0x40000000 as the hardware reports them. A voice uses it from the
+    // first of those calls until the next __sceSasSetSimpleADSR.
+    bool explicit_envelope{};
+    std::array<std::int64_t, 4> rates{};
+    std::array<std::uint8_t, 4> curves{};
+    std::int64_t sustain_level{};
+    std::int64_t height{};
 };
+
+// The curves of the explicit envelope, as __sceSasSetADSRmode numbers them.
+enum class SasCurve : std::uint8_t {
+    LinearIncrease = 0, LinearDecrease = 1, LinearBent = 2,
+    ExponentDecrease = 3, ExponentIncrease = 4, Direct = 5,
+};
+inline constexpr std::int64_t kEnvelopeHeightMax = 0x40000000;
 
 // Software SAS: up to 32 VAG, PCM or noise voices mixed at 44100 Hz. Reverb
 // is not modelled, so the effect sends are accepted and ignored.
@@ -73,6 +92,15 @@ public:
     void set_pitch(std::uint32_t voice, std::uint32_t pitch);
     void set_volume(std::uint32_t voice, std::int32_t left, std::int32_t right);
     void set_simple_adsr(std::uint32_t voice, std::uint32_t adsr1, std::uint32_t adsr2);
+    // The explicit envelope. `flag` bits 0-3 pick which of attack, decay,
+    // sustain and release change. Each returns 0 or the SAS error code.
+    [[nodiscard]] std::uint32_t set_adsr_rates(std::uint32_t voice, std::uint32_t flag, const std::array<std::int32_t, 4> &rates);
+    [[nodiscard]] std::uint32_t set_adsr_curves(std::uint32_t voice, std::uint32_t flag, std::array<std::uint32_t, 4> curves);
+    [[nodiscard]] std::uint32_t set_sustain_level(std::uint32_t voice, std::int32_t level);
+    [[nodiscard]] std::uint32_t set_grain(std::uint32_t grain);
+    [[nodiscard]] std::uint32_t set_output_mode(std::uint32_t mode);
+    // One bit per voice, set while the voice is paused.
+    [[nodiscard]] std::uint32_t pause_flag() const noexcept;
     void set_pause(std::uint32_t mask, bool paused);
     void key_on(std::uint32_t voice);
     void key_off(std::uint32_t voice);
@@ -87,6 +115,8 @@ private:
     void advance_source(const psprecomp::GuestMemory &memory, SasVoice &voice);
     void decode_block(const psprecomp::GuestMemory &memory, SasVoice &voice);
     void step_envelope(SasVoice &voice);
+    void step_explicit_envelope(SasVoice &voice);
+    void make_envelope_explicit(SasVoice &voice);
 
     std::uint32_t grain_{256u};
     std::uint32_t max_voices_{kSasMaxVoices};
