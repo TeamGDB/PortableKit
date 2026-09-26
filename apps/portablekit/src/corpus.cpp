@@ -2,6 +2,7 @@
 
 #include "app_home.hpp"
 #include "process.hpp"
+#include "response_file.hpp"
 #include "text_format.hpp"
 
 #include "corpus_abi.hpp"
@@ -25,6 +26,10 @@ namespace portablekit::app {
 namespace {
 
 namespace fs = std::filesystem;
+
+// Past this many characters a command goes through a response file. Windows
+// starts nothing longer than 32767; this leaves room for the program path.
+constexpr std::size_t kLongCommandLine = 8000u;
 using Clock = std::chrono::steady_clock;
 
 // Exit codes (app_main.cpp lists them all).
@@ -470,9 +475,16 @@ int compile_corpus(const GameRecord &game, const CompileOptions &options) {
             const bool current = fs::exists(object, time_ec) &&
                                  fs::last_write_time(object, time_ec) >= fs::last_write_time(source, time_ec);
             if (!current) {
-                const ProcessResult result =
-                    run_process(compile_arguments(command, options.opt_level, source, object, paths.generated),
-                                paths.log);
+                // Compile lines are short; one that is not goes through a
+                // response file, as the link does.
+                std::vector<std::string> arguments =
+                    compile_arguments(command, options.opt_level, source, object, paths.generated);
+                if (command_line_length(arguments) > kLongCommandLine) {
+                    fs::path rsp = object;
+                    rsp += ".rsp";
+                    arguments = with_response_file(arguments, command.prefix.size(), rsp);
+                }
+                const ProcessResult result = run_process(arguments, paths.log);
                 if (!result.started || result.exit_code != 0) {
                     const std::lock_guard<std::mutex> guard(status_lock);
                     if (!failed) failure = result.started ? "Compiling " + source.filename().string() + " failed; see " + path_text(paths.log) + "." : result.error;
@@ -501,7 +513,11 @@ int compile_corpus(const GameRecord &game, const CompileOptions &options) {
     const auto link_start = Clock::now();
     fs::path partial = paths.library;
     partial += ".part";
-    const ProcessResult linked = run_process(link_arguments(command, partial, objects), paths.log);
+    // Every object by full path is too long a command line for Windows once
+    // a game has a few hundred units (32767 characters): through a file.
+    const ProcessResult linked = run_process(
+        with_response_file(link_arguments(command, partial, objects), command.prefix.size(), paths.root / "link.rsp"),
+        paths.log);
     status.link_seconds = seconds_since(link_start);
     if (!linked.started || linked.exit_code != 0)
         return fail(kLinkFailed, linked.started ? "Linking failed; see " + path_text(paths.log) + "." : linked.error);

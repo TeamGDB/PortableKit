@@ -254,6 +254,16 @@ if(PSPRECOMP_BUILD_TESTS)
     add_test(NAME portablekit_psmf_tests COMMAND portablekit_psmf_tests)
 endif()
 
+# The desktop app's response files for long compile and link command lines.
+if(PSPRECOMP_BUILD_TESTS)
+    add_executable(portablekit_response_file_tests
+        "${PORTABLEKIT_ROOT}/tests/response_file_tests.cpp"
+        "${PORTABLEKIT_ROOT}/apps/portablekit/src/response_file.cpp")
+    target_include_directories(portablekit_response_file_tests PRIVATE "${PORTABLEKIT_ROOT}/apps/portablekit/src")
+    set_target_properties(portablekit_response_file_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME portablekit_response_file_tests COMMAND portablekit_response_file_tests)
+endif()
+
 # Each platform's settings defaults.
 if(PSPRECOMP_BUILD_TESTS)
     add_executable(portablekit_settings_tests

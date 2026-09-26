@@ -31,6 +31,7 @@ set(app_sources
     src/keys_file.cpp
     src/launcher_ui.cpp
     src/process.cpp
+    src/response_file.cpp
     src/text_format.cpp)
 
 set(profile_index 0)
