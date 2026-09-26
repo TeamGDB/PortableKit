@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <vector>
 
 namespace portablekit::audio {
 
@@ -21,6 +22,12 @@ struct SasVoice {
     std::uint32_t size{};
     bool looping{};
     bool pcm{};  // raw 16-bit PCM instead of VAG
+    // A noise voice (__sceSasSetNoise) plays the output of a noise generator
+    // instead of a sample, at `noise_clock` (0..63), until it is keyed off.
+    bool noise{};
+    std::uint32_t noise_clock{};
+    std::int32_t noise_timer{};
+    std::uint16_t noise_register{1u};
     std::uint32_t pitch{0x1000u};
     std::int32_t left{0x1000};
     std::int32_t right{0x1000};
@@ -52,8 +59,8 @@ struct SasVoice {
     std::int32_t envelope_counter{};
 };
 
-// Software SAS: up to 32 VAG voices mixed at 44100 Hz. Reverb is not modelled,
-// so the effect sends are accepted and ignored.
+// Software SAS: up to 32 VAG, PCM or noise voices mixed at 44100 Hz. Reverb
+// is not modelled, so the effect sends are accepted and ignored.
 class SasCore {
 public:
     void init(std::uint32_t grain, std::uint32_t max_voices, std::uint32_t output_mode);
@@ -62,6 +69,7 @@ public:
 
     void set_voice(std::uint32_t voice, std::uint32_t address, std::uint32_t size, bool looping);
     void set_voice_pcm(std::uint32_t voice, std::uint32_t address, std::uint32_t size, std::int32_t loop);
+    void set_noise(std::uint32_t voice, std::uint32_t clock);
     void set_pitch(std::uint32_t voice, std::uint32_t pitch);
     void set_volume(std::uint32_t voice, std::int32_t left, std::int32_t right);
     void set_simple_adsr(std::uint32_t voice, std::uint32_t adsr1, std::uint32_t adsr2);
@@ -84,6 +92,7 @@ private:
     std::uint32_t max_voices_{kSasMaxVoices};
     std::uint32_t output_mode_{};
     std::array<SasVoice, kSasMaxVoices> voices_{};
+    std::vector<std::int32_t> mix_;
 };
 
 // One core per guest SAS handle. Games usually open one, but the handle is an

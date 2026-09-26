@@ -932,6 +932,14 @@ void register_audio(HleRegistrar &hle) {
                                                    static_cast<std::int32_t>(arg(ctx, 4)));
         kernel().finish(ctx, 0u);
     });
+    // __sceSasSetNoise(core, voice, clock): the voice plays the noise
+    // generator at that clock instead of a sample, from its next key on.
+    hle.try_add("sceSasCore", "__sceSasSetNoise", [](Runtime &, AllegrexContext &ctx) {
+        audio::sas_core(arg(ctx, 0)).set_noise(arg(ctx, 1), arg(ctx, 2));
+        if (portablekit::env("TRACE_AUDIO") != nullptr)
+            std::cout << "[sas] noise voice " << arg(ctx, 1) << " clock " << arg(ctx, 2) << "\n";
+        kernel().finish(ctx, 0u);
+    });
     hle.add("sceSasCore", "__sceSasSetPitch", [](Runtime &, AllegrexContext &ctx) {
         audio::sas_core(arg(ctx, 0)).set_pitch(arg(ctx, 1), arg(ctx, 2));
         kernel().finish(ctx, 0u);
