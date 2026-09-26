@@ -29,6 +29,7 @@ set(PORTABLEKIT_HOST_SOURCES
     host/audio/atrac_decoder.cpp
     host/movie/avc_decoder.cpp
     host/movie/psmf_demuxer.cpp
+    host/movie/psmf_header.cpp
     host/audio/audio_sink.cpp
     host/audio/sas_core.cpp
     host/camera_probe.cpp
@@ -45,6 +46,8 @@ set(PORTABLEKIT_HOST_SOURCES
     host/system.cpp
     host/kernel/kernel.cpp
     host/kernel/fixed_pool.cpp
+    host/kernel/message_pipe.cpp
+    host/kernel/rtc_time.cpp
     host/kernel/load_trace.cpp
     host/kernel/fast_loading.cpp
     host/kernel/load_detector.cpp
@@ -58,6 +61,8 @@ set(PORTABLEKIT_HOST_SOURCES
     host/hle/hle_atrac.cpp
     host/hle/hle_mpeg.cpp
     host/hle/hle_psmfplayer.cpp
+    host/hle/hle_psmf.cpp
+    host/hle/hle_net_offline.cpp
     host/fonts/game_font.cpp
     host/hle/hle_font.cpp
     host/hle/hle_utility.cpp

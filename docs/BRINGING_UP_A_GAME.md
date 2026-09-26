@@ -80,6 +80,9 @@ Every one of these takes the profile's own prefix, so `TENKAWA_TRACE_KERNEL` for
 | `<PREFIX>_STRICT_HLE` | Do not bind logging stubs for unimplemented imports, so the game stops at the first one instead of carrying on with a wrong answer |
 | `<PREFIX>_TRACE_KERNEL`, `_TRACE_IO`, `_TRACE_GE`, `_TRACE_SAVEDATA`, … | One subsystem each |
 | `<PREFIX>_TRACE_SYNC` | Every kernel object a thread waits on, which is how a deadlock is read |
+| `<PREFIX>_TRACE_GE_LIST=N[:M]` | Every command word of display-list runs N to N+M-1: what a screen that draws nothing is built from |
+| `<PREFIX>_TRACE_SAS` | SAS voices set, keyed on and off, and each change of the end flags a game polls |
+| `<PREFIX>_NO_BUSY_CLOCK` | Keep emulated time still for a thread that never waits, as before the busy clock (`Kernel::charge_busy_time`) |
 | `PSPRECOMP_NO_INTERPRETER=1` | Turn the interpreter off. Nothing runs without a corpus; with one, the runtime stops at the first address the recompiler missed and names it |
 | `PSPRECOMP_MAX_DISPATCHES` | Stop after this many dispatches, for a bounded run |
 | `PSPRECOMP_INTERPRETER_WATCH` | Guest addresses, comma separated: report the registers each time interpreted code reaches one. `PSPRECOMP_INTERPRETER_WATCH_WORDS=N` also dumps N words at `a0`, and `PSPRECOMP_INTERPRETER_WATCH_LIMIT` bounds how many times each address is reported (40 by default, 0 for no limit) |

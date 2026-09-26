@@ -656,6 +656,35 @@ void register_vblank_waits(HleRegistrar &hle) {
         wait.type = WaitType::VBlank;
         kernel().block(ctx, wait, 0u);
     });
+    // sceDisplayGetFramePerSec() -> float in $f0: the refresh rate, 60000/1001
+    // (59.94) on a PSP. God of War (UCES00842) and Patapon (UCES00995) ask.
+    hle.add("sceDisplay", "sceDisplayGetFramePerSec", [](Runtime &, AllegrexContext &ctx) {
+        ctx.fpr[0] = 60000.0f / 1001.0f;
+        kernel().finish(ctx, 0u);
+    });
+    // sceDisplayGetFrameBuf(void **top, int *width, int *format, sync): what
+    // sceDisplaySetFrameBuf was last given.
+    hle.add("sceDisplay", "sceDisplayGetFrameBuf", [](Runtime &rt, AllegrexContext &ctx) {
+        auto &memory = rt.memory();
+        if (arg(ctx, 0) != 0u) memory.store32(arg(ctx, 0), media().display.framebuffer);
+        if (arg(ctx, 1) != 0u) memory.store32(arg(ctx, 1), media().display.buffer_width);
+        if (arg(ctx, 2) != 0u) memory.store32(arg(ctx, 2), media().display.pixel_format);
+        kernel().finish(ctx, 0u);
+    });
+    // The display's position in its frame, from emulated time since the last
+    // vblank: 286 lines a frame, the last 14 of them the vertical blank.
+    // Chinatown Wars and Vice City Stories import these; no game has been
+    // seen calling them yet.
+    hle.add("sceDisplay", "sceDisplayGetCurrentHcount", [](Runtime &, AllegrexContext &ctx) {
+        log_once("display-hcount", "[display] sceDisplayGetCurrentHcount (UNVERIFIED: no game traced yet)");
+        const std::uint64_t since = kernel().now_us() - kernel().last_vblank_us();
+        kernel().finish(ctx, static_cast<std::uint32_t>(since * 286u / 16683u % 286u));
+    });
+    hle.add("sceDisplay", "sceDisplayIsVblank", [](Runtime &, AllegrexContext &ctx) {
+        log_once("display-isvblank", "[display] sceDisplayIsVblank (UNVERIFIED: no game traced yet)");
+        const std::uint64_t since = kernel().now_us() - kernel().last_vblank_us();
+        kernel().finish(ctx, since * 286u / 16683u % 286u >= 272u ? 1u : 0u);
+    });
     hle.add("sceDisplay", "sceDisplayGetVcount", [](Runtime &, AllegrexContext &ctx) {
         trace_pacing("sceDisplayGetVcount", static_cast<std::int64_t>(kernel().vblank_count()));
         kernel().finish(ctx, static_cast<std::uint32_t>(kernel().vblank_count()));
@@ -807,6 +836,13 @@ void sas_render(Runtime &rt, std::uint32_t core, std::uint32_t output, bool mix,
     }
 }
 
+// <prefix>_TRACE_SAS: voices set, keyed on and off, and each change of the
+// end flags the game polls.
+bool trace_sas() {
+    static const bool enabled = portablekit::env("TRACE_SAS") != nullptr;
+    return enabled;
+}
+
 void register_audio(HleRegistrar &hle) {
     audio::AudioSink::instance().initialize();
 
@@ -894,6 +930,16 @@ void register_audio(HleRegistrar &hle) {
         media().output2_channel = channel;
         kernel().finish(ctx, 0u);
     });
+    // sceAudioOutput2ChangeLength(samples): the output's block size.
+    hle.add("sceAudio", "sceAudioOutput2ChangeLength", [](Runtime &, AllegrexContext &ctx) {
+        if (media().output2_channel < 0) {
+            kernel().finish(ctx, 0x80260002u);
+            return;
+        }
+        log_once("audio-output2-length", "[audio] sceAudioOutput2ChangeLength (UNVERIFIED: no game traced yet)");
+        media().audio[static_cast<std::size_t>(media().output2_channel)].samples = arg(ctx, 0);
+        kernel().finish(ctx, 0u);
+    });
     hle.add("sceAudio", "sceAudioOutput2Release", [](Runtime &, AllegrexContext &ctx) {
         if (media().output2_channel >= 0) {
             media().audio[static_cast<std::size_t>(media().output2_channel)].reserved = false;
@@ -921,6 +967,9 @@ void register_audio(HleRegistrar &hle) {
         kernel().finish(ctx, 0u);
     });
     hle.add("sceSasCore", "__sceSasSetVoice", [](Runtime &, AllegrexContext &ctx) {
+        if (trace_sas())
+            std::cerr << "[sas] voice " << arg(ctx, 1) << " vag=" << psprecomp::hex32(arg(ctx, 2)) << " size=" << arg(ctx, 3)
+                      << " loop=" << arg(ctx, 4) << "\n";
         audio::sas_core(arg(ctx, 0)).set_voice(arg(ctx, 1), arg(ctx, 2), arg(ctx, 3), arg(ctx, 4) != 0u);
         kernel().finish(ctx, 0u);
     });
@@ -951,10 +1000,12 @@ void register_audio(HleRegistrar &hle) {
         kernel().finish(ctx, 0u);
     });
     hle.add("sceSasCore", "__sceSasSetKeyOn", [](Runtime &, AllegrexContext &ctx) {
+        if (trace_sas()) std::cerr << "[sas] key on " << arg(ctx, 1) << "\n";
         audio::sas_core(arg(ctx, 0)).key_on(arg(ctx, 1));
         kernel().finish(ctx, 0u);
     });
     hle.add("sceSasCore", "__sceSasSetKeyOff", [](Runtime &, AllegrexContext &ctx) {
+        if (trace_sas()) std::cerr << "[sas] key off " << arg(ctx, 1) << "\n";
         audio::sas_core(arg(ctx, 0)).key_off(arg(ctx, 1));
         kernel().finish(ctx, 0u);
     });
@@ -1021,7 +1072,11 @@ void register_audio(HleRegistrar &hle) {
         kernel().finish(ctx, audio::sas_core(arg(ctx, 0)).output_mode());
     });
     hle.add("sceSasCore", "__sceSasGetEndFlag", [](Runtime &, AllegrexContext &ctx) {
-        kernel().finish(ctx, audio::sas_core(arg(ctx, 0)).end_flag());
+        const std::uint32_t flags = audio::sas_core(arg(ctx, 0)).end_flag();
+        static std::uint32_t last = 0u;
+        if (trace_sas() && flags != last) std::cerr << "[sas] end flags " << psprecomp::hex32(flags) << "\n";
+        last = flags;
+        kernel().finish(ctx, flags);
     });
     hle.add("sceSasCore", "__sceSasCore", [](Runtime &rt, AllegrexContext &ctx) {
         sas_render(rt, arg(ctx, 0), arg(ctx, 1), false, 0u, 0u);
@@ -1040,6 +1095,27 @@ void initialize_renderer() {
     (void)ensure_renderer();
 #else
     std::cout << "Renderer: not built\n";
+#endif
+}
+
+// A picture the CPU wrote straight into a VRAM framebuffer (the movie
+// player decoding into the display buffers, as God of War's does): the
+// renderer keeps each framebuffer on the GPU, so the pixels go to that
+// framebuffer's target, and what the GE draws afterwards (subtitles) lands
+// on top. 32-bit pixels only. <prefix>_NO_VRAM_UPLOAD turns it off.
+void show_cpu_picture_in_vram(Runtime &rt, std::uint32_t address, std::uint32_t width, std::uint32_t height,
+                              std::uint32_t stride, std::uint32_t pixel_mode) {
+#if defined(PORTABLEKIT_HAS_RENDERER)
+    static const bool off = portablekit::env("NO_VRAM_UPLOAD") != nullptr;
+    if (off || (address & 0x1F000000u) != kEdramBase || !media().renderer || !media().renderer->available()) return;
+    if (pixel_mode != 3u) {
+        log_once("vram-upload-format", "[mpeg] a picture decoded into VRAM in a 16-bit format is not shown");
+        return;
+    }
+    const std::size_t bytes = static_cast<std::size_t>(stride) * height * 4u;
+    media().renderer->upload_frame(address | kEdramBase, rt.memory().raw_pointer(address, bytes), width, height, stride);
+#else
+    (void)rt, (void)address, (void)width, (void)height, (void)stride, (void)pixel_mode;
 #endif
 }
 

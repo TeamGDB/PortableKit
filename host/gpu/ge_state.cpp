@@ -1419,30 +1419,29 @@ std::uint32_t GeState::execute(const GuestMemory &memory, std::uint32_t pc, std:
             // SIGNAL's top byte is its behaviour. 0x01-0x03 interrupt the CPU
             // with the low 16 bits; 0x10 and up are list flow the GE does
             // itself, with a target address split between this command
-            // (high half) and the END that follows (low half). Patapon's
-            // frame list ends in behaviour 0x11 into a list inside a loaded
-            // archive (0x0E1108ED, 0x0C11CAC0: to 0x08EDCAC0), which is
-            // where its screens are.
+            // (high half) and the END that follows (low half): 0x10 jumps,
+            // 0x11 calls, 0x12 returns. Traced in Patapon (UCES00995): each
+            // frame's list calls, with 0x0E1108F5 and an END ending FD40, a list inside
+            // a loaded archive, which ends in 0x0E120000 and the frame list
+            // goes on after the call with the title menu.
             const std::uint32_t behaviour = data >> 16u;
-            if (behaviour >= 0x10u && behaviour <= 0x13u && memory.contains(pc, 4u) &&
+            if (behaviour >= 0x10u && behaviour <= 0x12u && memory.contains(pc, 4u) &&
                 (memory.load32(pc) >> 24u) == kEnd) {
                 const std::uint32_t target = ((data & 0xFFFFu) << 16u | (memory.load32(pc) & 0xFFFFu)) & 0x0FFFFFFCu;
                 pc += 4u;  // the END is part of the signal
                 switch (behaviour) {
-                case 0x11u:  // jump
+                case 0x10u:  // jump
                     pc = target;
                     break;
-                case 0x12u:  // call
+                case 0x11u:  // call
                     call_stack_.push_back(pc);
                     pc = target;
                     break;
-                case 0x13u:  // return
+                default:  // 0x12: return
                     if (!call_stack_.empty()) {
                         pc = call_stack_.back();
                         call_stack_.pop_back();
                     }
-                    break;
-                default:  // 0x10: a sync point
                     break;
                 }
                 continue;

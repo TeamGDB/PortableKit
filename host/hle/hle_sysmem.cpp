@@ -89,6 +89,9 @@ void register_sysmem(HleRegistrar &hle) {
     hle.add("SysMemUserForUser", "sceKernelSetCompilerVersion", success);
     hle.add("SysMemUserForUser", "sceKernelSetCompiledSdkVersion603_605", success);
     hle.add("SysMemUserForUser", "sceKernelSetCompiledSdkVersion", success);
+    // 0x342061E5: named after public NID lists; God of War, Patapon and
+    // MHP2G call it with 0x03070010, SDK 3.70.
+    hle.add("SysMemUserForUser", "sceKernelSetCompiledSdkVersion370", success);
     hle.add("SysMemUserForUser", "sceKernelPrintf", [](Runtime &rt, AllegrexContext &ctx) {
         std::cerr << "[guest] " << format_guest(rt.memory(), ctx, read_cstring(rt.memory(), arg(ctx, 0), 1024u));
         kernel().finish(ctx, 0u);
