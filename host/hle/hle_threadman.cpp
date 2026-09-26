@@ -145,6 +145,10 @@ void register_threads(HleRegistrar &hle) {
 
     const auto delay = [](Runtime &, AllegrexContext &ctx) { kernel().delay_current(ctx, arg(ctx, 0)); };
     hle.add("ThreadManForUser", "sceKernelDelayThread", delay);
+    // Runs the thread's notified callbacks now: 1 when there were any.
+    hle.add("ThreadManForUser", "sceKernelCheckCallback", [](Runtime &, AllegrexContext &ctx) {
+        kernel().finish(ctx, kernel().deliver_callbacks() ? 1u : 0u);
+    });
     hle.add("ThreadManForUser", "sceKernelDelayThreadCB", [](Runtime &, AllegrexContext &ctx) {
         (void)kernel().deliver_callbacks();
         kernel().delay_current(ctx, arg(ctx, 0));
@@ -233,7 +237,7 @@ void register_semaphores(HleRegistrar &hle) {
         kernel().release_semaphore_waiters(uid);
         kernel().finish(ctx, 0u);
     });
-    hle.add("ThreadManForUser", "sceKernelWaitSema", [](Runtime &, AllegrexContext &ctx) {
+    const auto wait_sema = [](Runtime &, AllegrexContext &ctx) {
         const SceUID uid = as_signed(arg(ctx, 0));
         auto found = kernel().semaphores.find(uid);
         const auto wanted = as_signed(arg(ctx, 1));
@@ -258,6 +262,12 @@ void register_semaphores(HleRegistrar &hle) {
         wait.value = static_cast<std::uint32_t>(wanted);
         wait.timeout_address = arg(ctx, 2);
         kernel().block(ctx, wait, 0u);
+    };
+    hle.add("ThreadManForUser", "sceKernelWaitSema", wait_sema);
+    // As the other *CB waits: the thread's notified callbacks run first.
+    hle.add("ThreadManForUser", "sceKernelWaitSemaCB", [wait_sema](Runtime &rt, AllegrexContext &ctx) {
+        (void)kernel().deliver_callbacks();
+        wait_sema(rt, ctx);
     });
     hle.add("ThreadManForUser", "sceKernelPollSema", [](Runtime &, AllegrexContext &ctx) {
         auto found = kernel().semaphores.find(as_signed(arg(ctx, 0)));
@@ -356,7 +366,7 @@ void register_event_flags(HleRegistrar &hle) {
     hle.add("ThreadManForUser", "sceKernelPollEventFlag", [try_match](Runtime &rt, AllegrexContext &ctx) {
         (void)try_match(rt, ctx, true);
     });
-    hle.add("ThreadManForUser", "sceKernelWaitEventFlag", [try_match](Runtime &rt, AllegrexContext &ctx) {
+    const auto wait_event_flag = [try_match](Runtime &rt, AllegrexContext &ctx) {
         if (try_match(rt, ctx, false)) return;
         const SceUID uid = as_signed(arg(ctx, 0));
         if (trace_sync())
@@ -371,6 +381,11 @@ void register_event_flags(HleRegistrar &hle) {
         wait.out_address = arg(ctx, 3);
         wait.timeout_address = arg(ctx, 4);
         kernel().block(ctx, wait, 0u);
+    };
+    hle.add("ThreadManForUser", "sceKernelWaitEventFlag", wait_event_flag);
+    hle.add("ThreadManForUser", "sceKernelWaitEventFlagCB", [wait_event_flag](Runtime &rt, AllegrexContext &ctx) {
+        (void)kernel().deliver_callbacks();
+        wait_event_flag(rt, ctx);
     });
 }
 
