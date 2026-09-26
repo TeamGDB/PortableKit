@@ -2,12 +2,14 @@ package io.github.teamgdb.portablekit;
 
 import android.content.ContentResolver;
 import android.content.Intent;
+import android.content.pm.ActivityInfo;
 import android.database.Cursor;
 import android.graphics.Insets;
 import android.net.Uri;
 import android.os.Build;
 import android.os.ParcelFileDescriptor;
 import android.provider.DocumentsContract;
+import android.view.DisplayCutout;
 import android.view.View;
 import android.view.WindowInsets;
 
@@ -30,18 +32,40 @@ public class GameActivity extends SDLActivity {
     private static boolean sPickDone;
     private static String sPickResult;
 
+    /**
+     * Keeps the game in landscape, either way up, as the manifest asks. SDL
+     * calls this when it makes the window and would otherwise ask for every
+     * orientation (FULL_USER) for a resizable window without an orientations
+     * hint: the game then turned to portrait whenever the phone was held
+     * upright, and stayed there on a phone with auto-rotate off.
+     */
+    @Override
+    public void setOrientationBis(int w, int h, boolean resizable, String hint) {
+        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+    }
+
     /** Left, top, right, bottom of the display cutout in window pixels, or all 0. */
     public static int[] cutoutInsets() {
         int[] result = new int[4];
-        if (mSingleton == null || Build.VERSION.SDK_INT < 30) return result;
+        if (mSingleton == null) return result;
         View view = mSingleton.getWindow().getDecorView();
         WindowInsets insets = view.getRootWindowInsets();
         if (insets == null) return result;
-        Insets cutout = insets.getInsets(WindowInsets.Type.displayCutout());
-        result[0] = cutout.left;
-        result[1] = cutout.top;
-        result[2] = cutout.right;
-        result[3] = cutout.bottom;
+        if (Build.VERSION.SDK_INT >= 30) {
+            Insets cutout = insets.getInsets(WindowInsets.Type.displayCutout());
+            result[0] = cutout.left;
+            result[1] = cutout.top;
+            result[2] = cutout.right;
+            result[3] = cutout.bottom;
+        } else {
+            // Android 10: the same insets through the older call.
+            DisplayCutout cutout = insets.getDisplayCutout();
+            if (cutout == null) return result;
+            result[0] = cutout.getSafeInsetLeft();
+            result[1] = cutout.getSafeInsetTop();
+            result[2] = cutout.getSafeInsetRight();
+            result[3] = cutout.getSafeInsetBottom();
+        }
         return result;
     }
 

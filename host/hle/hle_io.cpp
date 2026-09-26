@@ -2,6 +2,8 @@
 // (including raw "sce_lbn" sector files) and a host directory for ms0:.
 #include "../profile.hpp"
 #include "hle_common.hpp"
+#include "kernel/fast_loading.hpp"
+#include "kernel/load_trace.hpp"
 #include "kernel/iso_image.hpp"
 
 #include "psprecomp/common.hpp"
@@ -334,6 +336,13 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
             result = static_cast<std::uint32_t>(buffer.size());
         }
         rt.memory().copy_in(address, buffer);
+        // A disc read is what tells a load from play (kernel/fast_loading.hpp).
+        if (file.kind == OpenFile::Kind::Disc) {
+            load_trace::note_disc_read(buffer.size());
+            fast_loading::note_disc_read();
+        } else {
+            load_trace::note_memory_stick_read(buffer.size());
+        }
         if (trace_io())
             std::cerr << "[io] read fd=" << arg(ctx, 0) << " " << file.path
                       << (file.sector_units ? " sector=" : " offset=") << file.position << " got=" << result

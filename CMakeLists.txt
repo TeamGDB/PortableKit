@@ -248,12 +248,14 @@ if(PSPRECOMP_BUILD_TESTS)
 endif()
 
 # Texture pack import: finding a pack in the layouts packs come in, the
-# checks made before copying, and the copy, swap and backup. No game data.
+# checks made before copying, and the copy, swap and backup; and the PSP's DXT
+# block layout. No game data.
 if(PSPRECOMP_BUILD_TESTS)
     add_executable(portablekit_texture_pack_tests
         "${PORTABLEKIT_ROOT}/tests/texture_pack_tests.cpp"
         "${PORTABLEKIT_ROOT}/tests/test_profile.cpp"
         "${PORTABLEKIT_ROOT}/host/profile.cpp"
+        "${PORTABLEKIT_ROOT}/host/gpu/texture_decode.cpp"
         "${PORTABLEKIT_ROOT}/host/gpu/texture_pack.cpp"
         "${PORTABLEKIT_ROOT}/host/gpu/texture_pack_import.cpp")
     target_include_directories(portablekit_texture_pack_tests PRIVATE
@@ -296,6 +298,16 @@ if(PSPRECOMP_BUILD_TESTS)
     target_include_directories(portablekit_input_tests PRIVATE "${PORTABLEKIT_ROOT}/host")
     set_target_properties(portablekit_input_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
     add_test(NAME portablekit_input_tests COMMAND portablekit_input_tests)
+endif()
+
+# Fast loading's decision: when a load runs ahead of real time.
+if(PSPRECOMP_BUILD_TESTS)
+    add_executable(portablekit_fast_loading_tests
+        "${PORTABLEKIT_ROOT}/tests/fast_loading_tests.cpp"
+        "${PORTABLEKIT_ROOT}/host/kernel/load_detector.cpp")
+    target_include_directories(portablekit_fast_loading_tests PRIVATE "${PORTABLEKIT_ROOT}/host")
+    set_target_properties(portablekit_fast_loading_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME portablekit_fast_loading_tests COMMAND portablekit_fast_loading_tests)
 endif()
 
 # The system layer belongs to a game's target, so nothing above compiles

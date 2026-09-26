@@ -4,7 +4,7 @@ What a game's Android app is made of besides the native code. A game builds `lib
 
 | File | What it is |
 | --- | --- |
-| `AndroidManifest.xml` | The app: Android 11 (API 30) and Vulkan 1.1 required, landscape, the libraries extracted so the overlay loader can list them, the backup rules. `build_apk.sh` renames its package to the game's `APP_ID` |
+| `AndroidManifest.xml` | The app: Android 10 (API 29) and Vulkan 1.1 required, landscape, the libraries extracted so the overlay loader can list them, the backup rules. `build_apk.sh` renames its package to the game's `APP_ID` |
 | `java/…/GameActivity.java` | SDL's activity plus what the host needs from Android: the display cutout, the document picker for folders and files, restarting the app |
 | `res/` | The theme without a title bar, the adaptive icon's layout and the backup rules (saves and settings only). The game's own resources (`GAME_RES`) are laid over these: its name (`values/strings.xml`), its launcher icons, and its own backup rules if it needs to leave a folder out |
 | `build_apk.sh` | Packs and signs an APK without Gradle, with the SDK's own tools |

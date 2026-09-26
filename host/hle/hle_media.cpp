@@ -4,6 +4,8 @@
 // mixing themselves live under gpu/ and audio/.
 #include "../profile.hpp"
 #include "hle_common.hpp"
+#include "kernel/fast_loading.hpp"
+#include "kernel/load_trace.hpp"
 
 #include "overlays.hpp"
 
@@ -153,6 +155,7 @@ void run_ge_list(Runtime &rt, std::uint32_t id) {
         gpu::VulkanRenderer &renderer = *media().renderer;
         const psprecomp::GuestMemory &memory = rt.memory();
         renderer.begin_display_list();
+        media().ge.set_raw_vertices(renderer.gpu_decode(), renderer.check_gpu_decode());
         media().ge.set_draw_sink([&renderer, &memory](const gpu::DrawCall &call) { renderer.submit(call, memory); });
     }
 #endif
@@ -160,6 +163,7 @@ void run_ge_list(Runtime &rt, std::uint32_t id) {
 
     bool finished = false;
     try {
+        const perf::SplitScope split(perf::Split::Lists);
         list.pc = media().ge.execute(rt.memory(), list.pc, list.stall, finished);
     } catch (const psprecomp::Error &error) {
         // A malformed list must not take the whole run down: drop it and carry on.
@@ -222,6 +226,7 @@ std::uint64_t frame_start_us(std::uint64_t latest_vblank_us) {
 }
 
 void present_frame(Runtime &rt) {
+    load_trace::note_flip();
     // Overlays are swapped between frames; re-check before drawing the next one.
     revalidate_overlays(rt);
 #if defined(PORTABLEKIT_HAS_RENDERER)
@@ -247,6 +252,8 @@ void present_frame(Runtime &rt) {
     }
     ui::draw_over_game();
     renderer.write_back_frame(rt.memory());
+    // A load running fast flips far more often than the display refreshes.
+    renderer.set_fast_forward(fast_loading::active());
     // The real time the frame stands for, which frame interpolation spaces
     // its presents by: that of the vblank the game's frame started from.
     const bool presented = renderer.present(address, kernel().real_time_of(frame_start_us(kernel().last_vblank_us())));
@@ -345,6 +352,7 @@ CtrlSample sample_ctrl() {
         if (!at_flip) media().renderer->sample_pad();
         const gpu::PadState pad = media().renderer->pad();
         sample.buttons = pad.buttons;
+        fast_loading::note_buttons(sample.buttons != 0u);
         sample.analog_x = pad.analog_x;
         sample.analog_y = pad.analog_y;
         sample.right_x = pad.right_x;
@@ -623,7 +631,21 @@ void audio_output(Runtime &rt, AllegrexContext &ctx) {
                                                 : static_cast<std::int16_t>(source[(index + 1u) * 2u] |
                                                                             (source[(index + 1u) * 2u + 1u] << 8));
             }
-            audio::AudioSink::instance().mix(state.cursor, staging.data(), frames, left, right);
+            // How loud the buffer is after the channel's volume, worked out
+            // as the sink mixes it (0x8000 is full volume): 0 means the sink
+            // would add nothing but zeros.
+            const std::int32_t gains[2] = {static_cast<std::int32_t>(std::min<std::uint32_t>(left, 0x8000u)),
+                                           static_cast<std::int32_t>(std::min<std::uint32_t>(right, 0x8000u))};
+            int peak = 0;
+            for (std::size_t i = 0; i < frames * 2u; ++i)
+                peak = std::max(peak, std::abs((static_cast<std::int32_t>(staging[i]) * gains[i & 1u]) >> 15));
+            load_trace::note_audio_peak(peak);
+            // While a load runs faster than real time its silence is dropped:
+            // played, it would pile up faster than the device plays it. The
+            // channel's cursor stays where it was and catches up with the
+            // device when sound comes back.
+            if (!fast_loading::note_audio(peak))
+                audio::AudioSink::instance().mix(state.cursor, staging.data(), frames, left, right);
         } else {
             log_once("audio-buffer", "[audio] output buffer is not a single mapped range; dropping it");
         }

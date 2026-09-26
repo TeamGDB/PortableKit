@@ -263,8 +263,22 @@ bool Layer::handle_event(const SDL_Event &event) {
     case SDL_EVENT_GAMEPAD_AXIS_MOTION:
         if (std::abs(static_cast<int>(event.gaxis.value)) > 16000) device_ = InputDevice::Gamepad;
         break;
+    case SDL_EVENT_GAMEPAD_ADDED:
+    case SDL_EVENT_GAMEPAD_REMOVED:
+        // ImGui refreshes its list of pads only when it sees one of these. A
+        // pad that connects while the game runs (one woken over Bluetooth)
+        // would otherwise never reach the menu, though the game reads it.
+        ImGui_ImplSDL3_ProcessEvent(&event);
+        return false;
     case SDL_EVENT_DROP_FILE:
+#if defined(PORTABLEKIT_ANDROID_APP)
+        // Android has no dropping: this is a document another app asked
+        // the game to open, and SDL passes only the path part of its content://
+        // URI, which names no file. Nothing can be read from it.
+        if (event.drop.data != nullptr) std::cout << "[ui] ignored a document opened with the game: " << event.drop.data << "\n";
+#else
         if (event.drop.data != nullptr) dropped_ = install::path_from_utf8(event.drop.data);
+#endif
         return true;
     default: break;
     }

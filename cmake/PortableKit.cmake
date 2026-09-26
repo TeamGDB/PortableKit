@@ -43,6 +43,9 @@ set(PORTABLEKIT_HOST_SOURCES
     host/overlays.cpp
     host/system.cpp
     host/kernel/kernel.cpp
+    host/kernel/load_trace.cpp
+    host/kernel/fast_loading.cpp
+    host/kernel/load_detector.cpp
     host/kernel/iso_image.cpp
     host/hle/hle_common.cpp
     host/hle/hle_threadman.cpp
@@ -173,6 +176,8 @@ function(portablekit_add_game target)
             set(shader_inc "${CMAKE_CURRENT_BINARY_DIR}/generated_shaders/ge_shaders.inc")
             set(shaders
                 "kGeVertexShader=${PORTABLEKIT_ROOT}/host/gpu/shaders/ge.vert"
+                "kGeRawVertexShader=GE_RAW_VERTICES@${PORTABLEKIT_ROOT}/host/gpu/shaders/ge.vert"
+                "kGeCheckVertexShader=GE_RAW_VERTICES,GE_CHECK_DECODE@${PORTABLEKIT_ROOT}/host/gpu/shaders/ge.vert"
                 "kGeFragmentShader=${PORTABLEKIT_ROOT}/host/gpu/shaders/ge.frag")
             if(ANDROID)
                 # Pre-rotation of the finished frame for a display turned sideways.
@@ -181,7 +186,8 @@ function(portablekit_add_game target)
                     "kRotateFragmentShader=${PORTABLEKIT_ROOT}/host/gpu/shaders/rotate.frag")
             endif()
             set(shader_sources ${shaders})
-            list(TRANSFORM shader_sources REPLACE "^[A-Za-z]+=" "")
+            list(TRANSFORM shader_sources REPLACE "^[A-Za-z]+=([A-Z_,]+@)?" "")
+            list(REMOVE_DUPLICATES shader_sources)
             add_custom_command(
                 OUTPUT "${shader_inc}"
                 COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/generated_shaders"
@@ -246,7 +252,8 @@ function(portablekit_add_game target)
     if(PORTABLEKIT_ANDROID_APP)
         add_library(${target} SHARED ${program_sources} "${PORTABLEKIT_ROOT}/host/platform/android_app.cpp"
             "${PORTABLEKIT_ROOT}/host/platform/android_jni.cpp"
-            "${PORTABLEKIT_ROOT}/host/platform/android_documents.cpp")
+            "${PORTABLEKIT_ROOT}/host/platform/android_documents.cpp"
+            "${PORTABLEKIT_ROOT}/host/platform/android_performance.cpp")
         target_compile_definitions(${target} PRIVATE PORTABLEKIT_ANDROID_APP=1)
         set_target_properties(${target} PROPERTIES
             OUTPUT_NAME main
