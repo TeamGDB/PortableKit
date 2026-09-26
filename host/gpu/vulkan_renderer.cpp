@@ -1,4 +1,5 @@
 #include "../profile.hpp"
+#include "portablekit_build_label.hpp"
 #include "ui/input_script.hpp"
 #include "vulkan_renderer.hpp"
 
@@ -53,6 +54,13 @@
 #include <vector>
 
 namespace portablekit::gpu {
+
+std::string default_window_title() {
+    std::string title = portablekit::game().app_name;
+    if (*kBuildLabel != '\0') title += std::string(" (") + kBuildLabel + ")";
+    return title;
+}
+
 namespace {
 
 constexpr std::uint32_t kPspWidth = 480u;

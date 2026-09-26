@@ -355,6 +355,7 @@ portablekit keys import <file>
 portablekit keys status
 portablekit cache clear <game>
 portablekit toolchain
+portablekit version                  also --version: the build, its label, the corpus ABI, HLE extension modules
 ```
 
 `<game>` is the id (`UCES01059-e1075b96`), the disc id with or without its dash, or a unique prefix. `run` starts a background compile when -O2 is not ready yet, `tiered` by default: -O0 first, then -O2 from the same C++ (the recompiler runs once). `--seconds` bounds a run for tests; `PORTABLEKIT_MAX_OPT` caps the level loaded, for comparing levels. `--data-dir <folder>` works with every command.

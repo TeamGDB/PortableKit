@@ -39,6 +39,7 @@ A port is its own repository: a file of constants, a short `CMakeLists.txt` and 
 - [Writing a profile](docs/PROFILE_GUIDE.md)
 - [Building](docs/BUILDING.md), and [why the build keeps its incremental state the way it does](docs/BUILD_SYSTEM.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [HLE extension modules](docs/HLE_EXTENSIONS.md): system functions from a separately built library, filling in or overriding the framework's
 - [Instruction coverage](docs/INSTRUCTION_COVERAGE.md): which instructions a game has run, and which are implemented but unverified
 - [Where the code comes from, and third-party licences](docs/SOURCE_PROVENANCE.md)
 - [Contributing](CONTRIBUTING.md), and the [working notes](AGENTS.md) every change follows

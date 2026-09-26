@@ -27,6 +27,7 @@
 #include "perf/frame_stats.hpp"
 #include "save_data/save_transfer.hpp"
 #include "settings/settings.hpp"
+#include "portablekit_build_label.hpp"
 #include "portablekit_version.hpp"
 #if defined(PORTABLEKIT_ANDROID_APP)
 #include "platform/android_documents.hpp"
@@ -1252,6 +1253,7 @@ void Menu::system() {
 
     section("About");
     info_row(portablekit::game().project_name, std::string(kBuildVersion));
+    if (*kBuildLabel != '\0') info_row("Build", kBuildLabel);
     info_row("Game", std::string(portablekit::game().game_title) + " (" + portablekit::game().disc_id_display + ")");
     info_row("Data folder", data_dir);
     if (!savedata::memory_stick().empty())

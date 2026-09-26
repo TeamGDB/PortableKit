@@ -41,9 +41,13 @@ HleRegistrar::HleRegistrar(Runtime &runtime) : runtime_(runtime) {
 bool HleRegistrar::try_add(std::string_view library, std::string_view name, HleFunction function) {
     const auto found = nids_by_name_.find({std::string(library), std::string(name)});
     if (found == nids_by_name_.end()) return false;
-    runtime_.register_hle(std::string(library), found->second, std::move(function));
-    bound_.insert({std::string(library), found->second});
+    bind(std::string(library), found->second, std::move(function));
     return true;
+}
+
+void HleRegistrar::bind(const std::string &library, std::uint32_t nid, HleFunction function) {
+    runtime_.register_hle(library, nid, std::move(function));
+    bound_.insert({library, nid});
 }
 
 void HleRegistrar::add(std::string_view library, std::string_view name, HleFunction function) {
