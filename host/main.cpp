@@ -321,9 +321,6 @@ int run_adhoc_server(int argc, char **argv) {
 // option inside an app.
 int portablekit_main(int argc, char **argv) {
 #elif defined(PORTABLEKIT_HOST_MAIN_NAME)
-// A program that wraps the port (the desktop app in apps/portablekit) compiles
-// this file with PORTABLEKIT_HOST_MAIN_NAME set, so it can choose the game and
-// prepare its files before this runs it.
 int PORTABLEKIT_HOST_MAIN_NAME(int argc, char **argv) {
 #else
 int main(int argc, char **argv) {

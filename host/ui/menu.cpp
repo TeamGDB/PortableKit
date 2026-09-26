@@ -1421,9 +1421,9 @@ void draw_over_game() {
     }
     const double hint_left = menu || settings::current().menu_hint_seen ? -1.0 : hint_seconds_left();
     const bool overlay = network_overlay();
-    const bool status = g_status_overlay_visible != nullptr && g_status_overlay_visible();
     const bool touch = !menu && layer.renderer().touch_controls_visible();
-    if (hint_left <= 0.0 && !overlay && !menu && !status && !touch) return;
+    const bool status = g_status_overlay_visible != nullptr && g_status_overlay_visible();
+    if (hint_left <= 0.0 && !overlay && !menu && !touch && !status) return;
     layer.begin_frame();
     if (touch) draw_touch_controls(layer.renderer().touch_controls(), settings::current().touch_opacity);
     if (hint_left > 0.0) draw_hint(hint_left);

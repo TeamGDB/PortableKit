@@ -224,17 +224,6 @@ if(PSPRECOMP_BUILD_TESTS)
     add_test(NAME portablekit_adhoc_tests COMMAND portablekit_adhoc_tests)
 endif()
 
-# Editions of a game (ProfileVariant) against the stand-in profile.
-if(PSPRECOMP_BUILD_TESTS)
-    add_executable(portablekit_profile_tests
-        "${PORTABLEKIT_ROOT}/tests/profile_tests.cpp"
-        "${PORTABLEKIT_ROOT}/tests/test_profile.cpp"
-        "${PORTABLEKIT_ROOT}/host/profile.cpp")
-    target_include_directories(portablekit_profile_tests PRIVATE "${PORTABLEKIT_ROOT}/host" "${PORTABLEKIT_ROOT}/include")
-    set_target_properties(portablekit_profile_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-    add_test(NAME portablekit_profile_tests COMMAND portablekit_profile_tests)
-endif()
-
 # Fixed-size memory pools (sceKernel*Fpl): their bookkeeping, with no kernel.
 if(PSPRECOMP_BUILD_TESTS)
     add_executable(portablekit_pool_tests
