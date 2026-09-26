@@ -92,7 +92,7 @@ void install_system(Runtime &runtime, const psprecomp::Elf32Image &elf, const Pr
     register_font(hle);
     register_utility(hle, paths.memory_stick);
     register_adhoc(hle);
-    if (game().register_extra_hle != nullptr) game().register_extra_hle(hle);
+    if (const ExtraHleHook hook = active_register_extra_hle(); hook != nullptr) hook(hle);
 
     const bool strict = env_set("STRICT_HLE");
     std::size_t stubbed = 0u;
@@ -137,7 +137,7 @@ void install_system(Runtime &runtime, const psprecomp::Elf32Image &elf, const Pr
     memory.store8(kBootArgumentAddress + static_cast<std::uint32_t>(boot_path.size()), 0u);
     ctx.set_gpr(4, static_cast<std::uint32_t>(boot_path.size() + 1u));
     ctx.set_gpr(5, kBootArgumentAddress);
-    if (game().patch_loaded_image != nullptr) game().patch_loaded_image(runtime, elf);
+    if (const PatchImageHook hook = active_patch_loaded_image(); hook != nullptr) hook(runtime, elf);
     kernel().start_loader_thread(ctx, elf.runtime_entry(game().load_base), 0u);
 }
 

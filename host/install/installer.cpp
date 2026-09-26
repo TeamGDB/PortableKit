@@ -148,7 +148,19 @@ Inspection inspect(const std::filesystem::path &path) {
                            "incomplete or modified; make it again from your disc.");
     Inspection result;
     result.eboot_bin = read_file(*iso, *eboot_entry);
-    if (psprecomp::sha256_bytes(result.eboot_bin) != portablekit::game().encrypted_executable_sha256)
+    const std::string eboot_sha256 = psprecomp::sha256_bytes(result.eboot_bin);
+    const bool plain = result.eboot_bin.size() > 4u && result.eboot_bin[0] == 0x7Fu && result.eboot_bin[1] == 'E' &&
+                       result.eboot_bin[2] == 'L' && result.eboot_bin[3] == 'F';
+    // The release, an edition of it (ProfileVariant), or a plain executable
+    // the profile agrees to run without knowing it.
+    const bool known = eboot_sha256 == portablekit::game().encrypted_executable_sha256 ||
+                       portablekit::find_variant_by_encrypted(eboot_sha256) != nullptr ||
+                       (plain && portablekit::is_known_executable(eboot_sha256));
+    if (!known && plain && portablekit::game().run_unknown_executables)
+        std::cerr << "warning: " << name << " holds an edition of " << portablekit::game().game_title
+                  << " this build does not know (executable SHA-256 " << eboot_sha256
+                  << "); it will run under the interpreter\n";
+    else if (!known)
         throw InstallError("\"" + name + "\" is " + portablekit::game().game_title + " (" + portablekit::game().disc_id_display +
                            "), but its executable is not the version " + std::string(portablekit::game().project_name) + " supports. The image may be patched, "
                            "modified or damaged; make it again from an unmodified disc.");

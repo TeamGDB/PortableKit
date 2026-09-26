@@ -25,6 +25,7 @@ set(PORTABLEKIT_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." CACHE INTERNAL "PortableKit 
 set(PORTABLEKIT_HOST_SOURCES
     host/profile.cpp
     host/app_paths.cpp
+    host/corpus_library.cpp
     host/audio/atrac_decoder.cpp
     host/movie/avc_decoder.cpp
     host/movie/psmf_demuxer.cpp
@@ -383,6 +384,48 @@ function(portablekit_add_game target)
     set_target_properties(${target} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
         JOB_POOL_COMPILE psprecomp_generated)
+
+    # Other editions of the game (GameProfile::variants): each one's corpus,
+    # generated into <profile>/generated-variants/<key>/, becomes a library
+    # of its own in bin/corpora/, which host/main.cpp loads when that
+    # edition's executable is the one running. Such a library needs nothing
+    # from the executable (psprecomp/corpus_abi.hpp).
+    file(GLOB variant_dirs LIST_DIRECTORIES true "${GAME_PROFILE_DIR}/generated-variants/*")
+    foreach(variant_dir IN LISTS variant_dirs)
+        if(NOT IS_DIRECTORY "${variant_dir}")
+            continue()
+        endif()
+        get_filename_component(variant_key "${variant_dir}" NAME)
+        file(GLOB variant_sources CONFIGURE_DEPENDS "${variant_dir}/*.cpp")
+        if(NOT variant_sources)
+            continue()
+        endif()
+        set(variant_target "${target}_corpus_${variant_key}")
+        string(MAKE_C_IDENTIFIER "${variant_target}" variant_target)
+        set(variant_entry "${CMAKE_CURRENT_BINARY_DIR}/corpora/${variant_key}_module.cpp")
+        configure_file("${PORTABLEKIT_ROOT}/host/corpus_module.cpp.in" "${variant_entry}" COPYONLY)
+        add_library(${variant_target} MODULE ${variant_sources} "${variant_entry}")
+        target_compile_features(${variant_target} PRIVATE cxx_std_20)
+        _portablekit_inherit_settings(${variant_target})
+        target_include_directories(${variant_target} PRIVATE "${PORTABLEKIT_ROOT}/include" "${variant_dir}")
+        if(generated_options)
+            target_compile_options(${variant_target} PRIVATE ${generated_options})
+        elseif(MSVC)
+            target_compile_options(${variant_target} PRIVATE /O${PSPRECOMP_GENERATED_OPT_LEVEL} /bigobj)
+        else()
+            target_compile_options(${variant_target} PRIVATE -O${PSPRECOMP_GENERATED_OPT_LEVEL} -g0)
+        endif()
+        set_target_properties(${variant_target} PROPERTIES
+            JOB_POOL_COMPILE psprecomp_generated
+            CXX_VISIBILITY_PRESET hidden
+            VISIBILITY_INLINES_HIDDEN ON
+            PREFIX ""
+            SUFFIX "${CMAKE_SHARED_LIBRARY_SUFFIX}"
+            OUTPUT_NAME "${variant_key}"
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/corpora")
+        add_dependencies(${target} ${variant_target})
+        message(STATUS "${target}: corpus of edition ${variant_key}")
+    endforeach()
 
     # Recompiled overlay corpora, produced by tools/add_overlay.py. Each
     # directory under <profile>/overlays/ holds one corpus and becomes one

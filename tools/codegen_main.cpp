@@ -3,6 +3,7 @@
 #include "psprecomp/codegen_policy.hpp"
 #include "psprecomp/elf32.hpp"
 #include "psprecomp/program_analysis.hpp"
+#include "psprecomp/sha256.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1768,6 +1769,11 @@ int generate_auto(const std::filesystem::path &elf_path,
         registry << "void register_" << g_symbol_prefix << "_unit_" << unit.bucket << "(CorpusRuntime &runtime);\n";
     registry << "\n";
     write_import_wrappers(registry, imports);
+    // Which executable this corpus was generated from, so a loader can refuse
+    // a corpus library that belongs to another edition of the game.
+    registry << "const char *" << (g_symbol_prefix == "recomp" ? std::string("generated_corpus")
+                                                               : g_symbol_prefix + "_corpus")
+             << "_source_sha256() { return \"" << psprecomp::sha256_file(elf_path) << "\"; }\n\n";
     registry << "void " << registry_function << "(CorpusRuntime &runtime) {\n";
     for (const auto &unit : units) registry << "    register_" << g_symbol_prefix << "_unit_" << unit.bucket << "(runtime);\n";
     for (std::size_t i = 0; i < imports.size(); ++i) {
