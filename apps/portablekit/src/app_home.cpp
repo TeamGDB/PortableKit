@@ -5,6 +5,8 @@
 #include "install/user_data.hpp"
 
 #include <cstdlib>
+#include <fstream>
+#include <stdexcept>
 
 namespace portablekit::app {
 namespace {
@@ -15,41 +17,70 @@ std::filesystem::path from_environment(const char *name) {
     return install::path_from_utf8(value);
 }
 
-std::filesystem::path user_home() {
-#if defined(_WIN32)
-    return from_environment("USERPROFILE");
-#else
-    return from_environment("HOME");
+// The app is portable: everything it writes lives in one folder beside it,
+// never in the user's system folders, so the whole installation moves or goes
+// away as one folder. An explicit PORTABLEKIT_HOME (or --data-dir, which sets
+// it) overrides that.
+std::filesystem::path portable_directory() {
+    const std::filesystem::path exe_dir = portablekit::executable_directory();
+    if (exe_dir.empty()) throw std::runtime_error("Cannot tell where the program is, so it cannot find its data folder. "
+                                                  "Give one with --data-dir <folder>.");
+#if defined(__APPLE__)
+    // Inside an .app bundle (Contents/MacOS/portablekit): the bundle is signed
+    // and must not be written into, so the folder goes next to the bundle.
+    const std::filesystem::path contents = exe_dir.parent_path();
+    const std::filesystem::path bundle = contents.parent_path();
+    if (exe_dir.filename() == "MacOS" && contents.filename() == "Contents" && bundle.extension() == ".app") {
+        // Opened from a quarantined download, macOS runs a copy from a random
+        // read-only location ("App Translocation"); a folder next to that copy
+        // would be lost. Only moving the app fixes it.
+        if (bundle.string().find("/AppTranslocation/") != std::string::npos)
+            throw std::runtime_error("macOS is running PortableKit from a temporary read-only copy, because it was "
+                                     "opened where it was downloaded. Move PortableKit.app into a folder of its own "
+                                     "(for example your Applications folder, or a folder in Documents) with the "
+                                     "Finder, then open it again.");
+        return bundle.parent_path() / "PortableKit Data";
+    }
 #endif
+    return exe_dir / "data";
+}
+
+// Creates the folder if needed and proves it can be written to.
+void check_writable(const std::filesystem::path &folder) {
+    std::error_code ec;
+    std::filesystem::create_directories(folder, ec);
+    const std::filesystem::path probe = folder / ".write-test";
+    {
+        std::ofstream out(probe, std::ios::trunc);
+        if (out && std::filesystem::is_directory(folder, ec)) {
+            out << "ok";
+            out.close();
+            if (out) {
+                std::filesystem::remove(probe, ec);
+                return;
+            }
+        }
+    }
+    throw std::runtime_error("PortableKit keeps everything in a folder next to itself, and cannot write to " +
+                             path_text(folder) + ". Move PortableKit to a folder you can write to (not Program "
+                             "Files, not a read-only disk), or give a data folder with --data-dir <folder>.");
 }
 
 } // namespace
 
 std::filesystem::path home_directory() {
-    if (auto home = from_environment("PORTABLEKIT_HOME"); !home.empty()) return home;
-#if defined(_WIN32)
-    // Local, not roaming: the cache beside it is gigabytes.
-    if (auto local = from_environment("LOCALAPPDATA"); !local.empty()) return local / "PortableKit";
-    return user_home() / "AppData" / "Local" / "PortableKit";
-#elif defined(__APPLE__)
-    return user_home() / "Library" / "Application Support" / "PortableKit";
-#else
-    if (auto data = from_environment("XDG_DATA_HOME"); !data.empty()) return data / "PortableKit";
-    return user_home() / ".local" / "share" / "PortableKit";
-#endif
+    static const std::filesystem::path home = [] {
+        std::filesystem::path folder = from_environment("PORTABLEKIT_HOME");
+        if (folder.empty()) folder = portable_directory();
+        check_writable(folder);
+        return folder;
+    }();
+    return home;
 }
 
 std::filesystem::path cache_root() {
     if (auto cache = from_environment("PORTABLEKIT_CACHE"); !cache.empty()) return cache;
-    if (auto home = from_environment("PORTABLEKIT_HOME"); !home.empty()) return home / "cache";
-#if defined(_WIN32)
     return home_directory() / "cache";
-#elif defined(__APPLE__)
-    return user_home() / "Library" / "Caches" / "PortableKit";
-#else
-    if (auto cache = from_environment("XDG_CACHE_HOME"); !cache.empty()) return cache / "PortableKit";
-    return user_home() / ".cache" / "PortableKit";
-#endif
 }
 
 std::filesystem::path games_directory() { return home_directory() / "games"; }

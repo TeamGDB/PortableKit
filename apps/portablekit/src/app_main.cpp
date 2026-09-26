@@ -16,6 +16,7 @@
 //   22  a unit did not compile
 //   23  the library did not link
 //   24  a compile of this game is already running
+//   25  the export failed
 //   30  the keys file was not accepted
 //   40+ the game stopped with an error (40 + the port's own exit code)
 
@@ -66,12 +67,14 @@ const char *const kUsageText =
     "       portablekit status <game>\n"
     "       portablekit compile <game> [--opt 0|1|2|tiered] [--jobs N] [--background] [--keep]\n"
     "       portablekit run <game> [--interpreter] [--no-compile] [--opt 0|1|2|tiered] [--headless] [--seconds N]\n"
+    "       portablekit export <game> <folder> [--source-only | --library-only]\n"
     "       portablekit keys import <file>\n"
     "       portablekit keys status\n"
     "       portablekit cache clear <game>\n"
     "       portablekit toolchain\n"
     "  <game> is a game's id, its disc id (UCES01059 or UCES-01059), or a unique prefix.\n"
-    "  Every command takes --json and then prints one JSON object on stdout.\n";
+    "  Every command takes --json and then prints one JSON object on stdout, and\n"
+    "  --data-dir <folder> to use another data folder than the one next to the program.\n";
 
 struct Arguments {
     std::vector<std::string> positional;
@@ -85,7 +88,7 @@ struct Arguments {
 
 // Options that take a value; everything else starting with -- is a switch.
 bool takes_value(const std::string &name) {
-    return name == "executable" || name == "opt" || name == "jobs" || name == "seconds";
+    return name == "executable" || name == "opt" || name == "jobs" || name == "seconds" || name == "data-dir";
 }
 
 Arguments parse(int argc, char **argv, int first) {
@@ -461,6 +464,7 @@ int command_toolchain() {
 int dispatch(int argc, char **argv) {
     const Arguments args = parse(argc, argv, 1);
     g_json = args.has("json");
+    if (args.has("data-dir")) set_environment("PORTABLEKIT_HOME", args.get("data-dir"));
     if (args.has("help") || (!args.positional.empty() && args.positional[0] == "help")) {
         std::cout << kUsageText;
         return 0;
@@ -501,6 +505,21 @@ int dispatch(int argc, char **argv) {
         if (!clear_cache(*game, error)) return report_error(1, error);
         if (g_json) std::cout << Json().field("ok", true).str() << "\n";
         else std::cout << "Removed the compiled code of " << game->title << "\n";
+        return 0;
+    }
+    if (command == "export") {
+        if (args.positional.size() < 3) return report_error(kUsage, "export needs the game and a folder");
+        const auto game = game_argument(args, code);
+        if (!game) return code;
+        ExportOptions options;
+        options.source = !args.has("library-only");
+        options.library = !args.has("source-only");
+        if (!g_json) std::cout << kExportNotice << "\n";
+        std::string message;
+        const int result = export_corpus(*game, install::path_from_utf8(args.positional[2]), options, message);
+        if (result != 0) return report_error(result, message);
+        if (g_json) std::cout << Json().field("ok", true).field("folder", args.positional[2]).field("notice", kExportNotice).str() << "\n";
+        else std::cout << message << "\n";
         return 0;
     }
     if (command == "info" || command == "status" || command == "compile" || command == "run") {

@@ -104,4 +104,18 @@ bool clear_cache(const GameRecord &game, std::string &error);
 
 [[nodiscard]] std::string library_extension();
 
+// Writes the game's recompiled code to `folder` without running the game: the
+// C++ the recompiler makes (source, with the headers it includes) and/or the
+// best compiled library, and a NOTICE.txt saying what it is. Returns 0 or an
+// exit code, with `message` for the player.
+struct ExportOptions {
+    bool source{true};
+    bool library{true};
+};
+int export_corpus(const GameRecord &game, const std::filesystem::path &folder, const ExportOptions &options,
+                  std::string &message);
+
+// What NOTICE.txt and the interface say about exported code.
+extern const char *const kExportNotice;
+
 } // namespace portablekit::app

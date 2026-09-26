@@ -28,7 +28,7 @@ namespace {
 namespace fs = std::filesystem;
 using namespace portablekit::ui;
 
-enum class Screen { Library, Game, BrowseImage, BrowseKeys, BrowseExecutable, Working, Message };
+enum class Screen { Library, Game, BrowseImage, BrowseKeys, BrowseExecutable, BrowseExport, Working, Message };
 
 std::string state_text(const GameRecord &game) {
     for (const int level : corpus_levels()) {
@@ -70,6 +70,7 @@ private:
     void working();
     void message();
     void start_import(const fs::path &iso, std::optional<fs::path> executable);
+    void start_export(const fs::path &folder);
     void show_message(std::string title, std::string text, bool offer_keys);
 
     Screen screen_{Screen::Library};
@@ -85,6 +86,7 @@ private:
     std::optional<std::string> import_error_;
     int import_error_code_{};
     std::optional<GameRecord> imported_;
+    std::optional<std::string> exported_;
     std::thread worker_;
 
     std::string message_title_;
@@ -143,6 +145,16 @@ bool Launcher::frame() {
         options.listed_name = "executables (.bin, .elf)";
         options.empty_note = "No folders or executables here.";
         browse("Choose the decrypted executable", "EBOOT.BIN as you decrypted it from this disc.", options, screen_);
+        break;
+    }
+    case Screen::BrowseExport: {
+        FileBrowser::Options options;
+        options.extensions = {};
+        options.filter_name = "folders";
+        options.listed_name = "folders";
+        options.empty_note = "No folders here.";
+        options.choose_folder = "Export into this folder";
+        browse("Where to export the recompiled code", kExportNotice, options, screen_);
         break;
     }
     case Screen::Working: working(); break;
@@ -226,6 +238,10 @@ void Launcher::game() {
     info_row("Executable", record.executable_source);
     info_row("Disc image", path_text(record.iso));
     info_row("Compiled code", human_bytes(cache_bytes(record)));
+    if (button_row("Export recompiled code...", {false, "", kExportNotice})) {
+        screen_ = Screen::BrowseExport;
+        browser_.reset();
+    }
     if (button_row("Remove compiled code", {false, "", "Frees the space; the game compiles again when played."})) {
         std::string error;
         if (!clear_cache(record, error)) show_message("Not removed", error, false);
@@ -261,6 +277,8 @@ void Launcher::browse(const char *title, const char *hint, FileBrowser::Options 
             start_import(chosen, std::nullopt);
         } else if (screen == Screen::BrowseExecutable) {
             start_import(pending_iso_, chosen);
+        } else if (screen == Screen::BrowseExport) {
+            start_export(chosen);
         } else {
             KeysReport report;
             const bool ok = import_keys_file(chosen, report);
@@ -304,13 +322,40 @@ void Launcher::start_import(const fs::path &iso, std::optional<fs::path> executa
     });
 }
 
+void Launcher::start_export(const fs::path &folder) {
+    if (worker_.joinable()) worker_.join();
+    if (selected_ >= games_.size()) return;
+    const GameRecord game = games_[selected_];
+    busy_ = true;
+    import_error_.reset();
+    imported_.reset();
+    exported_.reset();
+    {
+        const std::lock_guard<std::mutex> guard(lock_);
+        stage_ = "Recompiling the game's code into " + path_text(folder);
+    }
+    screen_ = Screen::Working;
+    worker_ = std::thread([this, game, folder] {
+        std::string message;
+        const fs::path target = folder / (game.id + "-recompiled");
+        const int code = export_corpus(game, target, ExportOptions{}, message);
+        const std::lock_guard<std::mutex> guard(lock_);
+        if (code == 0) exported_ = message;
+        else {
+            import_error_ = message;
+            import_error_code_ = code;
+        }
+        busy_ = false;
+    });
+}
+
 void Launcher::working() {
     std::string stage;
     {
         const std::lock_guard<std::mutex> guard(lock_);
         stage = stage_;
     }
-    begin_panel("##working", "Adding the game", "", false);
+    begin_panel("##working", "Working", "", false);
     begin_content();
     ImGui::Dummy({0.0f, font() * 0.5f});
     paragraph(stage.empty() ? "Reading the disc image" : stage);
@@ -320,6 +365,11 @@ void Launcher::working() {
     end_panel();
     if (busy_) return;
     const std::lock_guard<std::mutex> guard(lock_);
+    if (exported_) {
+        show_message("Recompiled code exported", *exported_ + ".\n\n" + kExportNotice, false);
+        exported_.reset();
+        return;
+    }
     if (imported_) {
         games_ = list_games();
         for (std::size_t i = 0; i < games_.size(); ++i)

@@ -10,9 +10,12 @@
 //       ms0/                          the memory stick: saves
 //   <cache>/<game id>/<build>/        one compiled corpus (see corpus.hpp)
 //
-// <home> is PORTABLEKIT_HOME when set, otherwise the platform's place for an
-// application's data; <cache> is PORTABLEKIT_CACHE, otherwise the platform's
-// place for caches, which may be cleared without losing anything but time.
+// <home> is the folder "data" next to the executable ("PortableKit Data" next to
+// a macOS .app bundle), or PORTABLEKIT_HOME / --data-dir when given. Nothing
+// is written anywhere else: the program is portable, and moving or deleting
+// that one folder moves or deletes everything it made. <cache> is <home>/cache
+// (or PORTABLEKIT_CACHE), which may be cleared without losing anything but
+// time.
 
 #include <filesystem>
 #include <string>

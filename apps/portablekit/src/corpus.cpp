@@ -33,6 +33,7 @@ constexpr int kRecompileFailed = 21;
 constexpr int kCompileFailed = 22;
 constexpr int kLinkFailed = 23;
 constexpr int kAlreadyCompiling = 24;
+constexpr int kExportFailed = 25;
 
 std::string abi_prefix() { return std::string(kCorpusAbi).substr(0, 16); }
 
@@ -541,6 +542,61 @@ bool clear_cache(const GameRecord &game, std::string &error) {
         return false;
     }
     return true;
+}
+
+const char *const kExportNotice =
+    "This folder holds code made from YOUR copy of a game: C++ that PortableKit's recompiler wrote from the "
+    "game's executable, and/or that code compiled for this computer. It is the game's code in another form. "
+    "It is for your own use only: do not share it, upload it or attach it to bug reports.";
+
+int export_corpus(const GameRecord &game, const fs::path &folder, const ExportOptions &options,
+                  std::string &message) {
+    std::error_code ec;
+    fs::create_directories(folder, ec);
+    if (ec) {
+        message = "Cannot create " + path_text(folder) + ": " + ec.message();
+        return kExportFailed;
+    }
+    if (options.source) {
+        const fs::path generated = folder / "generated";
+        fs::create_directories(generated, ec);
+        const ProcessResult result = run_process(
+            {path_text(recompiler_path()), path_text(game.data_dir / "EBOOT.ELF"), "--auto", path_text(generated)},
+            folder / "recompile.log", false);
+        if (!result.started || result.exit_code != 0) {
+            message = result.started ? "The recompiler failed; see " + path_text(folder / "recompile.log") + "."
+                                     : result.error;
+            return kRecompileFailed;
+        }
+        std::ofstream entry(generated / "portablekit_corpus_entry.cpp", std::ios::trunc);
+        entry << entry_source(game);
+        // The two headers the generated code includes, so the folder compiles
+        // on its own: c++ -std=c++20 -I include -I generated -c ...
+        fs::create_directories(folder / "include" / "psprecomp", ec);
+        for (const char *header : {"corpus_abi.hpp", "allegrex_context.hpp"})
+            fs::copy_file(corpus_include_directory() / "psprecomp" / header, folder / "include" / "psprecomp" / header,
+                          fs::copy_options::overwrite_existing, ec);
+    }
+    if (options.library) {
+        const auto ready = ready_corpus(game);
+        if (!ready) {
+            if (!options.source) {
+                message = "The game has not been compiled yet: run portablekit compile first.";
+                return kExportFailed;
+            }
+        } else {
+            fs::copy_file(ready->library, folder / ready->library.filename(), fs::copy_options::overwrite_existing, ec);
+            if (ec) {
+                message = "Cannot copy the library: " + ec.message();
+                return kExportFailed;
+            }
+        }
+    }
+    std::ofstream notice(folder / "NOTICE.txt", std::ios::trunc);
+    notice << kExportNotice << "\n\nGame: " << game.title << " (" << game.disc_id << "), executable SHA-256 "
+           << game.executable_sha256 << "\nCorpus ABI: " << kCorpusAbi << "\n";
+    message = "Exported to " + path_text(folder);
+    return 0;
 }
 
 } // namespace portablekit::app
