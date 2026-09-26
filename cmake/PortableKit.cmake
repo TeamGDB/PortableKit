@@ -72,6 +72,7 @@ set(PORTABLEKIT_HOST_SOURCES
     host/save_data/aes128.cpp
     host/save_data/param_sfo.cpp
     host/save_data/savedata_crypto.cpp
+    host/crypto/pgd.cpp
     host/save_data/savedata_store.cpp
     host/save_data/save_transfer.cpp
     host/install/executable_preparation.cpp

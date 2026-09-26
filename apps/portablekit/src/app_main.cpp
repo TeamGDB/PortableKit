@@ -31,6 +31,8 @@
 #include "text_format.hpp"
 
 #include "app_paths.hpp"
+#include "crypto/pgd.hpp"
+#include "kernel/iso_image.hpp"
 #include "corpus_abi.hpp"
 #include "hle/hle_extensions.hpp"
 #include "install/user_data.hpp"
@@ -45,6 +47,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -435,7 +438,56 @@ int command_keys(const Arguments &args) {
         }
         return ok ? 0 : kKeysRejected;
     }
-    if (action != "status") return report_error(kUsage, "keys takes import or status");
+    // keys pgd-check <game> <path on the disc> <key, 32 hex digits>: which
+    // way of running the PGD cipher (crypto/pgd.hpp) turns this file's
+    // header into a valid description, with the keys file's keys. The key is
+    // the one the game passes to sceIoIoctl 0x04100001 (<prefix>_TRACE_IO
+    // shows it). Prints scheme names and the start of the first data block,
+    // never a key.
+    if (action == "pgd-check") {
+        if (args.positional.size() < 5) return report_error(kUsage, "keys pgd-check needs <game> <path on the disc> <key>");
+        const auto game = find_game(args.positional[2]);
+        if (!game) return report_error(kNoSuchGame, "no such game: " + args.positional[2]);
+        std::vector<std::uint8_t> key_bytes;
+        const std::string hex = args.positional[4];
+        for (std::size_t i = 0; i + 1 < hex.size(); i += 2) key_bytes.push_back(static_cast<std::uint8_t>(std::stoul(hex.substr(i, 2), nullptr, 16)));
+        if (key_bytes.size() != 16u) return report_error(kUsage, "the key is 16 bytes, 32 hex digits");
+        pgd::Block vkey{};
+        std::copy(key_bytes.begin(), key_bytes.end(), vkey.begin());
+        IsoImage iso(game->iso);
+        const auto entry = iso.find(args.positional[3]);
+        if (!entry) return report_error(kUsage, "no such file on the disc: " + args.positional[3]);
+        const std::uint64_t base = static_cast<std::uint64_t>(entry->lba) * IsoImage::kSectorSize;
+        std::vector<std::uint8_t> header(pgd::kHeaderSize);
+        iso.read(base, header);
+        const pgd::KeySource keys = pgd::player_keys();
+        std::size_t matches = 0;
+        std::set<std::string> missing;
+        for (pgd::CipherScheme scheme : pgd::candidate_schemes()) {
+            std::string error;
+            auto file = pgd::PgdFile::open(header, vkey, entry->size, keys, scheme, std::nullopt, error);
+            if (!file) {
+                if (error.find("keys file has no") != std::string::npos) missing.insert(error);
+                continue;
+            }
+            ++matches;
+            for (const bool restart : {false, true}) {
+                scheme.block_counters_restart = restart;
+                auto view = pgd::PgdFile::open(header, vkey, entry->size, keys, scheme, std::nullopt, error);
+                std::vector<std::uint8_t> first(32);
+                view->read(0, first, [&iso, base](std::uint64_t offset, std::span<std::uint8_t> out) {
+                    return iso.read(base + offset, out);
+                });
+                std::cout << scheme.describe() << ": data size " << view->size() << ", first bytes";
+                for (const std::uint8_t byte : first) std::printf(" %02x", byte);
+                std::cout << "\n";
+            }
+        }
+        for (const std::string &error : missing) std::cout << "some schemes could not be tried: " << error << "\n";
+        std::cout << matches << " scheme(s) give a valid description\n";
+        return matches != 0u ? 0 : 1;
+    }
+    if (action != "status") return report_error(kUsage, "keys takes import, status or pgd-check");
     const KeysReport &report = active_keys();
     if (g_json) {
         std::vector<Json> problems;
@@ -443,6 +495,7 @@ int command_keys(const Arguments &args) {
         std::cout << Json().field("ok", true).field("path", path_text(report.path)).field("found", report.file_found)
                          .field("executables", report.can_decrypt_executables)
                          .field("saves", report.can_encrypt_saves)
+                         .field("pgd", report.can_decrypt_pgd)
                          .field("tags", static_cast<std::uint64_t>(report.tag_count))
                          .array("problems", problems).str() << "\n";
         return 0;
@@ -450,6 +503,7 @@ int command_keys(const Arguments &args) {
     std::cout << "Keys file: " << path_text(report.path) << (report.file_found ? "" : " (none)") << "\n"
               << "  decrypt executables: " << (report.can_decrypt_executables ? "yes" : "no") << "\n"
               << "  encrypt saves:       " << (report.can_encrypt_saves ? "yes" : "no (saves are kept unencrypted)") << "\n"
+              << "  decrypt PGD data:    " << (report.can_decrypt_pgd ? "yes" : "no") << "\n"
               << "  tag keys:            " << report.tag_count << "\n";
     for (const std::string &problem : report.problems) std::cout << "  problem: " << problem << "\n";
     return 0;

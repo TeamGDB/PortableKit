@@ -37,6 +37,15 @@ constexpr Fingerprint kFingerprints[] = {
     {"savedata.7", "a0bf478c1471e4115011e5e0f70d5e2d43c95e5ef2645d164b76ec3cd118ec10"},
 };
 
+// The keys the PGD format needs (host/crypto/pgd.hpp). Their fingerprints are
+// added once they have been checked against a real PGD file; until then any
+// 16-byte value is taken under these names, and a wrong one shows as a PGD
+// header that does not decrypt.
+bool pgd_key_name(const std::string &name) {
+    return name == "kirk.aes.38" || name == "kirk.aes.39" || name == "kirk.aes.3a" || name == "kirk.aes.63" ||
+           name == "amctrl.1" || name == "amctrl.2" || name == "amctrl.3";
+}
+
 const char *expected_fingerprint(const std::string &name) {
     for (const Fingerprint &entry : kFingerprints)
         if (lower(name) == lower(entry.name)) return entry.sha256;
@@ -91,11 +100,11 @@ KeysReport read_keys_file(const std::filesystem::path &path) {
             continue;
         }
         const char *expected = expected_fingerprint(name);
-        if (expected == nullptr) {
+        if (expected == nullptr && !pgd_key_name(name)) {
             report.problems.push_back(raw_name + " is not a key this program uses.");
             continue;
         }
-        if (sha256_of(*bytes) != expected) {
+        if (expected != nullptr && sha256_of(*bytes) != expected) {
             report.problems.push_back(raw_name + " is not the right key: its fingerprint does not match.");
             continue;
         }
@@ -106,6 +115,8 @@ KeysReport read_keys_file(const std::filesystem::path &path) {
             report.keys.kirk_cmd1 = to_key(*bytes);
         } else if (name.starts_with("savedata.")) {
             report.keys.savedata[std::atoi(name.substr(9).c_str())] = to_key(*bytes);
+        } else if (name.starts_with("amctrl.")) {
+            report.keys.amctrl[std::atoi(name.substr(7).c_str())] = to_key(*bytes);
         }
     }
     report.tag_count = report.keys.tags.size();
@@ -115,6 +126,11 @@ KeysReport read_keys_file(const std::filesystem::path &path) {
         if (report.keys.kirk(slot) == nullptr) report.can_encrypt_saves = false;
     for (int index = 2; index <= 7; ++index)
         if (report.keys.savedata_key(index) == nullptr) report.can_encrypt_saves = false;
+    report.can_decrypt_pgd = true;
+    for (const std::uint8_t slot : {0x38, 0x39, 0x3A, 0x63})
+        if (report.keys.kirk(slot) == nullptr) report.can_decrypt_pgd = false;
+    for (int index = 1; index <= 3; ++index)
+        if (report.keys.amctrl.find(index) == report.keys.amctrl.end()) report.can_decrypt_pgd = false;
     return report;
 }
 
@@ -136,7 +152,7 @@ bool import_keys_file(const std::filesystem::path &source, KeysReport &report) {
     }
     if (!report.problems.empty()) return false;
     if (report.keys.kirk_aes.empty() && !report.keys.kirk_cmd1 && report.keys.savedata.empty() &&
-        report.keys.tags.empty()) {
+        report.keys.tags.empty() && report.keys.amctrl.empty()) {
         report.problems.push_back("The file holds no keys.");
         return false;
     }
@@ -158,7 +174,7 @@ namespace portablekit {
 const CryptoKeys *crypto_keys() {
     const app::KeysReport &report = app::active_keys();
     if (report.keys.kirk_aes.empty() && !report.keys.kirk_cmd1 && report.keys.savedata.empty() &&
-        report.keys.tags.empty())
+        report.keys.tags.empty() && report.keys.amctrl.empty())
         return nullptr;
     return &report.keys;
 }
