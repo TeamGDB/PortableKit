@@ -69,10 +69,19 @@ portablekit_add_game(portablekit
 # generated code includes and every source of the recompiler, so changing any
 # of them invalidates every cache (docs/DESKTOP_APP.md, "Cache").
 set(abi_header "${CMAKE_CURRENT_BINARY_DIR}/generated_app/corpus_abi.hpp")
-file(GLOB abi_inputs CONFIGURE_DEPENDS
-    "${PORTABLEKIT_ROOT}/include/psprecomp/*.hpp"
+# Generated code includes corpus_abi.hpp (and through it allegrex_context.hpp)
+# and nothing else of the framework; what it contains is decided by the
+# recompiler and the analysis and decoding it uses.
+set(abi_inputs
+    "${PORTABLEKIT_ROOT}/include/psprecomp/corpus_abi.hpp"
+    "${PORTABLEKIT_ROOT}/include/psprecomp/allegrex_context.hpp"
+    "${PORTABLEKIT_ROOT}/include/psprecomp/decoder.hpp"
+    "${PORTABLEKIT_ROOT}/include/psprecomp/program_analysis.hpp"
+    "${PORTABLEKIT_ROOT}/include/psprecomp/elf32.hpp"
     "${PORTABLEKIT_ROOT}/tools/codegen_main.cpp"
-    "${PORTABLEKIT_ROOT}/src/*.cpp")
+    "${PORTABLEKIT_ROOT}/src/decoder.cpp"
+    "${PORTABLEKIT_ROOT}/src/program_analysis.cpp"
+    "${PORTABLEKIT_ROOT}/src/elf32.cpp")
 get_property(abi_definitions GLOBAL PROPERTY PORTABLEKIT_COMPILE_DEFINITIONS)
 string(REPLACE ";" "|" abi_inputs_arg "${abi_inputs}")
 string(REPLACE ";" "|" abi_definitions_arg "${abi_definitions}")

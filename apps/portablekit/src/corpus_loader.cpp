@@ -52,7 +52,7 @@ LoaderState &state() {
 }
 
 using AbiFn = const char *(*)();
-using RegisterFn = void (*)(psprecomp::Runtime &);
+using RegisterFn = void (*)(psprecomp::CorpusRuntime &);
 
 void *open_library(const std::filesystem::path &path, std::string &error) {
 #if defined(_WIN32)
@@ -266,8 +266,9 @@ namespace psprecomp {
 
 // The framework calls this once, before the game runs (host/main.cpp). The
 // program links no generated code of its own: it loads the player's.
-void register_generated_functions(Runtime &runtime) {
+void register_generated_functions(CorpusRuntime &corpus) {
     using namespace portablekit::app;
+    auto &runtime = static_cast<Runtime &>(corpus);
     LoaderState &s = state();
     s.runtime = &runtime;
     if (!s.game || s.choice.interpreter_only) {

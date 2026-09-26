@@ -134,7 +134,6 @@ std::vector<std::string> compile_arguments(const CompilerCommand &command, int o
         for (const char *const *definition = kCorpusDefinitions; *definition != nullptr; ++definition)
             args.push_back(std::string("/D") + (*definition + 2));
         args.push_back("/Dregister_generated_functions=portablekit_corpus_register_all");
-        args.push_back("/DPSPRECOMP_IMPORT_HOST_SYMBOLS=1");
         args.push_back(path_text(source));
         args.push_back("/Fo" + path_text(object));
         return args;
@@ -149,37 +148,33 @@ std::vector<std::string> compile_arguments(const CompilerCommand &command, int o
     // The corpus's registry is called through the library's own entry point,
     // never by this name, which the program itself defines as the loader.
     args.push_back("-Dregister_generated_functions=portablekit_corpus_register_all");
-#if defined(_WIN32)
-    args.push_back("-DPSPRECOMP_IMPORT_HOST_SYMBOLS=1");
-#endif
     args.insert(args.end(), {"-c", path_text(source), "-o", path_text(object)});
     return args;
 }
 
 std::vector<std::string> link_arguments(const CompilerCommand &command, const fs::path &library,
                                         const std::vector<fs::path> &objects) {
+    // The corpus references nothing of the program (psprecomp/corpus_abi.hpp):
+    // a plain shared library, linked on its own.
     std::vector<std::string> args = command.prefix;
-#if defined(__APPLE__)
-    // A bundle whose undefined symbols (the runtime) bind to the executable
-    // that loads it.
-    args.insert(args.end(), {"-bundle", "-bundle_loader", path_text(portablekit::executable_path())});
-#elif defined(_WIN32)
-    // Against the program's import library, shipped beside it.
     if (command.msvc_style) {
         args.insert(args.end(), {"/LD", "/Fe" + path_text(library)});
     } else {
-        args.insert(args.end(), {"-shared"});
-    }
+#if defined(__APPLE__)
+        args.insert(args.end(), {"-dynamiclib", "-Wl,-undefined,error"});
 #else
-    args.insert(args.end(), {"-shared"});
-#endif
-    if (!command.msvc_style) args.insert(args.end(), {"-o", path_text(library)});
-    for (const fs::path &object : objects) args.push_back(path_text(object));
+        args.insert(args.end(), {"-shared"});
 #if defined(_WIN32)
-    const fs::path import_library = portablekit::executable_directory() /
-                                    (command.msvc_style ? "portablekit.lib" : "libportablekit.dll.a");
-    args.push_back(path_text(import_library));
+        // Nothing of the C++ runtime is left to share with the program, so
+        // the library carries its own and needs no DLL beside it.
+        args.insert(args.end(), {"-static", "-static-libgcc", "-static-libstdc++"});
+#else
+        args.insert(args.end(), {"-Wl,--no-undefined"});
 #endif
+#endif
+        args.insert(args.end(), {"-o", path_text(library)});
+    }
+    for (const fs::path &object : objects) args.push_back(path_text(object));
     return args;
 }
 
@@ -188,9 +183,9 @@ std::vector<std::string> link_arguments(const CompilerCommand &command, const fs
 std::string entry_source(const GameRecord &game) {
     return std::string(
                "// Written by portablekit compile. The corpus library's entry points.\n"
-               "#include \"psprecomp/runtime.hpp\"\n\n"
+               "#include \"psprecomp/corpus_abi.hpp\"\n\n"
                "namespace psprecomp {\n"
-               "void portablekit_corpus_register_all(Runtime &runtime);\n"
+               "void portablekit_corpus_register_all(CorpusRuntime &runtime);\n"
                "}\n\n"
                "#if defined(_WIN32)\n#define PORTABLEKIT_CORPUS_EXPORT __declspec(dllexport)\n"
                "#else\n#define PORTABLEKIT_CORPUS_EXPORT __attribute__((visibility(\"default\")))\n#endif\n\n"
@@ -200,7 +195,7 @@ std::string entry_source(const GameRecord &game) {
            "extern \"C\" PORTABLEKIT_CORPUS_EXPORT const char *portablekit_corpus_executable() { return \"" +
            game.executable_sha256 +
            "\"; }\n"
-           "extern \"C\" PORTABLEKIT_CORPUS_EXPORT void portablekit_corpus_register(psprecomp::Runtime &runtime) {\n"
+           "extern \"C\" PORTABLEKIT_CORPUS_EXPORT void portablekit_corpus_register(psprecomp::CorpusRuntime &runtime) {\n"
            "    psprecomp::portablekit_corpus_register_all(runtime);\n}\n";
 }
 
