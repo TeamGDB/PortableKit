@@ -538,6 +538,13 @@ void register_async_io(HleRegistrar &hle) {
         }
         found->second.async_callback = static_cast<SceUID>(arg(ctx, 1));
         found->second.async_callback_argument = arg(ctx, 2);
+        // An operation that finished before the callback was set (they all
+        // finish when issued here; on a PSP an asynchronous open is still
+        // running when the game sets its callback next) is reported now.
+        // Patapon opens its files asynchronously, sets the callback, and
+        // waits for it.
+        if (found->second.async_result && found->second.async_callback != 0)
+            kernel().notify_callback(found->second.async_callback, found->second.async_callback_argument);
         kernel().finish(ctx, 0u);
     });
     // The priority of the thread a PSP runs asynchronous calls on; there is
