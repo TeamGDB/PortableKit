@@ -166,6 +166,7 @@ LocoRoco 2's corpus: 19 201 functions, 193 C++ units plus the registry and the a
 | Objects (deleted after linking) | 565 MB | |
 | **From nothing to ready** | **6 min** | **42 min** |
 | The same -O0 compile while the game runs | 282 s + 282 s: **9.5 min** | |
+| Tiered (`--opt tiered`, 4 jobs): -O0, then -O2 from the same C++ | 201 s + 153 s: ready in **6 min** | + 1946 s: **38 min** in all |
 
 **Windows** (the maintainer's PC: Ryzen 5 5600, 12 threads, 16 GB, Windows 11; the trimmed llvm-mingw 20260922, clang 23, 6 jobs; the units only, recompiled on the Mac):
 
@@ -177,7 +178,7 @@ LocoRoco 2's corpus: 19 201 functions, 193 C++ units plus the registry and the a
 | Link the DLL against the program's import library | 1.2 s, 281 MB | |
 | Load it and register 789 044 addresses | 141 ms | |
 
-The -O0 corpus compiles **12× faster** than -O2 on the Mac, and 14× on Windows. Memory is not the limit at either level with clang: half a gigabyte per job at -O2. The framework's own build allows one generated unit per 4 GiB, which is far too cautious for clang (it was set for MSVC, where units took over a gigabyte); the app uses one job per GiB left after 3 GiB, and at most half the cores.
+The -O0 corpus compiles **12× faster** than -O2 on the Mac, and 14× on Windows. Memory is not the limit at either level with clang: 0.3 GB per job at -O0, 0.5–0.9 GB at -O2 (the largest unit's compiler reached 0.9 GB in the tiered run). Four jobs instead of two on the M1 gained only 9% at -O2 (it has four fast cores, and the machine was swapping); the Ryzen with 6 jobs was twice as fast. The framework's own build allows one generated unit per 4 GiB, which is far too cautious for clang (it was set for MSVC, where units took over a gigabyte); the app uses one job per GiB left after 3 GiB, and at most half the cores.
 
 **Speed** of each, in the same scripted run (LocoRoco 2 runs at 20 frames a second, so a frame's budget is 50 ms). Guest time per frame, and the lowest one-second speed seen, which is where the game loads a level:
 
@@ -244,7 +245,7 @@ For Yakumo, whose corpus plus 355 overlays take about two hours on an M1 at `-j2
 
 ### The corpus ABI and the cache
 
-- The library is `<cache>/<game id>/<abi>-O<level>/corpus.<dylib|so|dll>`. `<abi>` is a SHA-256 over every runtime header the generated code includes, every source of the recompiler and the runtime, and the compile definitions ([`cmake/corpus_abi.cmake`](../apps/portablekit/cmake/corpus_abi.cmake)); the prototype's is `826f07749a791529…` (it was `f68962b4…` before the recompiler fix taken from #29).
+- The library is `<cache>/<game id>/<abi>-O<level>/corpus.<dylib|so|dll>`. `<abi>` is a SHA-256 over every runtime header the generated code includes, every source of the recompiler and the runtime, and the compile definitions ([`cmake/corpus_abi.cmake`](../apps/portablekit/cmake/corpus_abi.cmake)); the prototype's is `5e9ff759e9e4a7db…` (it was `f68962b4…` before the commits taken from #29, and every such change invalidated the caches as intended).
 - The library exports `portablekit_corpus_abi()`, `portablekit_corpus_executable()` (the executable's SHA-256) and `portablekit_corpus_register(Runtime &)`; the program refuses a library whose answers differ from its own. Its own `register_generated_functions` is renamed at compile time so it cannot collide with the program's loader.
 - So a program update that touches none of those files keeps every cache; one that does compiles again, as it must. Today that is almost every update, because `runtime.hpp` changes often.
 - **Thin corpus ABI (proposed)**: generated code today includes `runtime.hpp`, which pulls in `std::string`, `std::vector` and the whole `Runtime` class. It needs far less: 11 runtime functions and 2 globals (listed from an object file of this corpus: `invoke_chained_call`, `invoke_chained_unit`, `register_function`, `register_generated_unit`, `run_starvation_boundary`, `unsupported`, five `GuestMemory::aot_*_slow`, the two chain globals) plus the layouts of `AllegrexContext` and `GuestMemory::AotFastView`. A C header with those layouts and a table of function pointers the program passes in would make the cache survive every runtime change that does not touch them, let any C++ compiler build the corpus for a program built by any other (MSVC program, clang corpus), and remove the C++ standard library from the corpus's link. It is the change that most improves this design; it touches the recompiler's output and `include/psprecomp/`, so it is its own piece of work.
@@ -269,7 +270,7 @@ Static analysis finds what the executable shows; code a game builds or copies at
 2. Play. Whatever reaches the interpreter is counted: `psprecomp::interpreter_entry_profile()` gives entry addresses and instructions run. The app writes it to `<cache>/<game id>/interpreted.txt` when the game stops.
 3. The next compile passes those addresses to the recompiler as extra seeds, and the new code is compiled and switched to like any other corpus.
 
-Step 3 needs `psp_recomp --seeds <file>`, which means an entry point into `analyze_program()` for extra seeds (`include/psprecomp/program_analysis.hpp`): not in the prototype, because that header is part of the corpus ABI. For code at addresses whose contents change (overlays), seeds are not enough: the corpus must be keyed by the bytes, which is exactly what the framework's overlay libraries do. An automatic version of that — detect a slot by `sceKernelIcacheInvalidate*` over a range the interpreter then runs, dump it, recompile it as an overlay library — is the path to Yakumo-like games without a hand profile.
+Step 3 needs the recompiler to take code its analysis did not find. `psp_recomp --code START-END` (from #29, taken into this branch) does that for ranges the section table does not call code; the loop would pass the interpreted entries' ranges to it. Wiring `interpreted.txt` to `--code` is the next step and is not in the prototype. For code at addresses whose contents change (overlays), seeds are not enough: the corpus must be keyed by the bytes, which is exactly what the framework's overlay libraries do. An automatic version of that — detect a slot by `sceKernelIcacheInvalidate*` over a range the interpreter then runs, dump it, recompile it as an overlay library — is the path to Yakumo-like games without a hand profile.
 
 For LocoRoco 2 the question does not arise: with the compiled corpus loaded, the interpreter was never entered (no interpreter line in any compiled run's log), as Purun's README reports for its own build. From an interpreter-only run the same file is the other thing the design wants, the hot set: from the title into level 2, 78 entry addresses account for 90% of the instructions interpreted, and they lie in **14 of the 193 units**. Those are what "hot units at -O2 first" would compile first: a few minutes instead of 36 for most of -O2's benefit, if the hot set holds across a game (not measured past level 2).
 
@@ -348,9 +349,9 @@ Small seams, each off unless a program asks for it; ports build and behave as be
 | `set_code_miss_hook()`: asked before the overlay corpora (for a program that loads code another way) | `host/overlays.*` |
 | `ui::set_status_overlay()`: a line of the program's own over the game | `host/ui/ui.hpp`, `host/ui/menu.cpp` |
 
-Nothing under `include/psprecomp/` or `src/` changed, so no port's generated code or overlays need rebuilding.
+The seams change nothing under `include/psprecomp/` or `src/`; the commits taken from #29 below do.
 
-Taken from other branches (cherry-picked, with `-x`): from #29 (`fubuki-prep`), "Call an import from the same unit through the dispatcher, not its label" (a recompiler fix: it changes the generated code, so it is part of the corpus ABI, which is why the prototype's caches were rebuilt after it) and "Put SDL3.dll next to the executable on Windows". Its shader-step change did not apply without the rest of #27 and was left. Worth taking when they land: #28's release packaging for macOS and Linux (the app needs an `.app` bundle with the recompiler and headers inside), and #23's commit that finds overlays and fonts inside a macOS bundle.
+Taken from other branches (cherry-picked, with `-x`), all from #29 (`fubuki-prep`), because a program for any game needs them more than any port does: "Call an import from the same unit through the dispatcher, not its label" (a recompiler fix), "Decode, interpret and recompile VCRS.T", "Let psp_recomp take code the section table does not call code" (`--code`), "Implement the Allegrex user-mode instructions no game has run yet", the test fix they depend on, and "Put SDL3.dll next to the executable on Windows". These do change `include/psprecomp/` and `src/`, so ports rebuild their generated code once when this branch lands, and the app's corpus ABI changed with them (to `5e9ff759…`); LocoRoco 2 was compiled again at -O0 with them and runs. Its shader-step change did not apply without the rest of #27 and was left. Worth taking when they land: #28's release packaging for macOS and Linux (the app needs an `.app` bundle with the recompiler and headers inside), and #23's commit that finds overlays and fonts inside a macOS bundle.
 
 ## What the prototype does
 
@@ -380,7 +381,7 @@ Built with `cmake -S apps/portablekit -B out-app -G Ninja -DCMAKE_BUILD_TYPE=Rel
 ## Decisions for the maintainer
 
 1. **Keys out of the releases.** The seam is here; do the ports keep linking `crypto_keys_builtin.cpp`, or do they move to the keys file too (and Yakumo with its move onto the framework)? The app cannot ship keys either way.
-2. **Default optimisation plan.** -O0 first and -O2 after (two switches, fastest to playable), or straight to -O2 (one compile, a longer wait under the interpreter), or hot units at -O2 only. The numbers above favour tiers (what the prototype does by default): playable compiled code in 6 minutes instead of 42, for 8% more compile work.
+2. **Default optimisation plan.** -O0 first and -O2 after (two switches, fastest to playable), or straight to -O2 (one compile, a longer wait under the interpreter), or hot units at -O2 only. The numbers above favour tiers (what the prototype does by default): playable compiled code in 6 minutes instead of 42, for 8% more compile work (measured tiered: -O0 ready at 6 min, -O2 at 38).
 3. **Windows toolchain: A, B or C** (see the table). A means building the program itself with llvm-mingw, which nobody has tried with this framework; it needs a Windows machine for a day. B is zero work and a 2–7 GB prerequisite.
 4. **The thin corpus ABI.** It is the change that makes caches survive updates and frees the corpus from the program's compiler. It touches `include/psprecomp/` and the recompiler, so every port rebuilds once. Worth scheduling before a first release of the app?
 5. **Where the app lives.** In this repository under `apps/` (as now), or its own repository like a port. It needs the framework's source at the same commit to compute the ABI, which argues for here.
