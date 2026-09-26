@@ -45,6 +45,7 @@ set(PORTABLEKIT_HOST_SOURCES
     host/system.cpp
     host/kernel/kernel.cpp
     host/kernel/fixed_pool.cpp
+    host/kernel/message_pipe.cpp
     host/kernel/load_trace.cpp
     host/kernel/fast_loading.cpp
     host/kernel/load_detector.cpp
