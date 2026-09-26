@@ -421,6 +421,18 @@ Built with `cmake -S apps/portablekit -B out-app -G Ninja -DCMAKE_BUILD_TYPE=Rel
 - Windows, on the maintainer's PC (Ryzen 5 5600, 16 GB, RX 5600 XT, Windows 11): the app built with llvm-mingw, delivered as a portable folder, and checked with Monster Hunter Portable 2nd G as described under [Windows](#windows-ship-an-llvm-toolchain-done). Test data was removed from the delivered folder.
 - Portable data: with no `--data-dir`, the Mac build made `data/` beside itself; `export --library-only` wrote the library and `NOTICE.txt`.
 
+### More games, on Windows, with the automatic profile
+
+The maintainer's own discs, each in a data folder of its own beside the delivered build, run bounded. What each needed was framework, never a profile:
+
+| Game | Reached | What it needed |
+| --- | --- | --- |
+| Grand Theft Auto: Chinatown Wars (`ULUS-10490`, EBOOT decrypted with the player's keys) | the Rockstar logo, the story intro with subtitles, the 3D airport scene at full speed, under the interpreter (guest ~21 ms a frame) and from -O0 (~12 ms) | fixed-size memory pools (`sceKernel*Fpl`), asynchronous file I/O (`sceIo*Async`), the scratchpad (taken from `tenkawa-bringup`), `sceKernelVolatileMemTryLock`, `sceKernelTryLockMutex`, a 64 MiB stack for the MinGW build (compiled code overflowed the default at once) |
+| Grand Theft Auto: Vice City Stories (`ULES-00502`) | the Rockstar logo movie and the next one, then waits for its world streaming (`WorldStreamEventFlag` bits 1 and 2 are never set) | directory reads (`sceIoDread`; the disc must not list "." and ".."), `sceUmdCheckMedium`, callbacks in `*CB` waits, thread suspend and resume. The stream wait is the open blocker |
+| Monster Hunter Portable 2nd G (`ULJM-05500`) | the game menu | (the Fubuki port's fixes) |
+
+Known in Chinatown Wars: grey untextured areas in 3D. Control past the intro was not tried.
+
 ### What was not verified
 
 - **Windows**: the app was built and smoke-tested there, but not played: no gameplay past the menu, no -O2 compile of a whole game in the app, no hot switch while a game runs, no keys.
