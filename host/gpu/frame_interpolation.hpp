@@ -38,6 +38,8 @@ struct DrawSummary {
     std::array<float, 3> eye_translation{};
     // Transformed through a perspective projection, and not a clear.
     bool perspective{};
+    // Transformed (not through mode), and not a clear, whatever the projection.
+    bool transformed{};
     // A perspective draw into the framebuffer the game showed. Only these are
     // blended; 2D and interface draws, orthographic ones, clears and
     // render-to-texture passes are shown as the frame drew them.
@@ -52,7 +54,10 @@ struct DrawSummary {
 // is decided once the frame's displayed framebuffer is known.
 DrawSummary summarize(const DrawCall &call);
 // Marks the perspective draws into `displayed` eligible.
-void mark_eligible(std::vector<DrawSummary> &draws, std::uint32_t displayed) noexcept;
+// Marks the draws a frame may be blended by: transformed through a
+// perspective projection into the displayed target, and with `orthographic`
+// (CutThresholds::orthographic) the orthographic ones too.
+void mark_eligible(std::vector<DrawSummary> &draws, std::uint32_t displayed, bool orthographic = false) noexcept;
 
 // True for a projection without perspective division.
 [[nodiscard]] bool is_orthographic(const Matrix &projection) noexcept;
@@ -119,6 +124,10 @@ struct CutThresholds {
     // pair up in drawing order, and that order can change. 0 turns the
     // guard off (<prefix>_INTERPOLATION_NO_MOTION_GUARD).
     float max_own_motion{120.0f};
+    // Blend draws with an orthographic projection too. A 2D game drawn with
+    // transformed vertices (Purun) has nothing else to blend; off, only
+    // perspective draws are, which keeps a 3D game's 2D interface as it is.
+    bool orthographic{false};
 };
 
 class Matcher {

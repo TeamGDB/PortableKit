@@ -18,6 +18,7 @@
 #include "adhoc/discovery.hpp"
 #include "adhoc/session.hpp"
 #include "audio/audio_sink.hpp"
+#include "gpu/frame_pacing.hpp"
 #include "gpu/vulkan_renderer.hpp"
 #include "profile.hpp"
 #include "input/bindings.hpp"
@@ -323,10 +324,17 @@ void Menu::video() {
         }
     }
     {
-        static const char *const kRates[] = {"30", "45", "60", "90", "120", "Match display"};
+        // The game's own rate stands first; the rates at or below it are not
+        // offered (a game at 60 has no 45 or 60 to blend up to).
+        const double own_rate = gpu::pacing::game_rate();
+        const std::string own_label = std::to_string(static_cast<int>(std::lround(own_rate)));
+        const char *const kRates[] = {own_label.c_str(), "45", "60", "90", "120", "Match display"};
+        static const double kRateValues[] = {0.0, 45.0, 60.0, 90.0, 120.0, 0.0};
+        const auto offered = [&](int index) { return index == 0 || index == 5 || kRateValues[index] > own_rate + 0.5; };
         RowOptions o = options_for("video.frame_rate",
-                                   "Frames between the game's 30 a second, blending its movement. Steps down by "
-                                   "itself rather than slow the game.");
+                                   "Frames between the game's " + own_label +
+                                       " a second, blending its movement. Steps down by itself rather than slow "
+                                       "the game.");
         if (s.unthrottled && !o.disabled) {
             o.disabled = true;
             o.note = "Game speed is Unlimited";
@@ -351,7 +359,10 @@ void Menu::video() {
             }
         }
         if (const int delta = choice_row("Frame rate", value, o)) {
-            s.frame_rate = static_cast<settings::FrameRate>(cycle(current, delta, 6));
+            int next = current;
+            do next = cycle(next, delta, 6);
+            while (!offered(next) && next != current);
+            s.frame_rate = static_cast<settings::FrameRate>(next);
             renderer().set_frame_rate(s.frame_rate);
             settings::save();
         }

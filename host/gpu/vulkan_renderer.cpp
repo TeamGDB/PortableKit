@@ -112,7 +112,7 @@ constexpr std::uint32_t kGpuTimerSegments = 16u;
 struct PushConstants {
     std::array<float, 16> transform{};
     std::array<float, 4> viewport{};        // x,y: target size; z: through flag; w: 1 fog + 2 lighting
-    std::array<float, 4> texture_params{};  // x: enabled, y: function, z: alpha ref, w: alpha func
+    std::array<float, 4> texture_params{};  // x: enabled + 2 clamp u + 4 clamp v, y: function, z: alpha ref, w: alpha func
     std::array<float, 4> uv_transform{1.0f, 1.0f, 0.0f, 0.0f};
     std::array<float, 4> view_z{};          // row of view * world that gives view-space z, for fog
 };
@@ -2024,6 +2024,9 @@ bool VulkanRenderer::initialize(const RendererConfig &config, std::string &error
     impl.trace_interpolation = portablekit::env("TRACE_INTERPOLATION") != nullptr;
     if (const interpolation::CutThresholds *thresholds = portablekit::game().interpolation_thresholds)
         impl.cut_thresholds = *thresholds;
+    pacing::set_game_frame_vblanks(static_cast<int>(portablekit::game().frame_vblanks));
+    impl.present_clock = pacing::PresentClock{};
+    impl.governor = pacing::RateGovernor{};
     if (portablekit::env("INTERPOLATION_NO_MOTION_GUARD") != nullptr) impl.cut_thresholds.max_own_motion = 0.0f;
     impl.frame_rate = player.frame_rate;
     impl.governor.set_automatic(player.frame_rate_auto);
@@ -6009,7 +6012,15 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     push.viewport = {static_cast<float>(kPspWidth), static_cast<float>(kPspHeight), call.through ? 1.0f : 0.0f,
                      (fogged ? kPushFog : 0.0f) + (lit ? kPushLighting : 0.0f)};
     push.view_z = {view_world[2], view_world[6], view_world[10], view_world[14]};
-    push.texture_params = {call.texture.enabled ? 1.0f : 0.0f, static_cast<float>(call.texture.function),
+    // The GE's texture wrap register: clamp in u, in v, or repeat. The
+    // sampler repeats; the fragment shader clamps the axes flagged here
+    // (bits 1 and 2 of texture_params.x) to the texture's edge texels.
+    // <prefix>_NO_TEXTURE_CLAMP repeats every texture, as before.
+    static const bool no_texture_clamp = portablekit::env("NO_TEXTURE_CLAMP") != nullptr;
+    const float wrap_flags = no_texture_clamp ? 0.0f
+                                              : (call.texture.wrap_s != 0u ? 2.0f : 0.0f) +
+                                                    (call.texture.wrap_t != 0u ? 4.0f : 0.0f);
+    push.texture_params = {call.texture.enabled ? 1.0f + wrap_flags : 0.0f, static_cast<float>(call.texture.function),
                            static_cast<float>(call.alpha_test.enabled ? call.alpha_test.reference : 0u),
                            static_cast<float>(call.alpha_test.enabled ? call.alpha_test.function : 0u)};
     // Through-mode texture coordinates are in texels, transformed ones in [0,1].
@@ -6036,6 +6047,9 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
             // is pixel (x, y) of a target that holds 480x272 guest pixels at
             // any internal scale.
             texture_descriptor = copy;
+            // The copy's sampler clamps at the target's edges; the shader's
+            // clamp would take the whole target for the texture.
+            push.texture_params[0] = 1.0f;
             const float width = static_cast<float>(call.texture.width);
             const float height = static_cast<float>(call.texture.height);
             const std::array<float, 4> uv = push.uv_transform;
@@ -6448,9 +6462,10 @@ std::int64_t to_us(std::chrono::steady_clock::time_point time) {
 } // namespace
 
 double VulkanRenderer::Impl::wanted_rate() const {
-    double rate = 30.0;
+    const double own = pacing::game_rate();
+    double rate = own;
     switch (frame_rate) {
-    case settings::FrameRate::Fps30: rate = 30.0; break;
+    case settings::FrameRate::Fps30: rate = own; break;
     case settings::FrameRate::Fps45: rate = 45.0; break;
     case settings::FrameRate::Fps60: rate = 60.0; break;
     case settings::FrameRate::Fps90: rate = 90.0; break;
@@ -6461,14 +6476,14 @@ double VulkanRenderer::Impl::wanted_rate() const {
     // would wait for it with the game's time.
     if (present_mode == VK_PRESENT_MODE_FIFO_KHR && display_hz >= 1.0f)
         rate = std::min(rate, static_cast<double>(display_hz));
-    return std::max(rate, 30.0);
+    return std::max(rate, own);
 }
 
 bool VulkanRenderer::Impl::interpolation_wanted() const {
     // Emulated time running ahead of real time already presents faster than
     // the game's own rate; the keyboard's held frame is shown as it is.
     return frame_rate != settings::FrameRate::Fps30 && !settings::current().unthrottled && !holding && !fast_forward &&
-           governor.rate() > 30.5;
+           governor.rate() > pacing::game_rate() + 0.5;
 }
 
 // Keeps what drawing a draw again needs: a new group for a draw call the
@@ -6548,7 +6563,7 @@ void VulkanRenderer::Impl::finish_interpolated_frame(VkImage source, std::uint32
     const perf::SplitScope split(perf::Split::Interp);
     FrameRecord &frame = recording_frame;
     frame.recorded = frame.recorded && interpolating;
-    interpolation::mark_eligible(frame.summaries, displayed);
+    interpolation::mark_eligible(frame.summaries, displayed, cut_thresholds.orthographic);
     frame.displayed = displayed;
     frame.moment_us = moment_us;
     frame.valid = true;
@@ -7436,7 +7451,7 @@ void VulkanRenderer::set_frame_rate(settings::FrameRate rate) {
     Impl &impl = *impl_;
     if (impl.frame_rate == rate) return;
     impl.frame_rate = rate;
-    impl.governor.set_requested(rate == settings::FrameRate::Fps30 ? 30.0 : impl.wanted_rate());
+    impl.governor.set_requested(rate == settings::FrameRate::Fps30 ? pacing::game_rate() : impl.wanted_rate());
     impl.reset_interpolation();
     perf::set_frame_rate_info(rate == settings::FrameRate::Fps30 ? 0.0 : impl.governor.rate(),
                               rate == settings::FrameRate::Fps30 ? 0.0 : impl.governor.requested());
@@ -7452,7 +7467,7 @@ void VulkanRenderer::set_frame_rate_auto(bool automatic) {
 float VulkanRenderer::display_refresh() const noexcept { return impl_ ? impl_->display_hz : 0.0f; }
 
 double VulkanRenderer::frame_rate_now() const noexcept {
-    if (!impl_ || impl_->frame_rate == settings::FrameRate::Fps30) return 30.0;
+    if (!impl_ || impl_->frame_rate == settings::FrameRate::Fps30) return pacing::game_rate();
     return impl_->governor.rate();
 }
 

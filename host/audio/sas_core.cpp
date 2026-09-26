@@ -52,6 +52,25 @@ struct EnvelopeRate {
     return result;
 }
 
+// The noise generator the SAS inherits from the SPU, as the SPU's public
+// documentation describes it: a 16-bit shift register, clocked at a rate the
+// voice's 6-bit noise clock picks (the top four bits a shift, the low two a
+// step), whose feedback is the parity of bits 15, 12, 11 and 10, inverted.
+// The register itself, read as a signed 16-bit value, is the sample.
+[[nodiscard]] std::int16_t noise_sample(SasVoice &voice) noexcept {
+    const std::int32_t shift = static_cast<std::int32_t>(voice.noise_clock >> 2u);
+    const std::int32_t step = 4 + static_cast<std::int32_t>(voice.noise_clock & 3u);
+    voice.noise_timer -= step;
+    if (voice.noise_timer < 0) {
+        const std::uint32_t r = voice.noise_register;
+        const std::uint32_t parity = ((r >> 15) ^ (r >> 12) ^ (r >> 11) ^ (r >> 10) ^ 1u) & 1u;
+        voice.noise_register = static_cast<std::uint16_t>((r << 1) | parity);
+        voice.noise_timer += 0x20000 >> shift;
+        if (voice.noise_timer < 0) voice.noise_timer += 0x20000 >> shift;
+    }
+    return static_cast<std::int16_t>(voice.noise_register);
+}
+
 [[nodiscard]] bool envelopes_disabled() {
     static const bool disabled = portablekit::env("SAS_NO_ENV") != nullptr;
     return disabled;
@@ -66,6 +85,7 @@ struct EnvelopeRate {
 // told apart from a mix nobody asked for.
 struct RenderTrace {
     std::uint64_t frames{};
+    std::uint64_t clipped{};
     std::uint64_t key_ons{};
     std::int32_t peak{};
     std::uint32_t voices{};
@@ -91,6 +111,7 @@ void SasCore::set_voice(std::uint32_t voice, std::uint32_t address, std::uint32_
     v.size = size & ~0xFu;
     v.looping = looping;
     v.pcm = false;
+    v.noise = false;
     v.loop_block = 0u;
     v.source_ended = address == 0u || v.size < 16u;
 }
@@ -102,8 +123,18 @@ void SasCore::set_voice_pcm(std::uint32_t voice, std::uint32_t address, std::uin
     v.size = size;
     v.looping = loop >= 0;
     v.pcm = true;
+    v.noise = false;
     v.loop_block = 0u;
     v.source_ended = address == 0u || size < 2u;
+}
+
+void SasCore::set_noise(std::uint32_t voice, std::uint32_t clock) {
+    if (voice >= kSasMaxVoices) return;
+    SasVoice &v = voices_[voice];
+    v.noise = true;
+    v.pcm = false;
+    v.noise_clock = clock & 0x3Fu;
+    v.source_ended = false;
 }
 
 void SasCore::set_pitch(std::uint32_t voice, std::uint32_t pitch) {
@@ -140,7 +171,8 @@ void SasCore::key_on(std::uint32_t voice) {
     v.history2 = 0;
     v.previous = 0;
     v.current = 0;
-    v.source_ended = v.address == 0u || v.size < (v.pcm ? 2u : 16u);
+    v.source_ended = !v.noise && (v.address == 0u || v.size < (v.pcm ? 2u : 16u));
+    v.noise_timer = 0;
     v.primed = false;
     v.paused = false;
     v.playing = !v.source_ended;
@@ -317,48 +349,67 @@ void SasCore::step_envelope(SasVoice &voice) {
 }
 
 void SasCore::render(const psprecomp::GuestMemory &memory, std::int16_t *output, std::size_t frames) {
-    std::fill_n(output, frames * 2u, static_cast<std::int16_t>(0));
+    // The voices add up at full precision and the sum is clamped once, at the
+    // end. Clamping after each voice made the result depend on the order of
+    // the voices, and a loud voice mixed early could clip away a quieter one
+    // of the opposite sign that would have brought the sum back in range.
+    // <prefix>_SAS_CLAMP_EACH clamps after every voice, as before.
+    static const bool clamp_each = portablekit::env("SAS_CLAMP_EACH") != nullptr;
+    mix_.assign(frames * 2u, 0);
     // Sampled before mixing: a short voice can finish inside this very block.
     if (tracing())
         trace().voices = std::max(trace().voices, static_cast<std::uint32_t>(std::popcount(
-                                                      ~end_flag() & ((1u << max_voices_) - 1u))));
+                                                      ~end_flag() & (max_voices_ >= 32u ? ~0u : (1u << max_voices_) - 1u))));
     for (std::uint32_t index = 0; index < max_voices_; ++index) {
         SasVoice &voice = voices_[index];
         if (!voice.playing || voice.paused) continue;
 
         // Keying on leaves the decoder empty, so the first two source samples
         // that the interpolator needs are fetched here.
-        if (!voice.primed) {
+        if (!voice.primed && !voice.noise) {
             voice.primed = true;
             advance_source(memory, voice);
             advance_source(memory, voice);
         }
 
         for (std::size_t frame = 0; frame < frames; ++frame) {
-            const std::int32_t span = voice.current - voice.previous;
-            const std::int32_t sample =
-                voice.previous + ((span * static_cast<std::int32_t>(voice.phase)) >> 12);
+            std::int32_t sample = 0;
+            if (voice.noise) {
+                sample = noise_sample(voice);
+            } else {
+                const std::int32_t span = voice.current - voice.previous;
+                sample = voice.previous + ((span * static_cast<std::int32_t>(voice.phase)) >> 12);
+            }
             step_envelope(voice);
             const std::int32_t scaled = (sample * voice.envelope) >> 15;
             const std::size_t slot = frame * 2u;
-            output[slot] = static_cast<std::int16_t>(
-                clamp16(output[slot] + ((scaled * voice.left) >> 12)));
-            output[slot + 1u] = static_cast<std::int16_t>(
-                clamp16(output[slot + 1u] + ((scaled * voice.right) >> 12)));
-
-            voice.phase += voice.pitch;
-            while (voice.phase >= kPitchUnity) {
-                voice.phase -= kPitchUnity;
-                advance_source(memory, voice);
+            mix_[slot] += (scaled * voice.left) >> 12;
+            mix_[slot + 1u] += (scaled * voice.right) >> 12;
+            if (clamp_each) {
+                mix_[slot] = clamp16(mix_[slot]);
+                mix_[slot + 1u] = clamp16(mix_[slot + 1u]);
             }
-            if (voice.source_ended) {
-                voice.playing = false;
-                voice.stage = EnvelopeStage::Off;
-                voice.envelope = 0;
-                break;
+
+            if (!voice.noise) {
+                voice.phase += voice.pitch;
+                while (voice.phase >= kPitchUnity) {
+                    voice.phase -= kPitchUnity;
+                    advance_source(memory, voice);
+                }
+                if (voice.source_ended) {
+                    voice.playing = false;
+                    voice.stage = EnvelopeStage::Off;
+                    voice.envelope = 0;
+                    break;
+                }
             }
             if (!voice.playing) break;
         }
+    }
+    for (std::size_t sample = 0; sample < frames * 2u; ++sample) {
+        const std::int32_t value = mix_[sample];
+        if (tracing() && (value > 32767 || value < -32768)) ++trace().clipped;
+        output[sample] = static_cast<std::int16_t>(clamp16(value));
     }
     if (!tracing()) return;
     RenderTrace &stats = trace();
@@ -366,9 +417,9 @@ void SasCore::render(const psprecomp::GuestMemory &memory, std::int16_t *output,
     for (std::size_t sample = 0; sample < frames * 2u; ++sample)
         stats.peak = std::max(stats.peak, std::abs(static_cast<std::int32_t>(output[sample])));
     if (stats.frames >= 44'100u) {
-        std::printf("[sas] frames=%llu peak=%d voices=%u key_ons=%llu\n",
+        std::printf("[sas] frames=%llu peak=%d voices=%u key_ons=%llu clipped=%llu\n",
                     static_cast<unsigned long long>(stats.frames), stats.peak, stats.voices,
-                    static_cast<unsigned long long>(stats.key_ons));
+                    static_cast<unsigned long long>(stats.key_ons), static_cast<unsigned long long>(stats.clipped));
         std::fflush(stdout);
         stats = RenderTrace{};
     }

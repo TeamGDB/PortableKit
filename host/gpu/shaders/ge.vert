@@ -168,7 +168,7 @@ layout(location = 4) flat out vec4 frag_uv_rect;
 layout(push_constant) uniform Push {
     mat4 transform;      // WVP, or identity for through vertices
     vec4 viewport;       // xy: target size in PSP pixels, z: through, w: 1 fog + 2 lighting
-    vec4 texture_params; // x: texture enabled, y: texture function, z: alpha ref, w: alpha func
+    vec4 texture_params; // x: texture enabled (+2 clamp u, +4 clamp v), y: texture function, z: alpha ref, w: alpha func
     vec4 uv_transform;   // xy: scale, zw: offset
     vec4 view_z;         // row of view * world that gives view-space z
 } push;
