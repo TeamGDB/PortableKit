@@ -33,9 +33,9 @@
 #include <utility>
 #include <vector>
 
-// Raised when this header changes incompatibly, so a module can check what it
-// is being built against.
-#define PORTABLEKIT_HLE_EXTENSION_INTERFACE 1
+// Raised when this header changes, so a module can check what it is being
+// built against. 2: Registry::override_chained.
+#define PORTABLEKIT_HLE_EXTENSION_INTERFACE 2
 
 namespace portablekit::hle_extension {
 
@@ -48,6 +48,15 @@ using GuestMemory = psprecomp::GuestMemory;
 // registers; it reads its arguments from them and ends with finish().
 using Handler = std::function<void(Runtime &, AllegrexContext &)>;
 
+// A handler that wraps the implementation it replaces: `previous` is whatever
+// was bound to the function before this module -- PortableKit's own, the
+// port's, or an earlier module's. The handler either handles the call itself
+// and ends with finish() (or blocks), or passes it on unchanged by calling
+// previous(rt, ctx) as its last act, with the caller's registers as it found
+// them. Where nothing was bound before, `previous` does what a logging stub
+// does: logs the call once and returns 0.
+using Chained = std::function<void(Runtime &, AllegrexContext &, const Handler &previous)>;
+
 // How a function relates to one PortableKit already implements.
 enum class Mode {
     // Only where PortableKit has no implementation of its own: the function
@@ -56,6 +65,7 @@ enum class Mode {
     FillIn,
     // Replaces PortableKit's implementation. The host logs each override once
     // at startup, so it is always visible which implementation is active.
+    // With Function::chained, wraps it instead (Registry::override_chained).
     Override,
 };
 
@@ -63,8 +73,9 @@ struct Function {
     std::string library; // the PSP library the game imports it from, e.g. "sceHttp"
     std::uint32_t nid{};
     std::string name;    // for logs; may be empty when PortableKit's NID table names it
-    Handler handler;
+    Handler handler;     // empty when `chained` is set
     Mode mode = Mode::FillIn;
+    Chained chained;     // set by override_chained; the mode is then Override
 };
 
 // What a module's entry function fills in. Adding a function does nothing yet;
@@ -77,6 +88,15 @@ public:
     }
     void override_builtin(std::string_view library, std::uint32_t nid, std::string_view name, Handler handler) {
         add(library, nid, name, std::move(handler), Mode::Override);
+    }
+    // Wraps whatever is bound to the function so far, which the handler
+    // receives as `previous` (see Chained). Unlike the others, a chained
+    // override also wraps a function an earlier module added, so modules
+    // compose: the last one listed is called first. Logged at startup like
+    // an override, naming what it wraps.
+    void override_chained(std::string_view library, std::uint32_t nid, std::string_view name, Chained handler) {
+        functions_.push_back(
+            Function{std::string(library), nid, std::string(name), Handler{}, Mode::Override, std::move(handler)});
     }
 
     [[nodiscard]] const std::vector<Function> &functions() const noexcept { return functions_; }

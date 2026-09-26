@@ -5,6 +5,7 @@
 #   release_macos.sh [--game DIR] [--packaging DIR] [--version VERSION]
 #                    [--executable FILE] [--jobs N] [--zip] [--no-dmg]
 #                    [--license NAME=FILE]... [--notices FILE]... [--extra PATH]...
+#                    [--top-license FILE]
 #                    BUILD_DIR
 #
 # The game's repository (--game, by default the checkout the current
@@ -50,6 +51,10 @@
 #   --license NAME=FILE  also ship FILE as licenses/NAME-LICENSE.txt, for a
 #                      component the build added (repeatable)
 #   --notices FILE     also ship FILE in licenses/ as it is named (repeatable)
+#   --top-license FILE put FILE as LICENSE.txt beside the app in the disk
+#                      image and the zip, for a build whose combined licence
+#                      is not the game's own; without it there is none there.
+#                      The bundle's licenses/ is the same either way
 #   --extra PATH       also put PATH (a file or a folder) beside the app in
 #                      the disk image and the zip (repeatable)
 set -euo pipefail
@@ -66,6 +71,7 @@ packaging_dir=""
 extra_licenses=()
 extra_notices=()
 extra_paths=()
+top_license=""
 version=""
 executable=""
 jobs=4
@@ -79,6 +85,7 @@ while [[ $# -gt 0 ]]; do
         --license) extra_licenses+=("${2:?--license needs NAME=FILE}"); shift 2 ;;
         --notices) extra_notices+=("${2:?--notices needs a file}"); shift 2 ;;
         --extra) extra_paths+=("${2:?--extra needs a path}"); shift 2 ;;
+        --top-license) top_license="${2:?--top-license needs a file}"; shift 2 ;;
         --version) version="${2:?--version needs a value}"; shift 2 ;;
         --executable) executable="${2:?--executable needs a value}"; shift 2 ;;
         --jobs) jobs="${2:?--jobs needs a value}"; shift 2 ;;
@@ -268,6 +275,7 @@ for entry in ${extra_licenses[@]+"${extra_licenses[@]}"}; do
 done
 for file in ${extra_notices[@]+"${extra_notices[@]}"}; do [[ -f "$file" ]] || fail "--notices $file: no such file"; done
 for path in ${extra_paths[@]+"${extra_paths[@]}"}; do [[ -e "$path" ]] || fail "--extra $path: no such file or folder"; done
+[[ -z "$top_license" || -f "$top_license" ]] || fail "--top-license $top_license: no such file"
 overlay_count=0
 [[ -d "$build_dir/bin/overlays" ]] && overlay_count="$(find "$build_dir/bin/overlays" -name '*.dylib' | wc -l | tr -d ' ')"
 [[ "$overlay_count" -eq "$RELEASE_OVERLAYS" ]] ||
@@ -520,6 +528,7 @@ if [[ $make_zip -eq 1 ]]; then
     mkdir -p "$zip_root"
     ditto "$app" "$zip_root/$RELEASE_NAME.app"
     cp "$readme" "$zip_root/"
+    [[ -z "$top_license" ]] || cp "$top_license" "$zip_root/LICENSE.txt"
     for path in ${extra_paths[@]+"${extra_paths[@]}"}; do ditto "$path" "$zip_root/$(basename "$path")"; done
     (cd "$work/zip" && ditto -c -k --sequesterRsrc --keepParent "$name" "$dist/$name.zip")
     rm -rf "$work/zip"
@@ -540,6 +549,7 @@ if [[ $make_dmg -eq 1 ]]; then
     mkdir -p "$dmg_root"
     ditto "$app" "$dmg_root/$RELEASE_NAME.app"
     cp "$readme" "$dmg_root/"
+    [[ -z "$top_license" ]] || cp "$top_license" "$dmg_root/LICENSE.txt"
     for path in ${extra_paths[@]+"${extra_paths[@]}"}; do ditto "$path" "$dmg_root/$(basename "$path")"; done
     ln -s /Applications "$dmg_root/Applications"
     hdiutil create -quiet -volname "$RELEASE_NAME $version" -srcfolder "$dmg_root" -fs APFS \

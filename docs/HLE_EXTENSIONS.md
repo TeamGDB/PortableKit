@@ -47,7 +47,7 @@ PORTABLEKIT_HLE_EXTENSION(my_module) {
 }
 ```
 
-[`examples/hle_extension/`](../examples/hle_extension/) is a complete module of one fill-in and one override, both behaving as PortableKit already does.
+[`examples/hle_extension/`](../examples/hle_extension/) is a complete module of one fill-in, one override and one chained override, all behaving as PortableKit already does.
 
 ### The interface
 
@@ -57,6 +57,7 @@ Everything a module may rely on is in `include/portablekit/hle_extension.hpp`. `
 | --- | --- |
 | `Registry::add(library, nid, name, handler, mode)` | Adds a function. `name` is for logs and may be empty where [`configs/nids.csv`](../configs/nids.csv) names the NID; a name the table lacks is added to it. `mode` is `Mode::FillIn` (the default) or `Mode::Override`. |
 | `Registry::override_builtin(library, nid, name, handler)` | `add` with `Mode::Override`. |
+| `Registry::override_chained(library, nid, name, chained)` | Wraps the implementation already bound: `chained` is `void(Runtime &, AllegrexContext &, const Handler &previous)`, and either handles the call itself or passes it on unchanged with `previous(rt, ctx)` as its last act (see below). Since interface version 2. |
 | `Handler` | `void(Runtime &, AllegrexContext &)`, the signature of PortableKit's own handlers. |
 | `arg(ctx, i)`, `arg64(ctx, i)` | Arguments in a0-a3, t0-t3; a 64-bit one in an even-aligned pair. |
 | `Runtime::memory()`, `read_cstring()` | Guest memory by guest address. |
@@ -90,17 +91,37 @@ At startup, `install_system()` registers PortableKit's HLE, then the profile's `
 
 1. A **fill-in** is bound only where neither PortableKit nor the profile implements the function. Where one does, theirs stays and the startup log says the module's function is not used.
 2. An **override** is bound whether or not the function is implemented. Where it replaces an implementation it is logged, once per function, at startup.
-3. Between modules, and within one, **the first to add a function keeps it**; a later addition is logged as not used.
+3. A **chained override** wraps whatever is bound when it is applied -- PortableKit's implementation, the profile's, or an earlier module's -- and always binds. Chained overrides of one function from several modules therefore compose: the last module listed is called first, and each passes on what it does not handle. Each is logged at startup with what it passes calls to. Where nothing was bound before, `previous` does what a logging stub does: logs the call once and returns 0.
+4. Otherwise, between modules and within one, **the first to add a function keeps it**; a later addition is logged as not used.
 
 Only after that are the remaining imports bound to logging stubs, so a module's function is never replaced by a stub.
+
+### Handling part of a function
+
+A chained override lets a module take over one case of a function and leave the rest to the implementation it replaces, for example one action of a utility dialog:
+
+```cpp
+PORTABLEKIT_HLE_EXTENSION(my_module) {
+    registry.override_chained("sceUtility", nid, "sceUtilityNetconfInitStart",
+        [](ext::Runtime &rt, ext::AllegrexContext &ctx, const ext::Handler &previous) {
+            const std::uint32_t action = rt.memory().load32(ext::arg(ctx, 0) + kActionOffset);
+            if (action != kMyAction) return previous(rt, ctx);  // unchanged, as the game called it
+            // ... handle this action ...
+            ext::finish(ctx, 0u);
+        });
+}
+```
+
+`previous` must be called with the caller's registers as the handler found them, and as its last act, in place of `finish()`.
 
 ## What the log says
 
 ```text
 HLE extension: Example HLE extension 1.0 (MIT)
-HLE extensions: 2 functions (1 overriding built-ins) from Example HLE extension
+HLE extensions: 3 functions (2 overriding built-ins) from Example HLE extension
 [hle-extension] UtilsForUser::sceKernelDcacheWritebackAll is Example HLE extension's, overriding the built-in
-HLE imports: 412 total, 301 implemented, 111 logging stubs; 1 imports served by HLE extensions
+[hle-extension] UtilsForUser::sceKernelDcacheWritebackInvalidateAll is Example HLE extension's, passing what it does not handle to the built-in
+HLE imports: 269 total, 379 implemented, 38 logging stubs; 2 imports served by HLE extensions
 ```
 
 With `<PREFIX>_LIST_STUBS`, the list of unimplemented imports is followed by the imports extension modules serve, each with its module and whether it fills in or overrides.
