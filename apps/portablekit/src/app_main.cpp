@@ -64,8 +64,8 @@ const char *const kUsageText =
     "       portablekit list\n"
     "       portablekit info <game>\n"
     "       portablekit status <game>\n"
-    "       portablekit compile <game> [--opt 0|1|2] [--jobs N] [--background] [--keep]\n"
-    "       portablekit run <game> [--interpreter] [--no-compile] [--opt 0|1|2] [--headless] [--seconds N]\n"
+    "       portablekit compile <game> [--opt 0|1|2|tiered] [--jobs N] [--background] [--keep]\n"
+    "       portablekit run <game> [--interpreter] [--no-compile] [--opt 0|1|2|tiered] [--headless] [--seconds N]\n"
     "       portablekit keys import <file>\n"
     "       portablekit keys status\n"
     "       portablekit cache clear <game>\n"
@@ -265,26 +265,28 @@ std::string self_path(char **argv) {
     return self.empty() ? std::string(argv[0]) : path_text(self);
 }
 
-int start_background_compile(const GameRecord &game, int level, unsigned jobs, char **argv) {
-    std::vector<std::string> command{self_path(argv), "compile", game.id, "--opt", std::to_string(level)};
+int start_background_compile(const GameRecord &game, const std::string &level, unsigned jobs, char **argv) {
+    std::vector<std::string> command{self_path(argv), "compile", game.id, "--opt", level};
     if (jobs != 0u) {
         command.push_back("--jobs");
         command.push_back(std::to_string(jobs));
     }
-    const CorpusPaths paths = corpus_paths(game, level);
+    const std::filesystem::path log_dir = cache_root() / game.id;
     std::error_code ec;
-    std::filesystem::create_directories(paths.root, ec);
-    return spawn_detached(command, paths.root / "compile-process.log") ? 0 : 1;
+    std::filesystem::create_directories(log_dir, ec);
+    return spawn_detached(command, log_dir / "compile-process.log") ? 0 : 1;
 }
 
 int command_compile(const GameRecord &game, const Arguments &args, char **argv) {
     CompileOptions options;
-    options.opt_level = std::atoi(args.get("opt", "2").c_str());
-    if (options.opt_level < 0 || options.opt_level > 2) return report_error(kUsage, "--opt takes 0, 1 or 2");
+    const bool tiered = args.get("opt", "2") == "tiered";
+    options.opt_level = tiered ? 0 : std::atoi(args.get("opt", "2").c_str());
+    if (options.opt_level < 0 || options.opt_level > 2)
+        return report_error(kUsage, "--opt takes 0, 1, 2 or tiered");
     options.jobs = static_cast<unsigned>(std::atoi(args.get("jobs", "0").c_str()));
     options.keep_intermediates = args.has("keep");
     if (args.has("background")) {
-        if (start_background_compile(game, options.opt_level, options.jobs, argv) != 0)
+        if (start_background_compile(game, args.get("opt", "2"), options.jobs, argv) != 0)
             return report_error(1, "cannot start the background compile");
         if (g_json) std::cout << Json().field("ok", true).field("started", true).field("opt_level", options.opt_level).str() << "\n";
         else std::cout << "Compiling " << game.title << " in the background; follow it with: portablekit status " << game.disc_id << "\n";
@@ -307,7 +309,18 @@ int command_compile(const GameRecord &game, const Arguments &args, char **argv) 
             last_message = status.message;
         }
     };
-    const int code = compile_corpus(game, options);
+    // Tiered: -O0 first, which the running game switches to within minutes,
+    // then -O2 from the same C++, which it switches to when that is done.
+    options.keep_generated = tiered;
+    int code = 0;
+    // A tier already compiled is not compiled again.
+    if (!tiered || current_status(game, 0).state != CorpusState::Ready) code = compile_corpus(game, options);
+    if (tiered && code == 0) {
+        options.reuse_generated = corpus_paths(game, 0).generated;
+        options.keep_generated = false;
+        options.opt_level = 2;
+        code = compile_corpus(game, options);
+    }
     const CorpusStatus status = current_status(game, options.opt_level);
     if (g_json) {
         std::cout << status_json(game).field("ok", code == 0).field("exit_code", code).str() << "\n";
@@ -364,7 +377,7 @@ int command_run(const GameRecord &game, const Arguments &args, char **argv) {
         }
         if (!running && find_toolchain().found) {
             std::cout << "[portablekit] compiling " << game.title << " in the background\n";
-            (void)start_background_compile(game, std::atoi(args.get("opt", "2").c_str()), 0u, argv);
+            (void)start_background_compile(game, args.get("opt", "tiered"), 0u, argv);
         }
     }
     prepare_corpus_loading(game, choice);

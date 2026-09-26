@@ -79,9 +79,10 @@ std::vector<std::uint8_t> decrypt_with_keys(const std::vector<std::uint8_t> &ebo
     install::TagKeyMaterial material{*tag, {}, {}};
     if (found->second.key) material.key = *found->second.key;
     material.table = found->second.table;
-    const KeyValues raw = read_key_values(keys.path);
-    if (const auto slot = raw.find("tag." + hex32_text(*tag) + ".slot"); slot != raw.end())
-        material.kirk_slot = static_cast<std::uint8_t>(std::strtoul(slot->second.c_str(), nullptr, 16));
+    // The optional slot line, as written in any case.
+    for (const auto &[name, value] : read_key_values(keys.path))
+        if (lower(name) == lower("tag." + hex32_text(*tag) + ".slot"))
+            material.kirk_slot = static_cast<std::uint8_t>(std::strtoul(value.c_str(), nullptr, 16));
     try {
         std::vector<std::uint8_t> elf = install::decrypt_executable(eboot, material);
         check_executable(elf, what + " decrypted");

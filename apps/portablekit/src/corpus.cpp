@@ -351,7 +351,11 @@ CorpusStatus current_status(const GameRecord &game, int opt_level) {
 }
 
 std::optional<ReadyCorpus> ready_corpus(const GameRecord &game) {
+    // PORTABLEKIT_MAX_OPT caps the level loaded, for comparing levels.
+    const char *cap = std::getenv("PORTABLEKIT_MAX_OPT");
+    const int max_level = cap != nullptr && *cap != '\0' ? std::atoi(cap) : 99;
     for (const int level : corpus_levels()) {
+        if (level > max_level) continue;
         if (current_status(game, level).state == CorpusState::Ready)
             return ReadyCorpus{level, corpus_paths(game, level).library};
     }
@@ -359,14 +363,15 @@ std::optional<ReadyCorpus> ready_corpus(const GameRecord &game) {
 }
 
 unsigned default_jobs() {
-    // Each unit takes up to about a gigabyte and a half at -O2 (measured,
-    // docs/DESKTOP_APP.md); leave room for the game and the system.
+    // A unit's compiler peaked at 0.5 GB at -O2 with clang (measured,
+    // docs/DESKTOP_APP.md); allow a gigabyte each, and leave room for the
+    // game and the system. Half the cores, so the game keeps its own.
     const std::uint64_t memory = physical_memory();
-    const std::uint64_t per_job = 2ull << 30;
+    const std::uint64_t per_job = 1ull << 30;
     std::uint64_t by_memory = memory > (3ull << 30) ? (memory - (3ull << 30)) / per_job : 1u;
     if (by_memory < 1u) by_memory = 1u;
     const unsigned cpus = logical_cpus();
-    const unsigned by_cpus = cpus > 2u ? cpus - 1u : 1u;
+    const unsigned by_cpus = cpus >= 2u ? cpus / 2u : 1u;
     return static_cast<unsigned>(std::min<std::uint64_t>(by_memory, by_cpus));
 }
 
@@ -413,15 +418,21 @@ int compile_corpus(const GameRecord &game, const CompileOptions &options) {
     status.message = "Recompiling the game's code to C++";
     publish();
     const auto generate_start = Clock::now();
-    fs::create_directories(paths.generated, ec);
-    const ProcessResult generated = run_process(
-        {path_text(recompiler_path()), path_text(game.data_dir / "EBOOT.ELF"), "--auto", path_text(paths.generated)},
-        paths.log);
+    if (!options.reuse_generated.empty() && fs::is_directory(options.reuse_generated, ec) &&
+        !fs::exists(paths.generated, ec)) {
+        fs::rename(options.reuse_generated, paths.generated, ec);
+    }
+    if (!fs::exists(paths.generated / "generated_registry.cpp", ec)) {
+        fs::create_directories(paths.generated, ec);
+        const ProcessResult generated = run_process(
+            {path_text(recompiler_path()), path_text(game.data_dir / "EBOOT.ELF"), "--auto", path_text(paths.generated)},
+            paths.log);
+        if (!generated.started) return fail(kRecompileFailed, generated.error);
+        if (generated.exit_code != 0)
+            return fail(kRecompileFailed, "The recompiler failed (exit " + std::to_string(generated.exit_code) +
+                                              "); see " + path_text(paths.log) + ".");
+    }
     status.generate_seconds = seconds_since(generate_start);
-    if (!generated.started) return fail(kRecompileFailed, generated.error);
-    if (generated.exit_code != 0)
-        return fail(kRecompileFailed, "The recompiler failed (exit " + std::to_string(generated.exit_code) +
-                                          "); see " + path_text(paths.log) + ".");
     {
         std::ofstream entry(paths.generated / "portablekit_corpus_entry.cpp", std::ios::trunc);
         entry << entry_source(game);
@@ -502,7 +513,7 @@ int compile_corpus(const GameRecord &game, const CompileOptions &options) {
 
     if (!options.keep_intermediates) {
         fs::remove_all(paths.objects, ec);
-        fs::remove_all(paths.generated, ec);
+        if (!options.keep_generated) fs::remove_all(paths.generated, ec);
     }
     status.state = CorpusState::Ready;
     status.pid = 0;

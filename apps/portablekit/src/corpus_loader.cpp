@@ -18,6 +18,8 @@
 #include <cstdio>
 #include <iostream>
 #include <mutex>
+#include <optional>
+#include <thread>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -72,50 +74,67 @@ void *symbol(void *library, const char *name) {
 #endif
 }
 
-// Loads one corpus library and registers its code. Libraries are never
+// A corpus library opened and checked, not yet registered.
+struct OpenedCorpus {
+    int opt_level{};
+    std::filesystem::path library;
+    RegisterFn register_all{};
+};
+
+// Opens one corpus library and checks it is for this build and this game.
+// Safe on any thread: nothing reaches the runtime. Libraries are never
 // unloaded: a replaced corpus's code may still be what a return address points
 // into until the guest leaves it.
-bool load(psprecomp::Runtime &runtime, const ReadyCorpus &corpus) {
+std::optional<OpenedCorpus> open_corpus(const ReadyCorpus &corpus) {
     LoaderState &s = state();
     std::string error;
     void *library = open_library(corpus.library, error);
     if (library == nullptr) {
         std::cerr << "[corpus] cannot load " << corpus.library.string() << ": " << error << "\n";
-        return false;
+        return std::nullopt;
     }
     const auto abi = reinterpret_cast<AbiFn>(symbol(library, "portablekit_corpus_abi"));
     const auto executable = reinterpret_cast<AbiFn>(symbol(library, "portablekit_corpus_executable"));
     const auto register_all = reinterpret_cast<RegisterFn>(symbol(library, "portablekit_corpus_register"));
     if (abi == nullptr || executable == nullptr || register_all == nullptr) {
         std::cerr << "[corpus] " << corpus.library.string() << " is not a corpus library\n";
-        return false;
+        return std::nullopt;
     }
     if (std::string(abi()) != kCorpusAbi) {
         std::cerr << "[corpus] " << corpus.library.string() << " was compiled for another build\n";
-        return false;
+        return std::nullopt;
     }
     if (std::string(executable()) != s.game->executable_sha256) {
         std::cerr << "[corpus] " << corpus.library.string() << " was compiled from another executable\n";
-        return false;
+        return std::nullopt;
     }
+    return OpenedCorpus{corpus.opt_level, corpus.library, register_all};
+}
+
+// Registers an opened corpus's code: at start, or at a dispatch boundary.
+void register_corpus(psprecomp::Runtime &runtime, const OpenedCorpus &corpus) {
+    LoaderState &s = state();
     const auto start = Clock::now();
-    register_all(runtime);
+    corpus.register_all(runtime);
     s.loaded.opt_level = corpus.opt_level;
     s.loaded.register_seconds = std::chrono::duration<double>(Clock::now() - start).count();
     std::cout << "[corpus] loaded -O" << corpus.opt_level << " code from " << corpus.library.string() << " ("
               << runtime.function_count() << " functions, registered in " << s.loaded.register_seconds << " s)"
               << std::endl;
+}
+
+bool load(psprecomp::Runtime &runtime, const ReadyCorpus &corpus) {
+    const auto opened = open_corpus(corpus);
+    if (!opened) return false;
+    register_corpus(runtime, *opened);
     return true;
 }
 
-// The best corpus a compile has finished since we last looked, if better than
-// the one loaded.
-std::optional<ReadyCorpus> newer_corpus() {
-    LoaderState &s = state();
-    const std::optional<ReadyCorpus> ready = ready_corpus(*s.game);
-    if (ready && ready->opt_level > s.loaded.opt_level) return ready;
-    return std::nullopt;
-}
+// Filled by the watcher thread, taken at a dispatch boundary.
+std::mutex g_pending_lock;
+std::optional<OpenedCorpus> g_pending;
+std::atomic<bool> g_pending_ready{false};
+std::atomic<int> g_opened_level{-1};
 
 void refresh_line() {
     LoaderState &s = state();
@@ -152,16 +171,48 @@ void refresh_line() {
 // here makes the very next dispatch use it.
 void heartbeat(std::uint64_t, std::uint32_t) {
     LoaderState &s = state();
+    // Opening a library of hundreds of megabytes takes seconds (measured: a
+    // 4.4 s frame when it was done here), so the watcher thread opens it and
+    // this only registers it.
+    if (g_pending_ready.load(std::memory_order_acquire) && s.runtime != nullptr) {
+        std::optional<OpenedCorpus> corpus;
+        {
+            const std::lock_guard<std::mutex> guard(g_pending_lock);
+            corpus = std::move(g_pending);
+            g_pending.reset();
+            g_pending_ready = false;
+        }
+        if (corpus && corpus->opt_level > s.loaded.opt_level) {
+            register_corpus(*s.runtime, *corpus);
+            ++s.loaded.switches;
+            s.switched_at = Clock::now();
+        }
+    }
     const auto now = Clock::now();
     if (now - s.last_check < std::chrono::seconds(1)) return;
     s.last_check = now;
-    if (const auto corpus = newer_corpus(); corpus && s.runtime != nullptr) {
-        if (load(*s.runtime, *corpus)) {
-            ++s.loaded.switches;
-            s.switched_at = now;
-        }
-    }
     refresh_line();
+}
+
+// Looks at the cache once a second and opens a better corpus when a compile
+// has finished one.
+void watch() {
+    LoaderState &s = state();
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        if (g_pending_ready.load(std::memory_order_acquire)) continue;
+        const std::optional<ReadyCorpus> ready = ready_corpus(*s.game);
+        if (!ready || ready->opt_level <= g_opened_level.load()) continue;
+        if (auto opened = open_corpus(*ready)) {
+            g_opened_level = opened->opt_level;
+            const std::lock_guard<std::mutex> guard(g_pending_lock);
+            g_pending = std::move(opened);
+            g_pending_ready.store(true, std::memory_order_release);
+        } else {
+            g_opened_level = ready->opt_level;  // do not try a broken library again
+        }
+        if (g_opened_level >= corpus_levels().front()) return;
+    }
 }
 
 #if defined(PORTABLEKIT_HAS_RENDERER)
@@ -225,7 +276,9 @@ void register_generated_functions(Runtime &runtime) {
     }
     if (const auto corpus = ready_corpus(*s.game)) (void)load(runtime, *corpus);
     if (!s.choice.watch || s.loaded.opt_level >= corpus_levels().front()) return;
+    g_opened_level = s.loaded.opt_level;
     refresh_line();
+    std::thread(&watch).detach();
     // Checked every few thousand dispatches, which is many times a second
     // whether the interpreter or compiled code runs; heartbeat() itself looks
     // at the cache at most once a second.

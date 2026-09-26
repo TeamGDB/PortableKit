@@ -84,6 +84,10 @@ struct CompileOptions {
     int opt_level{1};
     unsigned jobs{};              // 0: from memory and cores
     bool keep_intermediates{};    // keep generated/ and objects/
+    bool keep_generated{};        // keep generated/ for the next level
+    // generated/ of another level to take instead of running the recompiler:
+    // the C++ does not depend on the level.
+    std::filesystem::path reuse_generated;
     std::function<void(const CorpusStatus &)> progress;
 };
 
