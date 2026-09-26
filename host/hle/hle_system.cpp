@@ -213,6 +213,10 @@ void register_platform(HleRegistrar &hle) {
     hle.add("sceUtility", "sceUtilityLoadModule", success);
     // The dialogs themselves live in hle_utility.cpp.
     hle.add("sceUtility", "sceUtilityUnloadModule", success);
+    // The audio and video modules (sceUtilityLoadAvModule(id)): the codecs
+    // are the host's, always there.
+    hle.add("sceUtility", "sceUtilityLoadAvModule", success);
+    hle.add("sceUtility", "sceUtilityUnloadAvModule", success);
 }
 
 } // namespace

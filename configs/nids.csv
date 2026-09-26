@@ -307,6 +307,7 @@ sceUmdUser,0x6AF9B50A,sceUmdCancelWaitDriveStat
 sceUtility,0x180F7B62,sceUtilityGamedataInstallAbort
 sceUtility,0x24AC31EB,sceUtilityGamedataInstallInitStart
 sceUtility,0x2A2B3DE0,sceUtilityLoadModule
+sceUtility,0xC629AF26,sceUtilityLoadAvModule
 sceUtility,0x2AD8E239,sceUtilityMsgDialogInitStart
 sceUtility,0x32E32DCB,sceUtilityGamedataInstallShutdownStart
 sceUtility,0x34B78343,sceUtilityGetSystemParamString
@@ -326,6 +327,7 @@ sceUtility,0xA5DA2406,sceUtilityGetSystemParamInt
 sceUtility,0xB57E95D9,sceUtilityGamedataInstallGetStatus
 sceUtility,0xD4B95FFB,sceUtilitySavedataUpdate
 sceUtility,0xE49BFE92,sceUtilityUnloadModule
+sceUtility,0xF7D8D092,sceUtilityUnloadAvModule
 sceUtility,0xF3F76017,sceUtilityOskGetStatus
 sceUtility,0xF6269B82,sceUtilityOskInitStart
 sceUtility,0xF88155F6,sceUtilityNetconfShutdownStart
@@ -410,6 +412,7 @@ ThreadManForUser,0xE7282CB6,sceKernelAllocateFplCB
 ThreadManForUser,0xED1410E0,sceKernelDeleteFpl
 ThreadManForUser,0xDB738F35,sceKernelGetSystemTime
 ThreadManForUser,0xE1619D7C,sceKernelSysClock2USecWide
+ThreadManForUser,0xBA6B92E2,sceKernelSysClock2USec
 ThreadManForUser,0xC8CD158C,sceKernelUSec2SysClockWide
 ThreadManForUser,0xE81CAF8F,sceKernelCreateCallback
 ThreadManForUser,0xE9B3061E,sceKernelSendMbx

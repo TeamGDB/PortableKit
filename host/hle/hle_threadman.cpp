@@ -172,6 +172,17 @@ void register_time(HleRegistrar &hle) {
     hle.add("ThreadManForUser", "sceKernelGetSystemTimeLow", [](Runtime &, AllegrexContext &ctx) {
         kernel().finish(ctx, static_cast<std::uint32_t>(kernel().now_us()));
     });
+    // (SceKernelSysClock *clock, seconds *, microseconds *): the clock in
+    // memory, split.
+    hle.add("ThreadManForUser", "sceKernelSysClock2USec", [](Runtime &rt, AllegrexContext &ctx) {
+        auto &memory = rt.memory();
+        const std::uint32_t clock_address = arg(ctx, 0);
+        const std::uint64_t clock = static_cast<std::uint64_t>(memory.load32(clock_address)) |
+                                    (static_cast<std::uint64_t>(memory.load32(clock_address + 4u)) << 32u);
+        if (arg(ctx, 1) != 0u) memory.store32(arg(ctx, 1), static_cast<std::uint32_t>(clock / 1'000'000u));
+        if (arg(ctx, 2) != 0u) memory.store32(arg(ctx, 2), static_cast<std::uint32_t>(clock % 1'000'000u));
+        kernel().finish(ctx, 0u);
+    });
     // The system clock counts microseconds, so the conversion is the value.
     hle.add("ThreadManForUser", "sceKernelUSec2SysClockWide", [](Runtime &, AllegrexContext &ctx) {
         kernel().finish64(ctx, arg(ctx, 0));

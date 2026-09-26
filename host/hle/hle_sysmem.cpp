@@ -88,6 +88,7 @@ void register_sysmem(HleRegistrar &hle) {
     const auto success = [](Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, 0u); };
     hle.add("SysMemUserForUser", "sceKernelSetCompilerVersion", success);
     hle.add("SysMemUserForUser", "sceKernelSetCompiledSdkVersion603_605", success);
+    hle.add("SysMemUserForUser", "sceKernelSetCompiledSdkVersion", success);
     hle.add("SysMemUserForUser", "sceKernelPrintf", [](Runtime &rt, AllegrexContext &ctx) {
         std::cerr << "[guest] " << format_guest(rt.memory(), ctx, read_cstring(rt.memory(), arg(ctx, 0), 1024u));
         kernel().finish(ctx, 0u);

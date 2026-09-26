@@ -2,6 +2,7 @@
 // (including raw "sce_lbn" sector files) and a host directory for ms0:.
 #include "../profile.hpp"
 #include "hle_common.hpp"
+#include "install/user_data.hpp"
 #include "kernel/iso_image.hpp"
 
 #include "psprecomp/common.hpp"
@@ -81,6 +82,16 @@ struct OpenFile {
     // read from them is done by the time a game could look. A handle whose
     // asynchronous open failed, or that sceIoCloseAsync closed, lives until
     // its result is collected, and no longer.
+    // A directory's entries, read at sceIoDopen and handed out one at a time
+    // by sceIoDread.
+    struct DirectoryEntry {
+        std::string name;
+        bool directory{};
+        std::uint64_t size{};
+        std::uint32_t lba{};
+    };
+    std::vector<DirectoryEntry> entries;
+    std::size_t next_entry{};
     std::optional<std::int64_t> async_result;
     bool release_after_async{};
     SceUID async_callback{};
@@ -605,9 +616,54 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
         OpenFile file;
         file.kind = OpenFile::Kind::Directory;
         file.path = path;
+        // "." and ".." first in a memory stick folder, as FAT has them (not
+        // at its root). The disc lists none: Vice City Stories walks
+        // PSP_GAME recursively and descends into every folder it is given,
+        // "." included.
+        const bool root = split.path.empty();
+        if (!root && split.device == Device::MemoryStick) {
+            file.entries.push_back({".", true, 0u, 0u});
+            file.entries.push_back({"..", true, 0u, 0u});
+        }
+        if (split.device == Device::Disc) {
+            for (const std::string &name : io().disc->list(split.path)) {
+                const auto entry = io().disc->find(root ? name : split.path + "/" + name);
+                if (entry) file.entries.push_back({name, entry->directory, entry->size, entry->lba});
+            }
+        } else {
+            std::error_code ec;
+            for (const auto &entry : std::filesystem::directory_iterator(host_path(split.path), ec)) {
+                std::error_code size_ec;
+                const bool directory = entry.is_directory(size_ec);
+                file.entries.push_back({install::path_to_utf8(entry.path().filename()), directory,
+                                        directory ? 0u : entry.file_size(size_ec), 0u});
+            }
+        }
         const std::uint32_t fd = io().next_fd++;
         io().files.emplace(fd, std::move(file));
         kernel().finish(ctx, fd);
+    });
+    // SceIoDirent: a SceIoStat (88 bytes), then the name (256), then d_private.
+    // 1 for an entry, 0 past the last.
+    hle.add("IoFileMgrForUser", "sceIoDread", [](Runtime &rt, AllegrexContext &ctx) {
+        const auto found = io().files.find(arg(ctx, 0));
+        if (found == io().files.end() || found->second.kind != OpenFile::Kind::Directory) {
+            kernel().finish(ctx, io_error::kBadFileDescriptor);
+            return;
+        }
+        OpenFile &directory = found->second;
+        if (directory.next_entry >= directory.entries.size()) {
+            kernel().finish(ctx, 0u);
+            return;
+        }
+        const OpenFile::DirectoryEntry &entry = directory.entries[directory.next_entry++];
+        auto &memory = rt.memory();
+        const std::uint32_t dirent = arg(ctx, 1);
+        write_stat(memory, dirent, entry.directory, entry.size, entry.lba);
+        for (std::uint32_t i = 0; i < 256u; ++i)
+            memory.store8(dirent + 88u + i, i < entry.name.size() ? static_cast<std::uint8_t>(entry.name[i]) : 0u);
+        if (trace_io()) std::cerr << "[io] dread " << directory.path << " -> " << entry.name << "\n";
+        kernel().finish(ctx, 1u);
     });
     hle.add("IoFileMgrForUser", "sceIoDclose", [](Runtime &, AllegrexContext &ctx) {
         kernel().finish(ctx, io().files.erase(arg(ctx, 0)) != 0u ? 0u : io_error::kBadFileDescriptor);
@@ -787,6 +843,10 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
     });
     // Waiting for the drive to reach a state it is already in returns at once,
     // which is every state this host has.
+    // 1 when a disc is in the drive.
+    hle.add("sceUmdUser", "sceUmdCheckMedium", [](Runtime &, AllegrexContext &ctx) {
+        kernel().finish(ctx, io().disc ? 1u : 0u);
+    });
     const auto wait_drive = [](Runtime &, AllegrexContext &ctx) {
         kernel().finish(ctx, (drive_status() & arg(ctx, 0)) != 0u ? 0u : error::kWaitTimeout);
     };
