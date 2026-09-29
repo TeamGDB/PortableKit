@@ -586,9 +586,12 @@ void Menu::controls() {
         info_row("Connected", pad == nullptr ? "No gamepad; the keyboard and mouse drive the game"
                                              : (name != nullptr ? name : "Gamepad"));
     }
-    if (choice_row("Confirm button", s.confirm_south ? "Bottom (Western)" : "Right, ○ (Japanese)",
-                   options_for("input.confirm", "Which face button confirms, in the game and in this menu. The "
-                                                "game's prompts show ○ to confirm and × to go back."))) {
+    const bool cross_confirms = portablekit::game().confirm_button == 1u;
+    if (choice_row("Confirm button", s.confirm_south ? "Bottom (Western)" : "Right (Japanese)",
+                   options_for("input.confirm",
+                               std::string("Which face button confirms, in the game and in this menu. The game's "
+                                           "prompts show ") +
+                                   (cross_confirms ? "× to confirm and ○ to go back." : "○ to confirm and × to go back.")))) {
         s.confirm_south = !s.confirm_south;
         settings::save();
     }
@@ -788,7 +791,12 @@ void Menu::controls() {
         const RowOptions o{false, {},
                            "Press a key or a mouse button to add it, or one it has already to remove it; Esc "
                            "cancels. A key taken from another control leaves that one."};
-        if (value_row(input::info(action).label, value, o) && !binding_) {
+        std::string label = input::info(action).label;
+        // The game's confirm and back buttons, as the console says.
+        const bool cross_confirms = portablekit::game().confirm_button == 1u;
+        if (action == input::Action::Circle) label += cross_confirms ? "  (back)" : "  (confirm)";
+        if (action == input::Action::Cross) label += cross_confirms ? "  (confirm)" : "  (back)";
+        if (value_row(label.c_str(), value, o) && !binding_) {
             binding_ = action;
             layer.begin_binding_capture();
         }
