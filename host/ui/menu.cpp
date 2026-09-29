@@ -22,6 +22,7 @@
 #include "gpu/vulkan_renderer.hpp"
 #include "profile.hpp"
 #include "input/bindings.hpp"
+#include "input/motion.hpp"
 #include "install/installer.hpp"
 #include "install/user_data.hpp"
 #include "perf/frame_stats.hpp"
@@ -118,6 +119,7 @@ private:
     void video();
     void audio();
     void controls();
+    void tilt_controls();
     void network();
     void system();
     bool confirm_dialog();
@@ -576,6 +578,102 @@ bool address_character(char32_t c) {
            c == U':' || c == U'-' || c == U'[' || c == U']';
 }
 
+// Only for a game that tilts (GameProfile::tilt).
+void Menu::tilt_controls() {
+    const TiltControls *tilt = portablekit::game().tilt;
+    if (tilt == nullptr) return;
+    settings::Settings &s = settings::current();
+    section("Tilt controls");
+    {
+        std::string description = "Tilt the gamepad, or the phone itself, to tilt the game: its motion sensors press "
+                                  "the tilt buttons, and the buttons keep working. It needs a gamepad with a "
+                                  "gyroscope (DualShock 4, DualSense, Switch Pro, a Steam Deck with Steam Input off "
+                                  "for this game) or a phone.";
+        if (tilt->note != nullptr) description += std::string(" ") + tilt->note;
+        if (toggle_row("Tilt with motion", s.tilt, options_for("input.tilt", description))) {
+            s.tilt = !s.tilt;
+            settings::save();
+        }
+    }
+    const auto off = [&](RowOptions options) {
+        if (!s.tilt && !options.disabled) {
+            options.disabled = true;
+            options.note = "Tilt with motion is off";
+        }
+        return options;
+    };
+    {
+        static const char *const kModes[] = {"Angle", "Angle + level horizon", "Rate"};
+        const int current = static_cast<int>(s.tilt_mode);
+        if (const int delta = choice_row(
+                "Gyro mode", kModes[current],
+                off(options_for("input.tilt_mode",
+                                "Angle: how far the device is tilted from where it was re-centred tilts the game; "
+                                "the picture stays as it is. Angle + level horizon (experimental): the same, and "
+                                "the picture is turned against the device and zoomed a little so the game's "
+                                "horizon stays level with the real one; turning pictures can cause motion "
+                                "sickness. Rate: turning the device tilts, and the tilt stays when the turning "
+                                "stops, so the device can go back to a comfortable hold.")))) {
+            s.tilt_mode = static_cast<input::tilt::Mode>(cycle(current, delta, 3));
+            settings::save();
+        }
+    }
+    int full = static_cast<int>(std::lround(s.tilt_full));
+    if (slider_row("Full tilt at", full, static_cast<int>(input::tilt::kMinFullTilt),
+                   static_cast<int>(input::tilt::kMaxFullTilt), 1, "%d deg",
+                   off(options_for("input.tilt_full", "Sensitivity: how far the device is tilted for the game's "
+                                                      "full tilt. Less is more sensitive.")))) {
+        s.tilt_full = static_cast<float>(full);
+        s.tilt_dead_zone = std::min(s.tilt_dead_zone, s.tilt_full - 1.0f);
+        settings::save();
+    }
+    int dead = static_cast<int>(std::lround(s.tilt_dead_zone));
+    if (slider_row("Tilt dead zone", dead, static_cast<int>(input::tilt::kMinDeadZone),
+                   static_cast<int>(input::tilt::kMaxDeadZone), 1, "%d deg",
+                   off(options_for("input.tilt_dead_zone", "How far the device is tilted before anything happens, "
+                                                           "so a steady hand does not tilt the game.")))) {
+        s.tilt_dead_zone = static_cast<float>(dead);
+        settings::save();
+    }
+    if (toggle_row("Invert tilt", s.tilt_invert,
+                   off(options_for("input.tilt_invert", "Tilting the device left tilts the game right.")))) {
+        s.tilt_invert = !s.tilt_invert;
+        settings::save();
+    }
+    {
+        RowOptions o = off(options_for("input.tilt_level_limit",
+                                       "How far the picture may turn to keep the horizon level. The picture is "
+                                       "zoomed as it turns so no corner is left empty; a larger limit crops more."));
+        if (s.tilt_mode != input::tilt::Mode::AngleLevel && !o.disabled) {
+            o.disabled = true;
+            o.note = "Only for Angle + level horizon";
+        }
+        int limit = static_cast<int>(std::lround(s.tilt_level_limit));
+        if (slider_row("Level horizon limit", limit, static_cast<int>(input::tilt::kMinLevelLimit),
+                       static_cast<int>(input::tilt::kMaxLevelLimit), 1, "%d deg", o)) {
+            s.tilt_level_limit = static_cast<float>(limit);
+            settings::save();
+        }
+    }
+    if (button_row("Re-centre tilt",
+                   off({false, {}, "Makes however the device is held now the level position. This also happens "
+                                   "when the game starts, when this menu closes, and with R3 on a gamepad."}))) {
+        input::motion::recenter();
+    }
+    if (s.tilt) {
+        // Read here too: the game's input is off while the menu is open, and
+        // the row below is how a player sees the sensors work.
+        (void)input::motion::sample(renderer().gamepad(), renderer().window(), false);
+        info_row("Motion from", input::motion::source());
+        float roll = 0.0f;
+        if (input::motion::reading(roll)) {
+            char text[32];
+            std::snprintf(text, sizeof(text), "%+.1f deg", static_cast<double>(roll));
+            info_row("Tilted now", text);
+        }
+    }
+}
+
 void Menu::controls() {
     settings::Settings &s = settings::current();
     section("Gamepad");
@@ -708,6 +806,8 @@ void Menu::controls() {
         }
     }
 
+    tilt_controls();
+
     section(game().player_name_label);
     {
         const bool keyboard = s.name_entry == settings::NameEntry::Keyboard;
@@ -825,6 +925,12 @@ void Menu::controls() {
         restore("input.touch_opacity", s.touch_opacity, d.touch_opacity);
         restore("input.touch_size", s.touch_size, d.touch_size);
         restore("input.touch_camera_speed", s.touch_camera_speed, d.touch_camera_speed);
+        restore("input.tilt", s.tilt, d.tilt);
+        restore("input.tilt_mode", s.tilt_mode, d.tilt_mode);
+        restore("input.tilt_full", s.tilt_full, d.tilt_full);
+        restore("input.tilt_dead_zone", s.tilt_dead_zone, d.tilt_dead_zone);
+        restore("input.tilt_invert", s.tilt_invert, d.tilt_invert);
+        restore("input.tilt_level_limit", s.tilt_level_limit, d.tilt_level_limit);
         s.bindings = d.bindings;
         settings::save();
     }

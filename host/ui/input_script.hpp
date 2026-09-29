@@ -18,6 +18,13 @@
 //                     leftstick, rightstick, leftshoulder, dpup, dpdown, ...)
 //   axis NAME VALUE   hold an axis of the virtual gamepad at VALUE, -1 to 1
 //                     (leftx, lefty, rightx, righty, lefttrigger, righttrigger)
+//   tilt ROLL [PITCH] hold the virtual gamepad's accelerometer where it reads
+//                     with the pad rolled ROLL degrees (right side down
+//                     positive) and pitched PITCH degrees back from flat, 0 by
+//                     default: tilt controls without a pad that has sensors
+//   gyro X Y Z        hold its gyroscope at X, Y, Z degrees a second about the
+//                     screen's axes (right, up, towards the player); a turn
+//                     clockwise as the player sees it is a negative Z
 //   text STRING       type text
 //   drop PATH         drop a file onto the window
 //   shot NAME         write the window image to <prefix>_SCREENSHOT_DIR/NAME.bmp
