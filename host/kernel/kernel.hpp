@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <iosfwd>
 #include <map>
 #include <memory>
 #include <optional>
@@ -228,6 +229,9 @@ public:
     // after the game was paused, so it resumes at normal speed rather than
     // racing to make up the pause.
     void resync_real_time() noexcept { pacing_started_ = false; }
+    // Every thread, what it waits for and where, the objects waited on, the
+    // clock and the pacing, one line each (kernel/stall_watchdog.hpp).
+    void dump_state(std::ostream &out) const;
     // The moment of real time the hold to real time maps `virtual_us` of
     // emulated time to; empty while emulated time is not held to real time,
     // a load running fast included (kernel/fast_loading.hpp).
