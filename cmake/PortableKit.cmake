@@ -88,6 +88,7 @@ set(PORTABLEKIT_RENDERER_SOURCES
     host/ui/file_browser.cpp
     host/ui/font_menu.cpp
     host/input/motion.cpp
+    host/input/steam_deck_imu.cpp
     host/ui/input_script.cpp
     host/ui/layer.cpp
     host/ui/menu.cpp

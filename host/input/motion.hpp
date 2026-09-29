@@ -8,7 +8,8 @@ struct SDL_Window;
 
 // Motion sensors for tilt controls (input/tilt.hpp), through SDL: the
 // gyroscope and accelerometer of the gamepad in use (DualShock 4, DualSense,
-// Switch Pro, a Steam Deck seen through SDL's own driver), or else the
+// Switch Pro, a Steam Deck seen through SDL's own driver), else a Steam
+// Deck's read beside Steam Input (input/steam_deck_imu.hpp), or else the
 // device's own (a phone or a tablet). Only for a game with GameProfile::tilt,
 // and only while the player has tilt controls on; otherwise the sensors stay
 // closed.
