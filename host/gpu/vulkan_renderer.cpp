@@ -413,6 +413,10 @@ struct PadTuning {
     bool trace{false};
 };
 
+// The SceCtrlButtons bit the game confirms with: the console's confirm
+// button, as sceUtilityGetSystemParamInt reports it (0 circle, 1 cross).
+std::uint32_t confirm_button_bit() { return portablekit::game().confirm_button == 1u ? 0x4000u : 0x2000u; }
+
 // Read on every poll, so the in-game menu's changes apply at once.
 PadTuning pad_tuning() {
     static const bool trace = portablekit::env("TRACE_PAD") != nullptr;
@@ -427,8 +431,7 @@ PadTuning pad_tuning() {
     value.right_stick_mode = player.right_stick;
     value.invert_x = player.invert_camera_x;
     value.invert_y = player.invert_camera_y;
-    // A PlayStation pad already carries the PSP's own face buttons, so the
-    // positional mapping puts confirm on circle where the prompts want it.
+    // Which face button presses the game's confirm button; see read_gamepad.
     value.confirm_south = player.confirm_south;
     value.trace = trace;
     return value;
@@ -452,10 +455,15 @@ void read_gamepad(SDL_Gamepad *device, PadState &pad, int &analog_x, int &analog
     held(SDL_GAMEPAD_BUTTON_BACK, 0x0001u);
     held(SDL_GAMEPAD_BUTTON_NORTH, 0x1000u);
     held(SDL_GAMEPAD_BUTTON_WEST, 0x8000u);
-    // The game prompts "circle Enter / cross Back", and on a PlayStation pad
-    // those are the same two buttons in the same two places.
-    held(SDL_GAMEPAD_BUTTON_SOUTH, tuning.confirm_south ? 0x2000u : 0x4000u);
-    held(SDL_GAMEPAD_BUTTON_EAST, tuning.confirm_south ? 0x4000u : 0x2000u);
+    // The game confirms with the button the console's setting names (circle
+    // on a Japanese console, cross elsewhere) and goes back with the other.
+    // The player's setting says which of south and east confirms, so on a
+    // PlayStation pad the buttons land where the game's prompts show them
+    // whenever the setting matches the console.
+    const std::uint32_t confirm = confirm_button_bit();
+    const std::uint32_t back = confirm ^ 0x6000u;
+    held(SDL_GAMEPAD_BUTTON_SOUTH, tuning.confirm_south ? confirm : back);
+    held(SDL_GAMEPAD_BUTTON_EAST, tuning.confirm_south ? back : confirm);
 
     // The PSP triggers are digital, and games hold L or R for long stretches,
     // so the analog triggers press the same bits as the shoulders.
@@ -1673,8 +1681,9 @@ struct VulkanRenderer::Impl {
         gamepad_id = id;
         const char *name = SDL_GetGamepadName(device);
         const PadTuning tuning = pad_tuning();
-        std::cout << "[pad] " << (name != nullptr ? name : "gamepad") << " connected; confirm on "
-                  << (tuning.confirm_south ? "the south button" : "circle") << ", right stick "
+        std::cout << "[pad] " << (name != nullptr ? name : "gamepad") << " connected; confirm ("
+                  << (confirm_button_bit() == 0x4000u ? "cross" : "circle") << ") on the "
+                  << (tuning.confirm_south ? "south" : "east") << " button, right stick "
                   << (tuning.right_stick_mode == settings::RightStick::DPad     ? "as D-pad"
                       : tuning.right_stick_mode == settings::RightStick::Camera ? "as camera"
                                                                                 : "off")
@@ -4749,7 +4758,7 @@ void VulkanRenderer::Impl::sample_pad(bool focused) {
     }();
     if (auto_confirm != 0u) {
         const std::uint64_t phase = impl_->frames % auto_confirm;
-        if (phase < auto_confirm / 8u) pad.buttons |= 0x2000u;  // circle
+        if (phase < auto_confirm / 8u) pad.buttons |= confirm_button_bit();
     }
     // Buttons held when the game got its input back stay hidden from it until
     // they are released.

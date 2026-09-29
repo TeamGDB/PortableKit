@@ -207,7 +207,7 @@ void sort_steps(State &s) {
 }
 
 // Reads the lines appended to the live file since the last call. Their frames
-// count from now, so a line `30:pad a` presses ○ half a second after it is read.
+// count from now, so a line `30:pad a` presses the south button half a second after it is read.
 void read_live(State &s) {
     std::ifstream file(s.live_path, std::ios::binary);
     if (!file) return;

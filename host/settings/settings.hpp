@@ -64,7 +64,10 @@ struct Settings {
     bool mute{};
 
     // Controls
-    bool confirm_south{};              // confirm (circle) on the south face button
+    // The game's confirm button on the south face button rather than the
+    // east one. The default follows the console the profile describes: south
+    // where cross confirms, east where circle does.
+    bool confirm_south{};
     float dead_zone{0.15f};
     float trigger{0.25f};
     // What LT/RT (L2/R2) press past the trigger point: 0 is L and R like the

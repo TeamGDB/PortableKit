@@ -461,6 +461,9 @@ std::string game_default_name() {
 
 Settings defaults_for(Platform platform) {
     Settings values{};
+    // Confirm where a console of the game's region has it: cross, the south
+    // button, outside Japan; circle, the east button, in Japan.
+    values.confirm_south = game().confirm_button == 1u;
     if (platform == Platform::Android) {
         values.aspect = Aspect::Fill;
         values.fullscreen = true;
