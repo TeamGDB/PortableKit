@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 
 namespace portablekit {
 class Kernel;
@@ -30,5 +31,11 @@ void note_menu(bool open);
 void note_pad(std::uint32_t buttons);
 // The scheduler found nothing to run. On the main thread.
 void idle(const Kernel &kernel);
+
+// Called from idle() about ten times a second while a stall lasts: the
+// window's events are otherwise only read when the game flips, so a stalled
+// game would ignore closing the window and SIGTERM (which SDL turns into a
+// quit event). Set once by whoever owns the window.
+void set_stalled_pump(std::function<void()> pump);
 
 } // namespace portablekit::stall_watchdog

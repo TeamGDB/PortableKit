@@ -271,6 +271,17 @@ void present_frame(Runtime &rt) {
         return;
     }
     gpu::VulkanRenderer &renderer = *media().renderer;
+    static const bool pump_set = [&rt] {
+        // A stalled game still answers closing the window and SIGTERM.
+        stall_watchdog::set_stalled_pump([&rt] {
+            if (media().renderer && !media().renderer->pump_events()) {
+                std::cerr << "[stall] the window was closed while the game stalled; stopping" << std::endl;
+                rt.stop("window closed");
+            }
+        });
+        return true;
+    }();
+    (void)pump_set;
     // The guest passes a VRAM offset when the high byte is zero.
     const std::uint32_t address = (media().display.framebuffer & 0xFF000000u) == 0u
                                       ? (media().display.framebuffer | 0x04000000u)

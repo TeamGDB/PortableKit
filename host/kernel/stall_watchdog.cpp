@@ -50,6 +50,8 @@ struct State {
     std::atomic<std::uint64_t> pads{0};
     std::atomic<std::uint32_t> last_pad{0xFFFFFFFFu};
     // Main thread only.
+    std::function<void()> pump;
+    std::int64_t pumped_ms{0};
     std::int64_t dumped_ms{0};
     std::uint64_t dumped_frames{~0ull};
     // The watchdog thread's.
@@ -136,6 +138,8 @@ void note_pad(std::uint32_t buttons) {
     s.pads.store(index + 1u);
 }
 
+void set_stalled_pump(std::function<void()> pump) { state().pump = std::move(pump); }
+
 void idle(const Kernel &kernel) {
     if (!enabled()) return;
     State &s = state();
@@ -143,6 +147,10 @@ void idle(const Kernel &kernel) {
     s.last_idle_ms.store(now);
     const std::int64_t stalled = stalled_ms(s, now);
     if (stalled < stall_limit_ms()) return;
+    if (s.pump && now - s.pumped_ms >= 100) {
+        s.pumped_ms = now;
+        s.pump();
+    }
     const std::uint64_t frames = s.frames.load();
     if (frames == s.dumped_frames && now - s.dumped_ms < kRepeatMs) return;
     s.dumped_frames = frames;
