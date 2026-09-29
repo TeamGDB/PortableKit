@@ -46,6 +46,7 @@ set(PORTABLEKIT_HOST_SOURCES
     host/kernel/kernel.cpp
     host/kernel/load_trace.cpp
     host/kernel/fast_loading.cpp
+    host/kernel/stall_watchdog.cpp
     host/kernel/load_detector.cpp
     host/kernel/iso_image.cpp
     host/hle/hle_common.cpp

@@ -4,6 +4,7 @@
 // mixing themselves live under gpu/ and audio/.
 #include "../profile.hpp"
 #include "hle_common.hpp"
+#include "kernel/stall_watchdog.hpp"
 #include "kernel/fast_loading.hpp"
 #include "kernel/load_trace.hpp"
 
@@ -349,7 +350,9 @@ void present_frame(Runtime &rt) {
             // still while it runs in here, and the device stops playing.
             renderer.pause_interpolation();
             audio::AudioSink::instance().set_paused(true);
+            stall_watchdog::note_menu(true);
             const bool keep_playing = ui::run_menu();
+            stall_watchdog::note_menu(false);
             audio::AudioSink::instance().set_paused(false);
             // Resume at normal speed rather than racing to make up the pause,
             // and keep the pause out of the frame statistics.
@@ -387,6 +390,7 @@ CtrlSample sample_ctrl() {
         if (!at_flip) media().renderer->sample_pad();
         const gpu::PadState pad = media().renderer->pad();
         sample.buttons = pad.buttons;
+        stall_watchdog::note_pad(sample.buttons);
         fast_loading::note_buttons(sample.buttons != 0u);
         sample.analog_x = pad.analog_x;
         sample.analog_y = pad.analog_y;
@@ -545,6 +549,7 @@ void register_display_ctrl(HleRegistrar &hle) {
         media().display.buffer_width = arg(ctx, 1);
         media().display.pixel_format = arg(ctx, 2);
         trace_pacing("sceDisplaySetFrameBuf");
+        stall_watchdog::note_frame();
         present_frame(rt);
         kernel().finish(ctx, 0u);
     });
