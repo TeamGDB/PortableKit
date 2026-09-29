@@ -348,6 +348,19 @@ std::array<float, 16> multiply(const std::array<float, 16> &a, const std::array<
     return result;
 }
 
+// How far a projection turns the picture, in degrees anticlockwise as clip
+// space (y up) sees it. A projection that turns a 2D world is a scale times a
+// turn: its first two rows are (sx cos, -sx sin) and (sy sin, sy cos), each
+// row's length is its scale, so dividing it out leaves the turn whatever the
+// aspect. Measured on LocoRoco 2, which turns its world by up to 30 degrees
+// this way while L or R is held.
+float projection_roll(const std::array<float, 16> &m) {
+    const float sx = std::hypot(m[0], m[4]);
+    const float sy = std::hypot(m[1], m[5]);
+    if (sx <= 0.0f || sy <= 0.0f) return 0.0f;
+    return std::atan2(m[1] / sy, m[0] / sx) * 57.29577951308232f;
+}
+
 bool check(VkResult result, const char *what, std::string &error) {
     if (result == VK_SUCCESS) return true;
     error = std::string(what) + " failed with VkResult " + std::to_string(static_cast<int>(result));
@@ -1150,6 +1163,10 @@ struct VulkanRenderer::Impl {
     // Per-frame tally, so "no 3D" can be told from "3D drawn somewhere else".
     std::uint32_t frame_through_draws{};
     std::uint32_t frame_transformed_draws{};
+    // The projection's turn in the frame's biggest transformed draw, in
+    // degrees, and that draw's vertices.
+    float frame_roll{};
+    std::uint32_t frame_roll_vertices{};
     std::uint32_t frame_transformed_vertices{};
     std::uint32_t frame_onscreen_vertices{};
     std::uint32_t frame_behind_camera{};
@@ -6018,6 +6035,16 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
         ++impl.frame_through_draws;
     } else {
         ++impl.frame_transformed_draws;
+        {
+            // The game's own turn of its world, from the projection of the
+            // frame's biggest transformed draw (input::motion::set_game_roll).
+            const auto vertices =
+                static_cast<std::uint32_t>(direct ? impl.direct_indices.size() : impl.scratch.size());
+            if (vertices > impl.frame_roll_vertices) {
+                impl.frame_roll_vertices = vertices;
+                impl.frame_roll = projection_roll(call.projection);
+            }
+        }
         // Only <prefix>_TRACE_3D reads it: a map insert per draw otherwise.
         if (trace3d) ++impl.frame_transformed_targets[call.target.color_address];
         if (watch_camera) {
@@ -7594,6 +7621,9 @@ bool VulkanRenderer::present(std::uint32_t display_address,
         }
     }
     impl.frame_views.clear();
+    input::motion::set_game_roll(impl.frame_roll_vertices != 0u, impl.frame_roll);
+    impl.frame_roll_vertices = 0u;
+    impl.frame_roll = 0.0f;
     impl.frame_through_draws = 0u;
     impl.frame_transformed_draws = 0u;
     impl.frame_transformed_vertices = 0u;

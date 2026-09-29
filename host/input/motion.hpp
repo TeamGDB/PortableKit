@@ -31,8 +31,17 @@ void gamepad_changed(SDL_Gamepad *pad);
 // from the menu, and by the menu's Re-centre.
 void recenter();
 
-// Angle + level horizon: degrees to turn the game's picture anticlockwise so
-// that its horizon stays level with the real one. 0 in every other case.
+// The renderer, once a frame: how far the game turned its own world in the
+// frame just drawn, in degrees anticlockwise (the turn of its projection;
+// false when it drew nothing transformed).
+void set_game_roll(bool valid, float degrees);
+
+// Angle + level horizon: degrees to turn the game's picture anticlockwise.
+// Against the game's own turn of its world, so its ground stays still on the
+// screen and the device held tilted is the tilted world; with
+// <prefix>_TILT_LEVEL_FROM=device, against the device's roll instead, so the
+// game's horizon stays level with the real one. Within the level limit
+// either way. 0 in every other mode and while tilt controls are off.
 [[nodiscard]] float level_degrees();
 
 // For the menu: where the tilt comes from ("DualSense Wireless Controller:

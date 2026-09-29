@@ -610,9 +610,9 @@ void Menu::tilt_controls() {
                 off(options_for("input.tilt_mode",
                                 "Angle: how far the device is tilted from where it was re-centred tilts the game; "
                                 "the picture stays as it is. Angle + level horizon (experimental): the same, and "
-                                "the picture is turned against the device and zoomed a little so the game's "
-                                "horizon stays level with the real one; turning pictures can cause motion "
-                                "sickness. Rate: turning the device tilts, and the tilt stays when the turning "
+                                "the picture is turned back against the game's own tilt and zoomed to fill the "
+                                "screen, so the ground stays still on the screen and the device held tilted is "
+                                "the tilted world; turning pictures can cause motion sickness. Rate: turning the device tilts, and the tilt stays when the turning "
                                 "stops, so the device can go back to a comfortable hold.")))) {
             s.tilt_mode = static_cast<input::tilt::Mode>(cycle(current, delta, 3));
             settings::save();
@@ -642,8 +642,9 @@ void Menu::tilt_controls() {
     }
     {
         RowOptions o = off(options_for("input.tilt_level_limit",
-                                       "How far the picture may turn to keep the horizon level. The picture is "
-                                       "zoomed as it turns so no corner is left empty; a larger limit crops more."));
+                                       "How far the picture may turn back against the game's tilt; past it the "
+                                       "ground turns on the screen again. The picture is zoomed as it turns so no "
+                                       "corner is left empty; a larger limit crops more."));
         if (s.tilt_mode != input::tilt::Mode::AngleLevel && !o.disabled) {
             o.disabled = true;
             o.note = "Only for Angle + level horizon";
