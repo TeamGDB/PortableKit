@@ -424,6 +424,7 @@ struct PadTuning {
     bool invert_x{};
     bool invert_y{};
     bool confirm_south{};
+    settings::JumpButton jump{settings::JumpButton::Off};
     bool trace{false};
 };
 
@@ -444,6 +445,7 @@ PadTuning pad_tuning() {
     // A PlayStation pad already carries the PSP's own face buttons, so the
     // positional mapping puts confirm on circle where the prompts want it.
     value.confirm_south = player.confirm_south;
+    value.jump = player.jump_button;
     value.trace = trace;
     return value;
 }
@@ -453,9 +455,25 @@ PadTuning pad_tuning() {
 void read_gamepad(SDL_Gamepad *device, PadState &pad, int &analog_x, int &analog_y) {
     const PadTuning tuning = pad_tuning();
     std::uint32_t &buttons = pad.buttons;
+    // A tilting game's jump button (settings::JumpButton) presses both tilt
+    // buttons instead of its own.
+    const TiltControls *const tilt = portablekit::game().tilt;
+    SDL_GamepadButton jump = SDL_GAMEPAD_BUTTON_INVALID;
+    if (tilt != nullptr) {
+        switch (tuning.jump) {
+        case settings::JumpButton::LeftStick: jump = SDL_GAMEPAD_BUTTON_LEFT_STICK; break;
+        case settings::JumpButton::South: jump = SDL_GAMEPAD_BUTTON_SOUTH; break;
+        case settings::JumpButton::East: jump = SDL_GAMEPAD_BUTTON_EAST; break;
+        case settings::JumpButton::West: jump = SDL_GAMEPAD_BUTTON_WEST; break;
+        case settings::JumpButton::North: jump = SDL_GAMEPAD_BUTTON_NORTH; break;
+        case settings::JumpButton::Off: break;
+        }
+    }
     const auto held = [&](SDL_GamepadButton button, std::uint32_t bit) {
+        if (button == jump) return;
         if (SDL_GetGamepadButton(device, button)) buttons |= bit;
     };
+    if (jump != SDL_GAMEPAD_BUTTON_INVALID && SDL_GetGamepadButton(device, jump)) buttons |= tilt->left | tilt->right;
     held(SDL_GAMEPAD_BUTTON_DPAD_UP, 0x0010u);
     held(SDL_GAMEPAD_BUTTON_DPAD_RIGHT, 0x0020u);
     held(SDL_GAMEPAD_BUTTON_DPAD_DOWN, 0x0040u);
@@ -5056,8 +5074,11 @@ void VulkanRenderer::Impl::sample_pad(bool focused) {
     // Tilt controls (input/motion.hpp): the motion sensors press the game's
     // tilt buttons. A tilt button the player presses takes over, so tilting
     // one way while pressing the other shoulder never becomes both at once
-    // (LocoRoco's jump). R3 alone re-centres; L3 with it opens the menu.
+    // (LocoRoco's jump), and both pressed, by the shoulders, the jump button
+    // or the keyboard's Jump, reach the game as both whatever the device's
+    // roll: a jump always wins. R3 alone re-centres; L3 with it opens the menu.
     if (const TiltControls *tilt = portablekit::game().tilt; tilt != nullptr) {
+        if (typed.jump) pad.buttons |= tilt->left | tilt->right;
         SDL_Gamepad *const device = impl_->gamepad;
         const bool recenter = device != nullptr && SDL_GetGamepadButton(device, SDL_GAMEPAD_BUTTON_RIGHT_STICK) &&
                               !SDL_GetGamepadButton(device, SDL_GAMEPAD_BUTTON_LEFT_STICK);

@@ -111,6 +111,11 @@ void test_read() {
     check(pad.camera_x == -127 && pad.camera_y == 127 && pad.buttons == 0u, "camera keys push the second stick");
     held = {from_name("Up"), from_name("Right"), from_name("Enter"), from_name("Backspace")};
     check(read_held().buttons == (0x0010u | 0x0020u | 0x0008u | 0x0001u), "D-pad, START and SELECT");
+    check(d[static_cast<std::size_t>(Action::Jump)][0] == kNone, "Jump is unbound by default");
+    Bindings with_jump = d;
+    with_jump[static_cast<std::size_t>(Action::Jump)] = {from_name("V"), kNone};
+    pad = read(with_jump, [&](Binding b) { return b == from_name("V"); });
+    check(pad.jump && pad.buttons == 0u, "Jump is reported as itself, the tilt buttons are the renderer's to add");
 }
 
 void test_mouse_turn() {

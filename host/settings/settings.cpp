@@ -111,7 +111,14 @@ const Names<PerfDisplay> kPerfDisplays{{{PerfDisplay::Off, "off"},
                                         {PerfDisplay::Log, "log"}}};
 const Names<input::tilt::Mode> kTiltModes{{{input::tilt::Mode::Angle, "angle"},
                                             {input::tilt::Mode::AngleLevel, "level"},
+                                            {input::tilt::Mode::AngleLevel, "horizon"},
                                             {input::tilt::Mode::Rate, "rate"}}};
+const Names<JumpButton> kJumpButtons{{{JumpButton::Off, "off"},
+                                      {JumpButton::LeftStick, "l3"},
+                                      {JumpButton::South, "south"},
+                                      {JumpButton::East, "east"},
+                                      {JumpButton::West, "west"},
+                                      {JumpButton::North, "north"}}};
 const Names<RightStick> kRightSticks{
     {{RightStick::Camera, "camera"}, {RightStick::DPad, "dpad"}, {RightStick::Off, "off"}}};
 // A trigger profile by the key the game gives it, or "standard" for L and R.
@@ -315,7 +322,7 @@ const std::vector<Field> &fields() {
          [](Settings &s, const std::string &t) { return kTiltModes.parse(t, s.tilt_mode); },
          [](const Settings &s) { return kTiltModes.format(s.tilt_mode); },
          [](Settings &s, const char *t) {
-             if (!kTiltModes.parse(t, s.tilt_mode)) std::cerr << "[settings] " << env_name("TILT_MODE") << ": angle, level or rate\n";
+             if (!kTiltModes.parse(t, s.tilt_mode)) std::cerr << "[settings] " << env_name("TILT_MODE") << ": angle, rate, or level (also horizon)\n";
          }},
         {"input.tilt_full", "TILT_FULL",
          [](Settings &s, const std::string &t) {
@@ -334,6 +341,9 @@ const std::vector<Field> &fields() {
              s.tilt_dead_zone = variable_float(t, 4.0f, input::tilt::kMinDeadZone, input::tilt::kMaxDeadZone);
          }},
         BOOL_FIELD("input.tilt_invert", tilt_invert),
+        {"input.jump_button", nullptr,
+         [](Settings &s, const std::string &t) { return kJumpButtons.parse(t, s.jump_button); },
+         [](const Settings &s) { return kJumpButtons.format(s.jump_button); }, nullptr},
         {"input.tilt_level_limit", nullptr,
          [](Settings &s, const std::string &t) {
              return parse_float(t, input::tilt::kMinLevelLimit, input::tilt::kMaxLevelLimit, s.tilt_level_limit);

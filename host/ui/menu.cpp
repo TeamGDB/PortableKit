@@ -603,18 +603,23 @@ void Menu::tilt_controls() {
         return options;
     };
     {
-        static const char *const kModes[] = {"Angle", "Angle + level horizon", "Rate"};
-        const int current = static_cast<int>(s.tilt_mode);
+        // Angle + level horizon is not offered: it did not play well. It is
+        // still honoured when settings.ini or <prefix>_TILT_MODE asks for it
+        // (level or horizon), shown by name, and left for Angle or Rate here.
+        using input::tilt::Mode;
+        static const Mode kOffered[] = {Mode::Angle, Mode::Rate};
+        const int current = s.tilt_mode == Mode::Rate ? 1 : 0;
+        const char *const name = s.tilt_mode == Mode::AngleLevel ? "Angle + level horizon"
+                                 : s.tilt_mode == Mode::Rate     ? "Rate"
+                                                                 : "Angle";
         if (const int delta = choice_row(
-                "Gyro mode", kModes[current],
+                "Gyro mode", name,
                 off(options_for("input.tilt_mode",
-                                "Angle: how far the device is tilted from where it was re-centred tilts the game; "
-                                "the picture stays as it is. Angle + level horizon (experimental): the same, and "
-                                "the picture is turned back against the game's own tilt and zoomed to fill the "
-                                "screen, so the ground stays still on the screen and the device held tilted is "
-                                "the tilted world; turning pictures can cause motion sickness. Rate: turning the device tilts, and the tilt stays when the turning "
-                                "stops, so the device can go back to a comfortable hold.")))) {
-            s.tilt_mode = static_cast<input::tilt::Mode>(cycle(current, delta, 3));
+                                "Angle: how far the device is tilted from where it was re-centred tilts the game. "
+                                "Rate: turning the device tilts, and the tilt stays when the turning stops, so the "
+                                "device can go back to a comfortable hold.")))) {
+            s.tilt_mode = s.tilt_mode == Mode::AngleLevel ? (delta > 0 ? Mode::Rate : Mode::Angle)
+                                                          : kOffered[cycle(current, delta, 2)];
             settings::save();
         }
     }
@@ -641,6 +646,22 @@ void Menu::tilt_controls() {
         settings::save();
     }
     {
+        // Not greyed out with tilt controls off: the button jumps either way.
+        static const char *const kJumpNames[] = {"Off", "L3 (left stick click)", "South face button",
+                                                 "East face button", "West face button", "North face button"};
+        const int current = static_cast<int>(s.jump_button);
+        if (const int delta = choice_row(
+                "Jump button", kJumpNames[current],
+                options_for("input.jump_button",
+                            "One gamepad button that presses L and R together, to jump while one hand holds the "
+                            "device level. Pressing L and R together still jumps, and a jump always wins over the "
+                            "motion. L3 takes nothing from the game; a face button no longer presses its own "
+                            "button. On the keyboard, bind Jump under Keyboard and mouse."))) {
+            s.jump_button = static_cast<settings::JumpButton>(cycle(current, delta, 6));
+            settings::save();
+        }
+    }
+    if (s.tilt_mode == input::tilt::Mode::AngleLevel) {
         RowOptions o = off(options_for("input.tilt_level_limit",
                                        "How far the picture may turn back against the game's tilt; past it the "
                                        "ground turns on the screen again. The picture is zoomed as it turns so no "
@@ -882,6 +903,7 @@ void Menu::controls() {
     }
     for (std::size_t i = 0; i < input::kActions; ++i) {
         const auto action = static_cast<input::Action>(i);
+        if (action == input::Action::Jump && portablekit::game().tilt == nullptr) continue;
         std::string value = input::format(s.bindings[i]);
         if (binding_ == action) value = "Press a key or a mouse button";
         else if (value.empty()) value = "None";
@@ -932,6 +954,7 @@ void Menu::controls() {
         restore("input.tilt_dead_zone", s.tilt_dead_zone, d.tilt_dead_zone);
         restore("input.tilt_invert", s.tilt_invert, d.tilt_invert);
         restore("input.tilt_level_limit", s.tilt_level_limit, d.tilt_level_limit);
+        restore("input.jump_button", s.jump_button, d.jump_button);
         s.bindings = d.bindings;
         settings::save();
     }

@@ -38,6 +38,9 @@ enum class Action : std::uint8_t {
     CameraLeft,
     CameraDown,
     CameraRight,
+    // A game that tilts (GameProfile::tilt): both tilt buttons at once, which
+    // is LocoRoco's jump. Only listed for such a game.
+    Jump,
     Count
 };
 inline constexpr std::size_t kActions = static_cast<std::size_t>(Action::Count);
@@ -97,6 +100,7 @@ struct PadInput {
     int stick_y{};
     int camera_x{};           // the second stick
     int camera_y{};
+    bool jump{};              // Action::Jump held
 };
 [[nodiscard]] PadInput read(const Bindings &bindings, const std::function<bool(Binding)> &held);
 
