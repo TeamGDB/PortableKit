@@ -18,7 +18,10 @@
 #include <linux/hidraw.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
-#include <vector>
+#include <condition_variable>
+#include <mutex>
+#include <poll.h>
+#include <thread>
 #endif
 
 namespace portablekit::input::steam_deck_imu {
@@ -68,18 +71,28 @@ constexpr auto kSwitchInterval = std::chrono::seconds(1);
 
 using Clock = std::chrono::steady_clock;
 
+// Everything that touches the device runs on its own thread, so nothing here
+// can hold up a frame: reads wait in poll() with a timeout, and the feature
+// report that switches the motion unit (a USB control transfer the kernel may
+// take a while over) is sent from there too. The main thread only takes the
+// latest values under the mutex.
 struct Deck {
+    std::mutex mutex;
+    std::condition_variable wake;
+    std::thread thread;
     bool tried{};
+    bool opened{};        // the thread runs and owns fd
+    bool active{};        // tilt controls want readings
+    bool quit{};
     int fd{-1};
     bool writable{};
     std::string path;
-    bool switched_on{};   // the mode was set here and not yet set back
-    int switches{};
-    bool have{};          // a report with motion data has been read
-    std::uint64_t reports{};
+    // Written by the thread, taken by read().
+    bool have{};          // motion data arrived since active
     tilt::Reading last;
-    Clock::time_point since_data{};
-    Clock::time_point last_switch{};
+    float gyro_sum[3]{};
+    int gyro_count{};
+    std::uint64_t reports{};
 };
 
 Deck &deck() {
@@ -90,6 +103,11 @@ Deck &deck() {
 bool trace() {
     static const bool value = portablekit::env("TRACE_PAD") != nullptr || portablekit::env("TRACE_TILT") != nullptr;
     return value;
+}
+
+void say(const std::string &line) {
+    // One write per line, as the thread logs beside the main thread.
+    std::cout << (line + "\n") << std::flush;
 }
 
 std::string read_file(const std::string &path) {
@@ -124,8 +142,8 @@ std::int16_t le16(const std::uint8_t *p) {
     return static_cast<std::int16_t>(static_cast<std::uint16_t>(p[0] | (p[1] << 8)));
 }
 
-bool set_imu_mode(Deck &d, std::uint16_t mode) {
-    if (d.fd < 0 || !d.writable) return false;
+// The reader thread only.
+bool set_imu_mode(int fd, std::uint16_t mode) {
     // Report ID 0 (the device numbers none), then the message.
     std::uint8_t buffer[kReportBytes + 1]{};
     buffer[1] = kSetSettings;
@@ -133,17 +151,141 @@ bool set_imu_mode(Deck &d, std::uint16_t mode) {
     buffer[3] = kSettingImuMode;
     buffer[4] = static_cast<std::uint8_t>(mode & 0xFF);
     buffer[5] = static_cast<std::uint8_t>(mode >> 8);
-    if (ioctl(d.fd, HIDIOCSFEATURE(sizeof(buffer)), buffer) < 0) {
-        std::cout << "[tilt] Steam Deck: cannot switch its motion sensors " << (mode != kImuOff ? "on" : "off")
-                  << ": " << std::strerror(errno) << std::endl;
+    if (ioctl(fd, HIDIOCSFEATURE(sizeof(buffer)), buffer) < 0) {
+        say(std::string("[tilt] Steam Deck: cannot switch its motion sensors ") + (mode != kImuOff ? "on" : "off") +
+            ": " + std::strerror(errno));
         return false;
     }
     return true;
 }
 
-void restore_at_exit() {
+void run(Deck &d) {
+    const int fd = d.fd;
+    const bool writable = d.writable;
+    bool switched_on = false;   // the mode was set here and not yet set back
+    int switches = 0;
+    bool was_active = false;
+    bool announced = false;
+    Clock::time_point since_data{};
+    Clock::time_point last_switch{};
+    std::uint8_t report[kReportBytes];
+    for (;;) {
+        bool active;
+        {
+            std::unique_lock lock(d.mutex);
+            if (!d.active && !d.quit) {
+                // Idle: switch the unit back off if it was switched on here,
+                // then wait without touching the device.
+                if (switched_on) {
+                    lock.unlock();
+                    if (set_imu_mode(fd, kImuOff)) say("[tilt] Steam Deck: switched its motion sensors back off");
+                    switched_on = false;
+                    lock.lock();
+                }
+                d.wake.wait(lock, [&] { return d.active || d.quit; });
+            }
+            if (d.quit) break;
+            active = d.active;
+        }
+        const Clock::time_point now = Clock::now();
+        if (active && !was_active) {
+            // Drop what queued while idle.
+            for (int i = 0; i < 256 && ::read(fd, report, sizeof(report)) > 0; ++i) {}
+            since_data = now;
+            last_switch = {};
+            announced = false;
+        }
+        was_active = active;
+
+        pollfd waiting{fd, POLLIN, 0};
+        const int ready = ::poll(&waiting, 1, 100);
+        if (ready < 0 && errno != EINTR) {
+            say(std::string("[tilt] Steam Deck controller: ") + std::strerror(errno) + "; stopped reading it");
+            break;
+        }
+        if (ready > 0 && (waiting.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+            say("[tilt] Steam Deck controller went away; stopped reading it");
+            break;
+        }
+        float gyro[3]{};
+        float accel[3]{};
+        int count = 0;
+        // Bounded: the kernel keeps at most 64 reports, 250 arrive a second.
+        for (int i = 0; ready > 0 && i < 256; ++i) {
+            const ssize_t n = ::read(fd, report, sizeof(report));
+            if (n <= 0) break;
+            if (static_cast<std::size_t>(n) < kMotionEnd || report[0] != 0x01 || report[2] != kStateReport) continue;
+            bool empty = true;
+            for (std::size_t j = kAccel; j < kMotionEnd; ++j) empty = empty && report[j] == 0;
+            if (empty) continue;
+            // The controller's X, Y, Z in SDL's gamepad axes: X right, the
+            // controller's Z as up out of its face, its -Y towards the player.
+            const std::uint8_t *a = report + kAccel;
+            const std::uint8_t *g = report + kGyro;
+            accel[0] = le16(a) * kAccelScale;
+            accel[1] = le16(a + 4) * kAccelScale;
+            accel[2] = -le16(a + 2) * kAccelScale;
+            gyro[0] += le16(g) * kGyroScale;
+            gyro[1] += le16(g + 4) * kGyroScale;
+            gyro[2] += -le16(g + 2) * kGyroScale;
+            ++count;
+        }
+        const Clock::time_point after = Clock::now();
+        if (count > 0) {
+            since_data = after;
+            if (!announced) {
+                announced = true;
+                std::string line = "[tilt] Steam Deck: motion data arriving";
+                if (trace())
+                    line += " (accel " + std::to_string(accel[0]) + ' ' + std::to_string(accel[1]) + ' ' +
+                            std::to_string(accel[2]) + " m/s2)";
+                say(line);
+            }
+            std::lock_guard lock(d.mutex);
+            d.have = true;
+            d.last.has_accel = true;
+            std::memcpy(d.last.accel, accel, sizeof(accel));
+            for (int i = 0; i < 3; ++i) d.gyro_sum[i] += gyro[i];
+            d.gyro_count += count;
+            d.reports += static_cast<std::uint64_t>(count);
+        } else if (after - since_data >= kSilenceBeforeSwitch) {
+            {
+                std::lock_guard lock(d.mutex);
+                d.have = false;
+            }
+            // Reports arrive with empty motion fields, or none at all: Steam
+            // has the motion unit off. Once, and again whenever Steam turns
+            // it back off.
+            if (writable && (last_switch == Clock::time_point{} || after - last_switch >= kSwitchInterval)) {
+                last_switch = after;
+                if (set_imu_mode(fd, kImuRaw)) {
+                    switched_on = true;
+                    ++switches;
+                    announced = false;
+                    if (switches <= 3 || trace())
+                        say(std::string("[tilt] Steam Deck: its motion sensors were off; switched them on") +
+                            (switches > 1 ? " again (" + std::to_string(switches) + ")" : std::string{}));
+                }
+            }
+        }
+    }
+    if (switched_on) set_imu_mode(fd, kImuOff);
+    ::close(fd);
+    std::lock_guard lock(d.mutex);
+    d.have = false;
+    d.fd = -1;
+}
+
+void stop_at_exit() {
     Deck &d = deck();
-    if (d.switched_on) set_imu_mode(d, kImuOff);
+    {
+        std::lock_guard lock(d.mutex);
+        d.quit = true;
+    }
+    d.wake.notify_all();
+    // Within a poll timeout, and the unit switched back off if it was
+    // switched on here.
+    if (d.thread.joinable()) d.thread.join();
 }
 
 } // namespace
@@ -154,7 +296,16 @@ bool present() {
 
 bool open() {
     Deck &d = deck();
-    if (d.fd >= 0) return true;
+    if (d.opened) {
+        {
+            std::lock_guard lock(d.mutex);
+            if (d.fd < 0) return false;  // the thread stopped: the device went away
+            if (d.active) return true;
+            d.active = true;
+        }
+        d.wake.notify_all();
+        return true;
+    }
     if (d.tried) return false;
     d.tried = true;
     if (switched_off()) return false;
@@ -164,111 +315,53 @@ bool open() {
     d.writable = d.fd >= 0;
     if (d.fd < 0) d.fd = ::open(d.path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
     if (d.fd < 0) {
-        std::cout << "[tilt] Steam Deck controller " << d.path << " cannot be read: " << std::strerror(errno)
-                  << std::endl;
+        say("[tilt] Steam Deck controller " + d.path + " cannot be read: " + std::strerror(errno));
         return false;
     }
-    d.have = false;
-    d.reports = 0;
-    d.since_data = Clock::now();
-    d.last_switch = {};
-    static bool registered = false;
-    if (!registered) {
-        registered = true;
-        std::atexit(restore_at_exit);
-    }
-    std::cout << "[tilt] Steam Deck controller " << d.path << ": reading its gyroscope and accelerometer beside "
-              << "Steam Input" << (d.writable ? "" : " (read only; the motion unit cannot be switched on)")
-              << std::endl;
+    d.active = true;
+    d.opened = true;
+    d.thread = std::thread(run, std::ref(d));
+    std::atexit(stop_at_exit);
+    say("[tilt] Steam Deck controller " + d.path + ": reading its gyroscope and accelerometer beside Steam Input" +
+        (d.writable ? "" : " (read only; the motion unit cannot be switched on)"));
     return true;
 }
 
 bool read(tilt::Reading &reading) {
     Deck &d = deck();
-    if (d.fd < 0) return false;
-    std::uint8_t report[kReportBytes];
-    float gyro[3]{};
-    int gyros = 0;
-    bool accel = false;
-    for (;;) {
-        const ssize_t n = ::read(d.fd, report, sizeof(report));
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                std::cout << "[tilt] Steam Deck controller: " << std::strerror(errno) << "; stopped reading it"
-                          << std::endl;
-                close();
-                return false;
-            }
-            break;
+    std::lock_guard lock(d.mutex);
+    if (d.fd < 0 || !d.active || !d.have) return false;
+    // The mean rate over the reports since the last call; the last one again
+    // when none arrived in between.
+    if (d.gyro_count > 0) {
+        for (int i = 0; i < 3; ++i) {
+            d.last.gyro[i] = d.gyro_sum[i] / static_cast<float>(d.gyro_count);
+            d.gyro_sum[i] = 0.0f;
         }
-        if (static_cast<std::size_t>(n) < kMotionEnd || report[0] != 0x01 || report[2] != kStateReport) continue;
-        ++d.reports;
-        bool empty = true;
-        for (std::size_t i = kAccel; i < kMotionEnd; ++i) empty = empty && report[i] == 0;
-        if (empty) continue;
-        // The controller's X, Y, Z in SDL's gamepad axes: X right, the
-        // controller's Z as up out of its face, its -Y towards the player.
-        const std::uint8_t *a = report + kAccel;
-        const std::uint8_t *g = report + kGyro;
-        d.last.accel[0] = le16(a) * kAccelScale;
-        d.last.accel[1] = le16(a + 4) * kAccelScale;
-        d.last.accel[2] = -le16(a + 2) * kAccelScale;
-        accel = true;
-        gyro[0] += le16(g) * kGyroScale;
-        gyro[1] += le16(g + 4) * kGyroScale;
-        gyro[2] += -le16(g + 2) * kGyroScale;
-        ++gyros;
+        d.gyro_count = 0;
+        d.last.has_gyro = true;
     }
-    const Clock::time_point now = Clock::now();
-    if (accel) {
-        if (!d.have) {
-            std::cout << "[tilt] Steam Deck: motion data arriving" << std::endl;
-            if (trace())
-                std::cout << "[tilt] Steam Deck accel " << d.last.accel[0] << ' ' << d.last.accel[1] << ' '
-                          << d.last.accel[2] << " m/s2" << std::endl;
-        }
-        d.have = true;
-        d.since_data = now;
-        d.last.has_accel = true;
-        d.last.has_gyro = gyros > 0;
-        for (int i = 0; i < 3; ++i) d.last.gyro[i] = gyros > 0 ? gyro[i] / static_cast<float>(gyros) : 0.0f;
-    } else if (now - d.since_data >= kSilenceBeforeSwitch && d.writable &&
-               (d.last_switch == Clock::time_point{} || now - d.last_switch >= kSwitchInterval)) {
-        // Reports arrive with empty motion fields: Steam has the motion
-        // unit off. Once, and again whenever Steam turns it back off.
-        d.last_switch = now;
-        if (set_imu_mode(d, kImuRaw)) {
-            d.switched_on = true;
-            ++d.switches;
-            if (d.switches <= 3 || trace())
-                std::cout << "[tilt] Steam Deck: its motion sensors were off; switched them on"
-                          << (d.switches > 1 ? " again (" + std::to_string(d.switches) + ")" : std::string{})
-                          << std::endl;
-        }
-        d.have = false;
-    }
-    if (!d.have) return false;
     reading = d.last;
     return true;
 }
 
 void close() {
     Deck &d = deck();
-    if (d.fd < 0) return;
-    if (d.switched_on && set_imu_mode(d, kImuOff))
-        std::cout << "[tilt] Steam Deck: switched its motion sensors back off" << std::endl;
-    d.switched_on = false;
-    ::close(d.fd);
-    d.fd = -1;
-    d.have = false;
-    // Opened again when tilt controls come back on.
-    d.tried = false;
+    {
+        std::lock_guard lock(d.mutex);
+        if (!d.active) return;
+        d.active = false;
+        d.have = false;
+        d.gyro_count = 0;
+        for (float &v : d.gyro_sum) v = 0.0f;
+    }
+    d.wake.notify_all();
 }
 
 std::string describe() {
-    const Deck &d = deck();
-    if (d.fd < 0) return {};
+    Deck &d = deck();
+    std::lock_guard lock(d.mutex);
+    if (d.fd < 0 || !d.active) return {};
     if (d.have) return "Steam Deck: gyroscope and accelerometer";
     return d.writable ? "Steam Deck: waiting for its motion sensors" : "Steam Deck: its motion sensors are off";
 }

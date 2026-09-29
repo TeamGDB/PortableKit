@@ -19,7 +19,9 @@
 //
 // <prefix>_TILT_DECK=0 leaves the Deck's controller alone.
 //
-// The main thread only.
+// The device is read, and the setting sent, on a thread of its own, so a
+// slow device cannot hold up a frame; these calls only take a mutex. Called
+// from the main thread.
 namespace portablekit::input::steam_deck_imu {
 
 // Opens the Deck's controller the first time it is called; true while it is
