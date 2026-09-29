@@ -45,12 +45,25 @@ struct State {
     std::uint64_t last_ns{};
     std::uint64_t pulse_ns{};
     bool pulse_down{};
+    // The game's own turn of its world, from the renderer.
+    bool game_roll_valid{};
+    float game_roll{};
     int traced_direction{};
     std::uint64_t traced_ns{};
 };
 
 State &state() {
     static State value;
+    return value;
+}
+
+// <prefix>_TILT_LEVEL_FROM=device: Angle + level horizon turns the picture
+// against the device, as it first did, rather than against the game.
+bool level_from_device() {
+    static const bool value = [] {
+        const char *from = portablekit::env("TILT_LEVEL_FROM");
+        return from != nullptr && std::string(from) == "device";
+    }();
     return value;
 }
 
@@ -267,7 +280,9 @@ std::uint32_t sample(SDL_Gamepad *pad, SDL_Window *window, bool recenter_button)
                   << " deg/s -> "
                   << (s.output.direction < 0 ? "left" : s.output.direction > 0 ? "right" : "none")
                   << " strength " << std::lround(s.output.strength * 100.0f) << "%";
-        if (tuning.mode == tilt::Mode::AngleLevel) std::cout << " level " << s.output.level_degrees;
+        if (tuning.mode == tilt::Mode::AngleLevel)
+            std::cout << " game roll " << std::lround(s.game_roll * 10.0f) / 10.0f << " level "
+                      << std::lround(level_degrees() * 10.0f) / 10.0f;
         std::cout << std::endl;
         s.traced_ns = now;
     }
@@ -278,9 +293,20 @@ std::uint32_t sample(SDL_Gamepad *pad, SDL_Window *window, bool recenter_button)
 
 void recenter() { state().mapper.recenter(); }
 
+void set_game_roll(bool valid, float degrees) {
+    State &s = state();
+    s.game_roll_valid = valid;
+    s.game_roll = valid ? degrees : 0.0f;
+}
+
 float level_degrees() {
     const State &s = state();
-    return s.on && s.reading ? s.output.level_degrees : 0.0f;
+    if (!s.on) return 0.0f;
+    if (level_from_device()) return s.reading ? s.output.level_degrees : 0.0f;
+    const settings::Settings &player = settings::current();
+    if (player.tilt_mode != tilt::Mode::AngleLevel || !s.game_roll_valid) return 0.0f;
+    const float limit = std::clamp(player.tilt_level_limit, tilt::kMinLevelLimit, tilt::kMaxLevelLimit);
+    return std::clamp(-s.game_roll, -limit, limit);
 }
 
 std::string source() {

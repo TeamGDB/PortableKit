@@ -56,7 +56,7 @@ inline constexpr float kRateThreshold = 20.0f;
 // Rate mode: seconds for the added-up tilt to fall to a third by itself.
 inline constexpr float kRateDecaySeconds = 3.0f;
 inline constexpr float kMinLevelLimit = 2.0f;
-inline constexpr float kMaxLevelLimit = 20.0f;
+inline constexpr float kMaxLevelLimit = 30.0f;
 
 // One reading of the sensors. Either may be missing: a pad with only a
 // gyroscope, a phone with only an accelerometer.
