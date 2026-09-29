@@ -38,6 +38,7 @@ set(PORTABLEKIT_HOST_SOURCES
     host/gpu/texture_decode.cpp
     host/input/bindings.cpp
     host/input/touch_controls.cpp
+    host/input/tilt.cpp
     host/gpu/texture_pack.cpp
     host/gpu/texture_pack_import.cpp
     host/perf/frame_stats.cpp
@@ -97,6 +98,7 @@ set(PORTABLEKIT_RENDERER_SOURCES
     host/gpu/vulkan_renderer.cpp
     host/ui/file_browser.cpp
     host/ui/font_menu.cpp
+    host/input/motion.cpp
     host/ui/input_script.cpp
     host/ui/layer.cpp
     host/ui/menu.cpp
@@ -309,7 +311,9 @@ function(portablekit_add_game target)
                 "kGeVertexShader=${PORTABLEKIT_ROOT}/host/gpu/shaders/ge.vert"
                 "kGeRawVertexShader=GE_RAW_VERTICES@${PORTABLEKIT_ROOT}/host/gpu/shaders/ge.vert"
                 "kGeCheckVertexShader=GE_RAW_VERTICES,GE_CHECK_DECODE@${PORTABLEKIT_ROOT}/host/gpu/shaders/ge.vert"
-                "kGeFragmentShader=${PORTABLEKIT_ROOT}/host/gpu/shaders/ge.frag")
+                "kGeFragmentShader=${PORTABLEKIT_ROOT}/host/gpu/shaders/ge.frag"
+                "kLevelVertexShader=${PORTABLEKIT_ROOT}/host/gpu/shaders/level.vert"
+                "kLevelFragmentShader=${PORTABLEKIT_ROOT}/host/gpu/shaders/level.frag")
             if(ANDROID)
                 # Pre-rotation of the finished frame for a display turned sideways.
                 list(APPEND shaders
