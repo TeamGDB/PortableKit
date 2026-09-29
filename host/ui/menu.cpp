@@ -587,8 +587,8 @@ void Menu::tilt_controls() {
     {
         std::string description = "Tilt the gamepad, or the phone itself, to tilt the game: its motion sensors press "
                                   "the tilt buttons, and the buttons keep working. It needs a gamepad with a "
-                                  "gyroscope (DualShock 4, DualSense, Switch Pro, a Steam Deck with Steam Input off "
-                                  "for this game) or a phone.";
+                                  "gyroscope (DualShock 4, DualSense, Switch Pro, a Steam Deck, with or without "
+                                  "Steam Input) or a phone.";
         if (tilt->note != nullptr) description += std::string(" ") + tilt->note;
         if (toggle_row("Tilt with motion", s.tilt, options_for("input.tilt", description))) {
             s.tilt = !s.tilt;

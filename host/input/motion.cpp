@@ -1,6 +1,7 @@
 #include "../profile.hpp"
 #include "input/motion.hpp"
 
+#include "input/steam_deck_imu.hpp"
 #include "input/tilt.hpp"
 #include "settings/settings.hpp"
 
@@ -31,6 +32,8 @@ struct State {
     SDL_Sensor *device_accel{};
     SDL_Sensor *device_gyro{};
     std::string device_names;
+    // The Steam Deck's own sensors, read beside Steam Input.
+    bool deck{};
 
     bool on{};
     bool reading{};
@@ -132,13 +135,20 @@ void to_screen(float v[3], int quarter_turns) {
     }
 }
 
-// The pad's sensors when it has them, else the device's.
+// The pad's sensors when it has them, else a Steam Deck's read directly,
+// else the device's.
 bool read_sensors(State &s, SDL_Window *window, tilt::Reading &reading) {
     if (s.pad != nullptr && (s.pad_accel || s.pad_gyro)) {
+        if (s.deck) {
+            steam_deck_imu::close();
+            s.deck = false;
+        }
         reading.has_accel = s.pad_accel && SDL_GetGamepadSensorData(s.pad, SDL_SENSOR_ACCEL, reading.accel, 3);
         reading.has_gyro = s.pad_gyro && SDL_GetGamepadSensorData(s.pad, SDL_SENSOR_GYRO, reading.gyro, 3);
         return reading.has_accel || reading.has_gyro;
     }
+    s.deck = steam_deck_imu::open();
+    if (s.deck) return steam_deck_imu::read(reading);
     open_device_sensors(s);
     if (s.device_accel == nullptr && s.device_gyro == nullptr) return false;
     const int turns = display_quarter_turns(window);
@@ -187,10 +197,12 @@ void gamepad_changed(SDL_Gamepad *pad) {
                   << " Hz)" << std::endl;
     } else {
         std::cout << "[tilt] " << s.pad_name << " has no motion sensors";
-        // Steam Input hands the game a virtual pad without them, the Steam
-        // Deck's own included.
+        // Steam Input hands the game a virtual pad without them. A Steam
+        // Deck's own are read directly; another pad's are not.
         const SDL_GamepadType type = SDL_GetGamepadType(pad);
-        if (s.pad_name.find("Steam") != std::string::npos || type == SDL_GAMEPAD_TYPE_XBOX360)
+        if (steam_deck_imu::present())
+            std::cout << "; the Steam Deck's own are read directly";
+        else if (s.pad_name.find("Steam") != std::string::npos || type == SDL_GAMEPAD_TYPE_XBOX360)
             std::cout << "; under Steam Input, turn Steam Input off for this game to use the pad's own gyroscope, "
                          "or map the gyroscope to a stick in Steam's controller settings";
         std::cout << std::endl;
@@ -205,6 +217,8 @@ std::uint32_t sample(SDL_Gamepad *pad, SDL_Window *window, bool recenter_button)
     if (!on) {
         if (s.on) {
             enable_pad_sensors(s, false);
+            steam_deck_imu::close();
+            s.deck = false;
             s.on = false;
             s.reading = false;
             s.output = {};
@@ -275,6 +289,7 @@ std::string source() {
         return s.pad_name + (s.pad_gyro && s.pad_accel ? ": gyroscope and accelerometer"
                              : s.pad_gyro              ? ": gyroscope only"
                                                        : ": accelerometer only");
+    if (s.deck) return steam_deck_imu::describe();
     if (!s.device_names.empty()) return "This device: " + s.device_names;
     if (s.pad != nullptr) return s.pad_name + " has no motion sensors";
     if (s.device_opened) return "No motion sensors found";
