@@ -48,8 +48,8 @@ constexpr const char *kSeparator = " / ";
 
 constexpr ActionInfo kInfo[kActions] = {
     {"stick_up", "Move forward"},  {"stick_left", "Move left"},    {"stick_down", "Move back"},
-    {"stick_right", "Move right"}, {"triangle", "△"},              {"circle", "○  (confirm)"},
-    {"cross", "×  (back)"},        {"square", "□"},                {"l", "L"},
+    {"stick_right", "Move right"}, {"triangle", "△"},              {"circle", "○"},
+    {"cross", "×"},                {"square", "□"},                {"l", "L"},
     {"r", "R"},                    {"start", "START"},             {"select", "SELECT"},
     {"dpad_up", "D-pad up"},       {"dpad_left", "D-pad left"},    {"dpad_down", "D-pad down"},
     {"dpad_right", "D-pad right"}, {"camera_up", "Camera up"},     {"camera_left", "Camera left"},
