@@ -109,6 +109,9 @@ const Names<PerfDisplay> kPerfDisplays{{{PerfDisplay::Off, "off"},
                                         {PerfDisplay::Overlay, "overlay"},
                                         {PerfDisplay::OverlayAndLog, "overlay+log"},
                                         {PerfDisplay::Log, "log"}}};
+const Names<input::tilt::Mode> kTiltModes{{{input::tilt::Mode::Angle, "angle"},
+                                            {input::tilt::Mode::AngleLevel, "level"},
+                                            {input::tilt::Mode::Rate, "rate"}}};
 const Names<RightStick> kRightSticks{
     {{RightStick::Camera, "camera"}, {RightStick::DPad, "dpad"}, {RightStick::Off, "off"}}};
 // A trigger profile by the key the game gives it, or "standard" for L and R.
@@ -304,6 +307,38 @@ const std::vector<Field> &fields() {
          [](const Settings &s) { return format_float(s.touch_camera_speed); }, nullptr},
         BOOL_FIELD("input.invert_mouse_x", invert_mouse_x),
         BOOL_FIELD("input.invert_mouse_y", invert_mouse_y),
+        {"input.tilt", "TILT",
+         [](Settings &s, const std::string &t) { return parse_bool(t, s.tilt); },
+         [](const Settings &s) { return std::string(s.tilt ? "1" : "0"); },
+         [](Settings &s, const char *t) { s.tilt = variable_flag(t); }},
+        {"input.tilt_mode", "TILT_MODE",
+         [](Settings &s, const std::string &t) { return kTiltModes.parse(t, s.tilt_mode); },
+         [](const Settings &s) { return kTiltModes.format(s.tilt_mode); },
+         [](Settings &s, const char *t) {
+             if (!kTiltModes.parse(t, s.tilt_mode)) std::cerr << "[settings] " << env_name("TILT_MODE") << ": angle, level or rate\n";
+         }},
+        {"input.tilt_full", "TILT_FULL",
+         [](Settings &s, const std::string &t) {
+             return parse_float(t, input::tilt::kMinFullTilt, input::tilt::kMaxFullTilt, s.tilt_full);
+         },
+         [](const Settings &s) { return format_float(s.tilt_full); },
+         [](Settings &s, const char *t) {
+             s.tilt_full = variable_float(t, 12.0f, input::tilt::kMinFullTilt, input::tilt::kMaxFullTilt);
+         }},
+        {"input.tilt_dead_zone", "TILT_DEAD_ZONE",
+         [](Settings &s, const std::string &t) {
+             return parse_float(t, input::tilt::kMinDeadZone, input::tilt::kMaxDeadZone, s.tilt_dead_zone);
+         },
+         [](const Settings &s) { return format_float(s.tilt_dead_zone); },
+         [](Settings &s, const char *t) {
+             s.tilt_dead_zone = variable_float(t, 4.0f, input::tilt::kMinDeadZone, input::tilt::kMaxDeadZone);
+         }},
+        BOOL_FIELD("input.tilt_invert", tilt_invert),
+        {"input.tilt_level_limit", nullptr,
+         [](Settings &s, const std::string &t) {
+             return parse_float(t, input::tilt::kMinLevelLimit, input::tilt::kMaxLevelLimit, s.tilt_level_limit);
+         },
+         [](const Settings &s) { return format_float(s.tilt_level_limit); }, nullptr},
         {"input.name_entry", "OSK_MODE",
          [](Settings &s, const std::string &t) { return kNameEntries.parse(t, s.name_entry); },
          [](const Settings &s) { return kNameEntries.format(s.name_entry); },

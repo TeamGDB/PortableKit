@@ -1,6 +1,7 @@
 #pragma once
 
 #include "input/bindings.hpp"
+#include "input/tilt.hpp"
 
 #include <cstdint>
 #include <string>
@@ -100,6 +101,15 @@ struct Settings {
     float touch_opacity{0.5f};         // 0.1-1
     float touch_size{1.0f};            // 0.6-1.6 of the default size
     float touch_camera_speed{180.0f};  // degrees the camera turns for a drag across the screen's height
+    // Tilt controls, for a game that tilts (GameProfile::tilt): the roll of
+    // a gamepad with motion sensors, or of the phone itself, presses the
+    // game's tilt buttons (input/tilt.hpp). Off until the player turns it on.
+    bool tilt{};
+    input::tilt::Mode tilt_mode{input::tilt::Mode::Angle};
+    float tilt_full{12.0f};            // degrees of roll from neutral for a full tilt
+    float tilt_dead_zone{4.0f};        // degrees of roll from neutral before anything is pressed
+    bool tilt_invert{};
+    float tilt_level_limit{10.0f};     // Angle + level horizon: degrees the picture turns at most
     NameEntry name_entry{NameEntry::Keyboard};  // on-screen keyboard, or the name below at once
     std::string name{game_default_name()};  // the fixed name
 

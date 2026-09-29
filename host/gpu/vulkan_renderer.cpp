@@ -15,6 +15,7 @@
 #include "perf/frame_stats.hpp"
 #include "perf/perf_overlay.hpp"
 #include "input/bindings.hpp"
+#include "input/motion.hpp"
 #include "settings/settings.hpp"
 
 #if defined(PORTABLEKIT_ANDROID_APP)
@@ -826,6 +827,35 @@ struct VulkanRenderer::Impl {
     void destroy_rotation_pipeline();
     void record_rotation(VkCommandBuffer commands, std::uint32_t image_index, VkImageLayout layout);
 #endif
+    // Angle + level horizon (input/motion.hpp): the game frame is copied into
+    // one of these per swapchain image, then drawn turned and zoomed into the
+    // image shown, under the performance overlay and the interface. Made the
+    // first time the picture is turned, and with every swapchain after that.
+    struct LevelImage {
+        VkImage image{};
+        VkDeviceMemory memory{};
+        VkImageView view{};
+        VkDescriptorSet set{};
+        VkFramebuffer framebuffer{};
+    };
+    std::vector<LevelImage> level_images;
+    VkRenderPass level_render_pass{};
+    VkDescriptorSetLayout level_set_layout{};
+    VkDescriptorPool level_pool{};
+    VkPipelineLayout level_layout{};
+    VkPipeline level_pipeline{};
+    VkSampler level_sampler{};
+    VkShaderModule level_vertex{};
+    VkShaderModule level_fragment{};
+    bool level_failed{};
+    // Where the last game blit put the picture in its target.
+    VkOffset3D picture_low{};
+    VkOffset3D picture_high{};
+    bool create_level_pipeline(std::string &error);
+    bool ensure_level_images();
+    void destroy_level_images();
+    void destroy_level_pipeline();
+    void record_level(VkCommandBuffer commands, std::uint32_t image_index, float degrees);
     bool ui_ready{};
     ImDrawData *ui_draw_data{};
     std::function<bool(const SDL_Event &)> event_hook;
@@ -1679,6 +1709,7 @@ struct VulkanRenderer::Impl {
 #endif
         gamepad = device;
         gamepad_id = id;
+        input::motion::gamepad_changed(device);
         const char *name = SDL_GetGamepadName(device);
         const PadTuning tuning = pad_tuning();
         std::cout << "[pad] " << (name != nullptr ? name : "gamepad") << " connected; confirm ("
@@ -1719,6 +1750,7 @@ struct VulkanRenderer::Impl {
 
     void close_gamepad(SDL_JoystickID id) {
         if (gamepad == nullptr || id != gamepad_id) return;
+        input::motion::gamepad_changed(nullptr);
         SDL_CloseGamepad(gamepad);
         gamepad = nullptr;
         gamepad_id = 0;
@@ -2818,6 +2850,7 @@ bool VulkanRenderer::Impl::create_swapchain(std::string &error) {
 }
 
 void VulkanRenderer::Impl::destroy_swapchain_views() {
+    destroy_level_images();
     for (VkFramebuffer framebuffer : ui_framebuffers) vkDestroyFramebuffer(device, framebuffer, nullptr);
     ui_framebuffers.clear();
     for (VkImageView view : swapchain_views) vkDestroyImageView(device, view, nullptr);
@@ -3083,6 +3116,256 @@ void VulkanRenderer::Impl::record_rotation(VkCommandBuffer commands, std::uint32
 }
 #endif
 
+// The pass that draws the game's picture turned for Angle + level horizon.
+bool VulkanRenderer::Impl::create_level_pipeline(std::string &error) {
+    if (level_pipeline != VK_NULL_HANDLE) return true;
+    VkAttachmentDescription attachment{};
+    attachment.format = swapchain_format;
+    attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    // Cleared: the bars beside a picture of the PSP's shape stay black.
+    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    // Left as the plain blit leaves it, for the overlay and the interface.
+    attachment.initialLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    attachment.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    VkAttachmentReference reference{0u, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1u;
+    subpass.pColorAttachments = &reference;
+    VkRenderPassCreateInfo pass_info{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    pass_info.attachmentCount = 1u;
+    pass_info.pAttachments = &attachment;
+    pass_info.subpassCount = 1u;
+    pass_info.pSubpasses = &subpass;
+    if (!check(vkCreateRenderPass(device, &pass_info, nullptr, &level_render_pass), "vkCreateRenderPass", error))
+        return false;
+
+    VkSamplerCreateInfo sampler_info{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    sampler_info.magFilter = VK_FILTER_LINEAR;
+    sampler_info.minFilter = VK_FILTER_LINEAR;
+    sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    if (!check(vkCreateSampler(device, &sampler_info, nullptr, &level_sampler), "vkCreateSampler", error)) return false;
+
+    VkDescriptorSetLayoutBinding binding{};
+    binding.binding = 0u;
+    binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    binding.descriptorCount = 1u;
+    binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutCreateInfo set_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    set_info.bindingCount = 1u;
+    set_info.pBindings = &binding;
+    if (!check(vkCreateDescriptorSetLayout(device, &set_info, nullptr, &level_set_layout),
+               "vkCreateDescriptorSetLayout", error))
+        return false;
+    constexpr std::uint32_t kMaxImages = 8u;
+    VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxImages};
+    VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    pool_info.maxSets = kMaxImages;
+    pool_info.poolSizeCount = 1u;
+    pool_info.pPoolSizes = &pool_size;
+    if (!check(vkCreateDescriptorPool(device, &pool_info, nullptr, &level_pool), "vkCreateDescriptorPool", error))
+        return false;
+
+    VkPushConstantRange push{VK_SHADER_STAGE_FRAGMENT_BIT, 0u, 8u * sizeof(float)};
+    VkPipelineLayoutCreateInfo layout_info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    layout_info.setLayoutCount = 1u;
+    layout_info.pSetLayouts = &level_set_layout;
+    layout_info.pushConstantRangeCount = 1u;
+    layout_info.pPushConstantRanges = &push;
+    if (!check(vkCreatePipelineLayout(device, &layout_info, nullptr, &level_layout), "vkCreatePipelineLayout", error))
+        return false;
+
+    const auto create_shader = [&](const std::uint32_t *code, std::size_t size, VkShaderModule &module) {
+        VkShaderModuleCreateInfo info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        info.codeSize = size;
+        info.pCode = code;
+        return check(vkCreateShaderModule(device, &info, nullptr, &module), "vkCreateShaderModule", error);
+    };
+    if (!create_shader(kLevelVertexShader, sizeof(kLevelVertexShader), level_vertex)) return false;
+    if (!create_shader(kLevelFragmentShader, sizeof(kLevelFragmentShader), level_fragment)) return false;
+    std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = level_vertex;
+    stages[0].pName = "main";
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = level_fragment;
+    stages[1].pName = "main";
+    VkPipelineVertexInputStateCreateInfo vertex_input{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo viewport{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    viewport.viewportCount = 1u;
+    viewport.scissorCount = 1u;
+    VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    raster.polygonMode = VK_POLYGON_MODE_FILL;
+    raster.cullMode = VK_CULL_MODE_NONE;
+    raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    raster.lineWidth = 1.0f;
+    VkPipelineMultisampleStateCreateInfo multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineColorBlendAttachmentState blend_attachment{};
+    blend_attachment.colorWriteMask =
+        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo blend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    blend.attachmentCount = 1u;
+    blend.pAttachments = &blend_attachment;
+    const std::array<VkDynamicState, 2> dynamic_states{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dynamic.dynamicStateCount = static_cast<std::uint32_t>(dynamic_states.size());
+    dynamic.pDynamicStates = dynamic_states.data();
+    VkGraphicsPipelineCreateInfo pipeline_info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    pipeline_info.stageCount = static_cast<std::uint32_t>(stages.size());
+    pipeline_info.pStages = stages.data();
+    pipeline_info.pVertexInputState = &vertex_input;
+    pipeline_info.pInputAssemblyState = &assembly;
+    pipeline_info.pViewportState = &viewport;
+    pipeline_info.pRasterizationState = &raster;
+    pipeline_info.pMultisampleState = &multisample;
+    pipeline_info.pColorBlendState = &blend;
+    pipeline_info.pDynamicState = &dynamic;
+    pipeline_info.layout = level_layout;
+    pipeline_info.renderPass = level_render_pass;
+    return check(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1u, &pipeline_info, nullptr, &level_pipeline),
+                 "vkCreateGraphicsPipelines", error);
+}
+
+// One copy of the frame per swapchain image, made for the swapchain in use.
+// A failure is reported once, and the picture is then simply not turned.
+bool VulkanRenderer::Impl::ensure_level_images() {
+    if (level_failed) return false;
+    if (!level_images.empty() && level_images.size() == swapchain_images.size()) return true;
+    std::string error;
+    const auto fail = [&] {
+        std::cout << "[render] cannot turn the picture for the level horizon: " << error << std::endl;
+        destroy_level_images();
+        level_failed = true;
+        return false;
+    };
+    if (!create_level_pipeline(error)) return fail();
+    level_images.resize(swapchain_images.size());
+    for (std::size_t i = 0; i < level_images.size(); ++i) {
+        LevelImage &level = level_images[i];
+        if (!create_image(swapchain_extent.width, swapchain_extent.height, swapchain_format,
+                          VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, level.image, level.memory,
+                          level.view, VK_IMAGE_ASPECT_COLOR_BIT, error))
+            return fail();
+        VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        allocate.descriptorPool = level_pool;
+        allocate.descriptorSetCount = 1u;
+        allocate.pSetLayouts = &level_set_layout;
+        if (!check(vkAllocateDescriptorSets(device, &allocate, &level.set), "vkAllocateDescriptorSets", error))
+            return fail();
+        VkDescriptorImageInfo image_info{level_sampler, level.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet = level.set;
+        write.dstBinding = 0u;
+        write.descriptorCount = 1u;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.pImageInfo = &image_info;
+        vkUpdateDescriptorSets(device, 1u, &write, 0u, nullptr);
+        // The pass draws where the frame is finished: the swapchain image, or
+        // on a phone turned sideways its upright stand-in.
+        VkImageView target = swapchain_views[i];
+#if defined(__ANDROID__)
+        if (prerotated() && i < upright_images.size()) target = upright_images[i].view;
+#endif
+        VkFramebufferCreateInfo framebuffer_info{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+        framebuffer_info.renderPass = level_render_pass;
+        framebuffer_info.attachmentCount = 1u;
+        framebuffer_info.pAttachments = &target;
+        framebuffer_info.width = swapchain_extent.width;
+        framebuffer_info.height = swapchain_extent.height;
+        framebuffer_info.layers = 1u;
+        if (!check(vkCreateFramebuffer(device, &framebuffer_info, nullptr, &level.framebuffer), "vkCreateFramebuffer",
+                   error))
+            return fail();
+    }
+    return true;
+}
+
+void VulkanRenderer::Impl::destroy_level_images() {
+    for (LevelImage &level : level_images) {
+        if (level.framebuffer != VK_NULL_HANDLE) vkDestroyFramebuffer(device, level.framebuffer, nullptr);
+        if (level.set != VK_NULL_HANDLE) vkFreeDescriptorSets(device, level_pool, 1u, &level.set);
+        if (level.view != VK_NULL_HANDLE) vkDestroyImageView(device, level.view, nullptr);
+        if (level.image != VK_NULL_HANDLE) vkDestroyImage(device, level.image, nullptr);
+        if (level.memory != VK_NULL_HANDLE) vkFreeMemory(device, level.memory, nullptr);
+    }
+    level_images.clear();
+}
+
+void VulkanRenderer::Impl::destroy_level_pipeline() {
+    destroy_level_images();
+    if (level_pipeline != VK_NULL_HANDLE) vkDestroyPipeline(device, level_pipeline, nullptr);
+    if (level_layout != VK_NULL_HANDLE) vkDestroyPipelineLayout(device, level_layout, nullptr);
+    if (level_pool != VK_NULL_HANDLE) vkDestroyDescriptorPool(device, level_pool, nullptr);
+    if (level_set_layout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device, level_set_layout, nullptr);
+    if (level_sampler != VK_NULL_HANDLE) vkDestroySampler(device, level_sampler, nullptr);
+    if (level_vertex != VK_NULL_HANDLE) vkDestroyShaderModule(device, level_vertex, nullptr);
+    if (level_fragment != VK_NULL_HANDLE) vkDestroyShaderModule(device, level_fragment, nullptr);
+    if (level_render_pass != VK_NULL_HANDLE) vkDestroyRenderPass(device, level_render_pass, nullptr);
+    level_pipeline = VK_NULL_HANDLE;
+    level_layout = VK_NULL_HANDLE;
+    level_pool = VK_NULL_HANDLE;
+    level_set_layout = VK_NULL_HANDLE;
+    level_sampler = VK_NULL_HANDLE;
+    level_vertex = VK_NULL_HANDLE;
+    level_fragment = VK_NULL_HANDLE;
+    level_render_pass = VK_NULL_HANDLE;
+}
+
+// Draws the copied frame into the image shown, turned `degrees`
+// anticlockwise about the picture's centre and zoomed just enough that the
+// turned picture still covers its whole rectangle: for a W x H picture that
+// is the larger of cos a + (H/W) sin a and cos a + (W/H) sin a, which is 1
+// when level and grows smoothly with the angle.
+void VulkanRenderer::Impl::record_level(VkCommandBuffer commands, std::uint32_t image_index, float degrees) {
+    const LevelImage &level = level_images[image_index];
+    transition(commands, level.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    const float width = static_cast<float>(std::max(picture_high.x - picture_low.x, 1));
+    const float height = static_cast<float>(std::max(picture_high.y - picture_low.y, 1));
+    const float radians = degrees * 3.14159265358979f / 180.0f;
+    const float c = std::cos(radians);
+    const float s = std::fabs(std::sin(radians));
+    const float zoom = std::max(c + height / width * s, c + width / height * s);
+    const float push[8] = {static_cast<float>(picture_low.x) / static_cast<float>(swapchain_extent.width),
+                           static_cast<float>(picture_low.y) / static_cast<float>(swapchain_extent.height),
+                           width / static_cast<float>(swapchain_extent.width),
+                           height / static_cast<float>(swapchain_extent.height),
+                           c,
+                           std::sin(radians),
+                           zoom,
+                           width / height};
+    const VkClearValue black{{{0.0f, 0.0f, 0.0f, 1.0f}}};
+    VkRenderPassBeginInfo pass{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    pass.renderPass = level_render_pass;
+    pass.framebuffer = level.framebuffer;
+    pass.renderArea = {{0, 0}, swapchain_extent};
+    pass.clearValueCount = 1u;
+    pass.pClearValues = &black;
+    vkCmdBeginRenderPass(commands, &pass, VK_SUBPASS_CONTENTS_INLINE);
+    perf::count_render_pass();
+    const VkViewport viewport{static_cast<float>(picture_low.x), static_cast<float>(picture_low.y), width, height,
+                              0.0f, 1.0f};
+    const VkRect2D scissor{{picture_low.x, picture_low.y},
+                           {static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height)}};
+    vkCmdSetViewport(commands, 0u, 1u, &viewport);
+    vkCmdSetScissor(commands, 0u, 1u, &scissor);
+    vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, level_pipeline);
+    vkCmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, level_layout, 0u, 1u, &level.set, 0u, nullptr);
+    vkCmdPushConstants(commands, level_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0u, sizeof(push), push);
+    vkCmdDraw(commands, 3u, 1u, 0u, 0u);
+    vkCmdEndRenderPass(commands);
+}
+
 bool VulkanRenderer::Impl::create_ui_framebuffers(std::string &error) {
     std::vector<VkImageView> views = swapchain_views;
 #if defined(__ANDROID__)
@@ -3139,6 +3422,8 @@ void VulkanRenderer::Impl::record_game_blit(VkCommandBuffer commands, VkImage so
                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         }
     }
+    picture_low = low;
+    picture_high = high;
     VkImageBlit blit{};
     blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u};
     blit.srcOffsets[1] = {static_cast<std::int32_t>(target_extent.width),
@@ -3213,7 +3498,17 @@ void VulkanRenderer::Impl::submit_and_present(VkCommandBuffer commands, VkFence 
         if (source != VK_NULL_HANDLE) {
             transition(commands, source, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-            record_game_blit(commands, source, target);
+            // Angle + level horizon turns the picture; everything drawn after
+            // it (the overlay, the interface) stays upright.
+            const float level = input::motion::level_degrees();
+            if (std::fabs(level) > 0.01f && ensure_level_images() && image_index < level_images.size()) {
+                transition(commands, level_images[image_index].image, VK_IMAGE_LAYOUT_UNDEFINED,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+                record_game_blit(commands, source, level_images[image_index].image);
+                record_level(commands, image_index, level);
+            } else {
+                record_game_blit(commands, source, target);
+            }
             transition(commands, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         } else {
@@ -4750,6 +5045,18 @@ void VulkanRenderer::Impl::sample_pad(bool focused) {
     pad.analog_x = static_cast<std::uint8_t>(std::clamp(0x80 + analog_x, 0, 255));
     pad.analog_y = static_cast<std::uint8_t>(std::clamp(0x80 + analog_y, 0, 255));
 
+    // Tilt controls (input/motion.hpp): the motion sensors press the game's
+    // tilt buttons. A tilt button the player presses takes over, so tilting
+    // one way while pressing the other shoulder never becomes both at once
+    // (LocoRoco's jump). R3 alone re-centres; L3 with it opens the menu.
+    if (const TiltControls *tilt = portablekit::game().tilt; tilt != nullptr) {
+        SDL_Gamepad *const device = impl_->gamepad;
+        const bool recenter = device != nullptr && SDL_GetGamepadButton(device, SDL_GAMEPAD_BUTTON_RIGHT_STICK) &&
+                              !SDL_GetGamepadButton(device, SDL_GAMEPAD_BUTTON_LEFT_STICK);
+        const std::uint32_t tilted = input::motion::sample(device, impl_->window, recenter);
+        if ((pad.buttons & (tilt->left | tilt->right)) == 0u) pad.buttons |= tilted;
+    }
+
     // Unattended runs (overlay bootstrapping) press confirm periodically so the
     // game walks through title screens and dialogs on its own.
     static const std::uint64_t auto_confirm = [] {
@@ -4820,7 +5127,11 @@ void VulkanRenderer::set_event_hook(std::function<bool(const SDL_Event &)> hook)
 
 void VulkanRenderer::set_game_input(bool enabled) {
     if (!impl_) return;
-    if (enabled && !impl_->game_input) impl_->suppress_held = true;
+    if (enabled && !impl_->game_input) {
+        impl_->suppress_held = true;
+        // Back from the menu, however the device is held now is level.
+        input::motion::recenter();
+    }
     if (!enabled) impl_->touch.release_all();
     impl_->game_input = enabled;
 }
@@ -7575,6 +7886,7 @@ void VulkanRenderer::shutdown() {
     if (impl.ui_ready && ImGui::GetCurrentContext() != nullptr) ImGui_ImplVulkan_Shutdown();
     impl.ui_ready = false;
     impl.destroy_swapchain_views();
+    impl.destroy_level_pipeline();
 #if defined(__ANDROID__)
     impl.destroy_rotation_pipeline();
 #endif
