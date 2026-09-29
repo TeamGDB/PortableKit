@@ -31,6 +31,9 @@ enum class PresentMode { Fifo, Mailbox, Immediate };
 enum class Aspect { Original, Stretch, Fill };
 enum class PerfDisplay { Off, Overlay, OverlayAndLog, Log };
 enum class RightStick { Camera, DPad, Off };
+// The gamepad button that presses a tilting game's both tilt buttons at once
+// (LocoRoco's jump), instead of what it presses otherwise.
+enum class JumpButton { Off, LeftStick, South, East, West, North };
 // What answers the game when it asks for text such as the player's name.
 enum class NameEntry { Keyboard, Fixed };
 // Presents per second. The game makes 30 frames a second; the faster rates
@@ -110,6 +113,9 @@ struct Settings {
     float tilt_dead_zone{4.0f};        // degrees of roll from neutral before anything is pressed
     bool tilt_invert{};
     float tilt_level_limit{10.0f};     // Angle + level horizon: degrees the picture turns at most
+    // For a game that tilts: the gamepad button that jumps. L3 by default,
+    // which no PSP game can read, so it takes nothing from the game.
+    JumpButton jump_button{JumpButton::LeftStick};
     NameEntry name_entry{NameEntry::Keyboard};  // on-screen keyboard, or the name below at once
     std::string name{game_default_name()};  // the fixed name
 
