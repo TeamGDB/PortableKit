@@ -132,6 +132,22 @@ std::string_view trim(std::string_view text) {
 
 } // namespace
 
+void keep_saved(Bindings &bindings, const std::array<bool, kActions> &saved) {
+    for (std::size_t i = 0; i < kActions; ++i) {
+        if (saved[i]) continue;
+        Slots &slots = bindings[i];
+        for (Binding &binding : slots) {
+            if (binding == kNone) continue;
+            for (std::size_t j = 0; j < kActions; ++j) {
+                if (!saved[j]) continue;
+                for (const Binding other : bindings[j])
+                    if (other == binding) binding = kNone;
+            }
+        }
+        if (slots[0] == kNone) std::swap(slots[0], slots[1]);
+    }
+}
+
 const Bindings &default_bindings() {
     static const Bindings value = make_default();
     return value;

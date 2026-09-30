@@ -11,6 +11,8 @@
 // derive from the executable it was given. Anything the ELF already says (its
 // entry point, its segments, its imports) is read from the ELF, not declared.
 
+#include "input/bindings.hpp"
+
 #include <array>
 #include <cstdint>
 #include <span>
@@ -194,6 +196,12 @@ struct GameProfile {
     // Tilt controls from motion sensors. Null: the game does not tilt, and
     // the menu offers none.
     const TiltControls *tilt = nullptr;
+    // The keyboard and mouse this game starts with, for a game played
+    // otherwise than the framework's defaults suppose (WASD and the mouse
+    // for a camera): gets the framework's bindings and mouse setting and
+    // changes what it needs. Only what settings.ini does not hold is taken
+    // from here, so a player's own bindings stay. Null: the framework's.
+    void (*keyboard_defaults)(input::Bindings &bindings, bool &mouse) = nullptr;
 
     // --- Hooks -------------------------------------------------------------
     // Called after the framework has registered its own HLE, so a game can add

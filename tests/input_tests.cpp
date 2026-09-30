@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <array>
 #include <set>
 
 namespace {
@@ -128,7 +129,33 @@ void test_mouse_turn() {
 
 } // namespace
 
+void test_keep_saved() {
+    // A file from before Jump existed: it holds Space on ×, and Jump's new
+    // default of Space must not press both.
+    Bindings b = default_bindings();
+    b[static_cast<std::size_t>(Action::Jump)] = {from_name("Space"), from_name("V")};
+    b[static_cast<std::size_t>(Action::Cross)] = {from_name("Space"), kNone};
+    std::array<bool, kActions> saved{};
+    saved.fill(true);
+    saved[static_cast<std::size_t>(Action::Jump)] = false;
+    keep_saved(b, saved);
+    check(b[static_cast<std::size_t>(Action::Cross)][0] == from_name("Space"), "the saved binding stays");
+    check(b[static_cast<std::size_t>(Action::Jump)][0] == from_name("V") &&
+              b[static_cast<std::size_t>(Action::Jump)][1] == kNone,
+          "a default another control holds is dropped, and the rest moves up");
+    Bindings untouched = default_bindings();
+    std::array<bool, kActions> none{};
+    keep_saved(untouched, none);
+    check(untouched == default_bindings(), "nothing saved, nothing changes");
+    const char *names[] = {"Left", "Right", "A", "D", "Space", "Left Shift", "Right Shift", "Enter", "Z", "C",
+                           "X", "Tab", "P", "Backspace", "Up", "Down", "W", "S", "Q", "E"};
+    bool all = true;
+    for (const char *name : names) all = all && from_name(name) != kNone;
+    check(all, "every key a game's keyboard defaults name by name is known");
+}
+
 int main() {
+    test_keep_saved();
     test_names();
     test_settings_spelling();
     test_layouts();
