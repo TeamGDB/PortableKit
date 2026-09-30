@@ -482,6 +482,22 @@ void load(State &s) {
         field.parse_variable(s.values, text);
         s.overrides[field.key] = env_name(field.variable);
     }
+    // Bindings settings.ini did not hold are defaults, which must not take a
+    // key it gave another control.
+    std::array<bool, input::kActions> saved{};
+    bool any_saved = false;
+    for (std::size_t i = 0; i < input::kActions; ++i) {
+        saved[i] = s.file.count(std::string("input.bind.") + input::info(static_cast<input::Action>(i)).key) != 0u;
+        any_saved = any_saved || saved[i];
+    }
+    if (any_saved) input::keep_saved(s.values.bindings, saved);
+    if (portablekit::env("TRACE_PAD") != nullptr) {
+        std::cout << "[pad] keyboard:";
+        for (std::size_t i = 0; i < input::kActions; ++i)
+            std::cout << " " << input::info(static_cast<input::Action>(i)).key << "="
+                      << input::format(s.values.bindings[i]) << (saved[i] ? "" : "*");
+        std::cout << " (* the game's default); mouse " << (s.values.mouse ? "on" : "off") << std::endl;
+    }
     // A fixed name in the environment is meant for unattended runs, which
     // nobody is there to type in, so it also answers at once unless
     // the OSK_MODE variable says otherwise.
@@ -506,6 +522,8 @@ std::string game_default_name() {
 
 Settings defaults_for(Platform platform) {
     Settings values{};
+    // The game's keyboard first; a phone then turns the mouse off either way.
+    if (const auto keyboard = game().keyboard_defaults) keyboard(values.bindings, values.mouse);
     if (platform == Platform::Android) {
         values.aspect = Aspect::Fill;
         values.fullscreen = true;

@@ -88,6 +88,11 @@ struct ActionInfo {
 // False, leaving `slots` alone, if a name is not known.
 bool parse(std::string_view text, Slots &slots);
 
+// After settings.ini is read: the actions it held keep what it said, and
+// the others, left at the defaults, lose any key or button one of those
+// already has, so a default added later cannot press two controls at once.
+void keep_saved(Bindings &bindings, const std::array<bool, kActions> &saved);
+
 // The menu's way of changing a binding: pressing what is already bound to
 // the action removes it; anything else is taken from any other action and
 // added, replacing the second slot when both are full.
