@@ -33,6 +33,13 @@ std::uint64_t guest_unix_us() { return boot_unix_us() + kernel().now_us(); }
 
 void success(Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, 0u); }
 
+// The console settings a game asks for and tells the system, under
+// TRACE_KERNEL: which language and which confirm button it ends up using.
+bool trace_system_params() {
+    static const bool enabled = portablekit::env("TRACE_KERNEL") != nullptr;
+    return enabled;
+}
+
 void register_utils(HleRegistrar &hle) {
     // The host has no data cache to keep coherent. Phantasy Star Portable 2
     // Infinity (NPJH50332) uses WritebackInvalidateRange.
@@ -243,7 +250,12 @@ void register_platform(HleRegistrar &hle) {
         log_once("npdrm-edata", "[npdrm] sceNpDrmEdataSetupKey (UNVERIFIED: no game traced yet)");
         kernel().finish(ctx, 0u);
     });
-    hle.add("sceImpose", "sceImposeSetLanguageMode", success);
+    hle.add("sceImpose", "sceImposeSetLanguageMode", [](Runtime &, AllegrexContext &ctx) {
+        if (trace_system_params())
+            std::cout << "[sysparam] sceImposeSetLanguageMode language=" << arg(ctx, 0) << " button=" << arg(ctx, 1)
+                      << "\n";
+        kernel().finish(ctx, 0u);
+    });
     // (int *language, int *button): the console's, as GetSystemParamInt says.
     hle.add("sceImpose", "sceImposeGetLanguageMode", [](Runtime &rt, AllegrexContext &ctx) {
         if (arg(ctx, 0) != 0u) rt.memory().store32(arg(ctx, 0), portablekit::game().system_language);
@@ -283,6 +295,8 @@ void register_platform(HleRegistrar &hle) {
         case 9u: value = portablekit::game().confirm_button; break;
         default: break;
         }
+        if (trace_system_params())
+            std::cout << "[sysparam] sceUtilityGetSystemParamInt id=" << arg(ctx, 0) << " -> " << value << "\n";
         rt.memory().store32(arg(ctx, 1), value);
         kernel().finish(ctx, 0u);
     });

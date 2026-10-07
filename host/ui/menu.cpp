@@ -22,6 +22,7 @@
 #include "gpu/vulkan_renderer.hpp"
 #include "profile.hpp"
 #include "input/bindings.hpp"
+#include "input/motion.hpp"
 #include "install/installer.hpp"
 #include "install/user_data.hpp"
 #include "perf/frame_stats.hpp"
@@ -119,6 +120,7 @@ private:
     void video();
     void audio();
     void controls();
+    void tilt_controls();
     void network();
     void system();
     bool confirm_dialog();
@@ -577,6 +579,124 @@ bool address_character(char32_t c) {
            c == U':' || c == U'-' || c == U'[' || c == U']';
 }
 
+// Only for a game that tilts (GameProfile::tilt).
+void Menu::tilt_controls() {
+    const TiltControls *tilt = portablekit::game().tilt;
+    if (tilt == nullptr) return;
+    settings::Settings &s = settings::current();
+    section("Tilt controls");
+    {
+        std::string description = "Tilt the gamepad, or the phone itself, to tilt the game: its motion sensors press "
+                                  "the tilt buttons, and the buttons keep working. It needs a gamepad with a "
+                                  "gyroscope (DualShock 4, DualSense, Switch Pro, a Steam Deck, with or without "
+                                  "Steam Input) or a phone.";
+        if (tilt->note != nullptr) description += std::string(" ") + tilt->note;
+        if (toggle_row("Tilt with motion", s.tilt, options_for("input.tilt", description))) {
+            s.tilt = !s.tilt;
+            settings::save();
+        }
+    }
+    const auto off = [&](RowOptions options) {
+        if (!s.tilt && !options.disabled) {
+            options.disabled = true;
+            options.note = "Tilt with motion is off";
+        }
+        return options;
+    };
+    {
+        // Angle + level horizon is not offered: it did not play well. It is
+        // still honoured when settings.ini or <prefix>_TILT_MODE asks for it
+        // (level or horizon), shown by name, and left for Angle or Rate here.
+        using input::tilt::Mode;
+        static const Mode kOffered[] = {Mode::Angle, Mode::Rate};
+        const int current = s.tilt_mode == Mode::Rate ? 1 : 0;
+        const char *const name = s.tilt_mode == Mode::AngleLevel ? "Angle + level horizon"
+                                 : s.tilt_mode == Mode::Rate     ? "Rate"
+                                                                 : "Angle";
+        if (const int delta = choice_row(
+                "Gyro mode", name,
+                off(options_for("input.tilt_mode",
+                                "Angle: how far the device is tilted from where it was re-centred tilts the game. "
+                                "Rate: turning the device tilts, and the tilt stays when the turning stops, so the "
+                                "device can go back to a comfortable hold.")))) {
+            s.tilt_mode = s.tilt_mode == Mode::AngleLevel ? (delta > 0 ? Mode::Rate : Mode::Angle)
+                                                          : kOffered[cycle(current, delta, 2)];
+            settings::save();
+        }
+    }
+    int full = static_cast<int>(std::lround(s.tilt_full));
+    if (slider_row("Full tilt at", full, static_cast<int>(input::tilt::kMinFullTilt),
+                   static_cast<int>(input::tilt::kMaxFullTilt), 1, "%d deg",
+                   off(options_for("input.tilt_full", "Sensitivity: how far the device is tilted for the game's "
+                                                      "full tilt. Less is more sensitive.")))) {
+        s.tilt_full = static_cast<float>(full);
+        s.tilt_dead_zone = std::min(s.tilt_dead_zone, s.tilt_full - 1.0f);
+        settings::save();
+    }
+    int dead = static_cast<int>(std::lround(s.tilt_dead_zone));
+    if (slider_row("Tilt dead zone", dead, static_cast<int>(input::tilt::kMinDeadZone),
+                   static_cast<int>(input::tilt::kMaxDeadZone), 1, "%d deg",
+                   off(options_for("input.tilt_dead_zone", "How far the device is tilted before anything happens, "
+                                                           "so a steady hand does not tilt the game.")))) {
+        s.tilt_dead_zone = static_cast<float>(dead);
+        settings::save();
+    }
+    if (toggle_row("Invert tilt", s.tilt_invert,
+                   off(options_for("input.tilt_invert", "Tilting the device left tilts the game right.")))) {
+        s.tilt_invert = !s.tilt_invert;
+        settings::save();
+    }
+    {
+        // Not greyed out with tilt controls off: the button jumps either way.
+        static const char *const kJumpNames[] = {"Off", "L3 (left stick click)", "South face button",
+                                                 "East face button", "West face button", "North face button"};
+        const int current = static_cast<int>(s.jump_button);
+        if (const int delta = choice_row(
+                "Jump button", kJumpNames[current],
+                options_for("input.jump_button",
+                            "One gamepad button that presses L and R together, to jump while one hand holds the "
+                            "device level. Pressing L and R together still jumps, and a jump always wins over the "
+                            "motion. L3 takes nothing from the game; a face button no longer presses its own "
+                            "button. On the keyboard, bind Jump under Keyboard and mouse."))) {
+            s.jump_button = static_cast<settings::JumpButton>(cycle(current, delta, 6));
+            settings::save();
+        }
+    }
+    if (s.tilt_mode == input::tilt::Mode::AngleLevel) {
+        RowOptions o = off(options_for("input.tilt_level_limit",
+                                       "How far the picture may turn back against the game's tilt; past it the "
+                                       "ground turns on the screen again. The picture is zoomed as it turns so no "
+                                       "corner is left empty; a larger limit crops more."));
+        if (s.tilt_mode != input::tilt::Mode::AngleLevel && !o.disabled) {
+            o.disabled = true;
+            o.note = "Only for Angle + level horizon";
+        }
+        int limit = static_cast<int>(std::lround(s.tilt_level_limit));
+        if (slider_row("Level horizon limit", limit, static_cast<int>(input::tilt::kMinLevelLimit),
+                       static_cast<int>(input::tilt::kMaxLevelLimit), 1, "%d deg", o)) {
+            s.tilt_level_limit = static_cast<float>(limit);
+            settings::save();
+        }
+    }
+    if (button_row("Re-centre tilt",
+                   off({false, {}, "Makes however the device is held now the level position. This also happens "
+                                   "when the game starts, when this menu closes, and with R3 on a gamepad."}))) {
+        input::motion::recenter();
+    }
+    if (s.tilt) {
+        // Read here too: the game's input is off while the menu is open, and
+        // the row below is how a player sees the sensors work.
+        (void)input::motion::sample(renderer().gamepad(), renderer().window(), false);
+        info_row("Motion from", input::motion::source());
+        float roll = 0.0f;
+        if (input::motion::reading(roll)) {
+            char text[32];
+            std::snprintf(text, sizeof(text), "%+.1f deg", static_cast<double>(roll));
+            info_row("Tilted now", text);
+        }
+    }
+}
+
 void Menu::controls() {
     settings::Settings &s = settings::current();
     section("Gamepad");
@@ -586,9 +706,12 @@ void Menu::controls() {
         info_row("Connected", pad == nullptr ? "No gamepad; the keyboard and mouse drive the game"
                                              : (name != nullptr ? name : "Gamepad"));
     }
-    if (choice_row("Confirm button", s.confirm_south ? "Bottom (Western)" : "Right, ○ (Japanese)",
-                   options_for("input.confirm", "Which face button confirms, in the game and in this menu. The "
-                                                "game's prompts show ○ to confirm and × to go back."))) {
+    const bool cross_confirms = portablekit::game().confirm_button == 1u;
+    if (choice_row("Confirm button", s.confirm_south ? "Bottom (Western)" : "Right (Japanese)",
+                   options_for("input.confirm",
+                               std::string("Which face button confirms, in the game and in this menu. The game's "
+                                           "prompts show ") +
+                                   (cross_confirms ? "× to confirm and ○ to go back." : "○ to confirm and × to go back.")))) {
         s.confirm_south = !s.confirm_south;
         settings::save();
     }
@@ -709,6 +832,8 @@ void Menu::controls() {
         }
     }
 
+    tilt_controls();
+
     section(game().player_name_label);
     {
         const bool keyboard = s.name_entry == settings::NameEntry::Keyboard;
@@ -782,13 +907,19 @@ void Menu::controls() {
     }
     for (std::size_t i = 0; i < input::kActions; ++i) {
         const auto action = static_cast<input::Action>(i);
+        if (action == input::Action::Jump && portablekit::game().tilt == nullptr) continue;
         std::string value = input::format(s.bindings[i]);
         if (binding_ == action) value = "Press a key or a mouse button";
         else if (value.empty()) value = "None";
         const RowOptions o{false, {},
                            "Press a key or a mouse button to add it, or one it has already to remove it; Esc "
                            "cancels. A key taken from another control leaves that one."};
-        if (value_row(input::info(action).label, value, o) && !binding_) {
+        std::string label = input::info(action).label;
+        // The game's confirm and back buttons, as the console says.
+        const bool cross_confirms = portablekit::game().confirm_button == 1u;
+        if (action == input::Action::Circle) label += cross_confirms ? "  (back)" : "  (confirm)";
+        if (action == input::Action::Cross) label += cross_confirms ? "  (confirm)" : "  (back)";
+        if (value_row(label.c_str(), value, o) && !binding_) {
             binding_ = action;
             layer.begin_binding_capture();
         }
@@ -826,6 +957,13 @@ void Menu::controls() {
         restore("input.touch_opacity", s.touch_opacity, d.touch_opacity);
         restore("input.touch_size", s.touch_size, d.touch_size);
         restore("input.touch_camera_speed", s.touch_camera_speed, d.touch_camera_speed);
+        restore("input.tilt", s.tilt, d.tilt);
+        restore("input.tilt_mode", s.tilt_mode, d.tilt_mode);
+        restore("input.tilt_full", s.tilt_full, d.tilt_full);
+        restore("input.tilt_dead_zone", s.tilt_dead_zone, d.tilt_dead_zone);
+        restore("input.tilt_invert", s.tilt_invert, d.tilt_invert);
+        restore("input.tilt_level_limit", s.tilt_level_limit, d.tilt_level_limit);
+        restore("input.jump_button", s.jump_button, d.jump_button);
         s.bindings = d.bindings;
         settings::save();
     }

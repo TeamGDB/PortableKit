@@ -48,18 +48,18 @@ constexpr const char *kSeparator = " / ";
 
 constexpr ActionInfo kInfo[kActions] = {
     {"stick_up", "Move forward"},  {"stick_left", "Move left"},    {"stick_down", "Move back"},
-    {"stick_right", "Move right"}, {"triangle", "△"},              {"circle", "○  (confirm)"},
-    {"cross", "×  (back)"},        {"square", "□"},                {"l", "L"},
+    {"stick_right", "Move right"}, {"triangle", "△"},              {"circle", "○"},
+    {"cross", "×"},                {"square", "□"},                {"l", "L"},
     {"r", "R"},                    {"start", "START"},             {"select", "SELECT"},
     {"dpad_up", "D-pad up"},       {"dpad_left", "D-pad left"},    {"dpad_down", "D-pad down"},
     {"dpad_right", "D-pad right"}, {"camera_up", "Camera up"},     {"camera_left", "Camera left"},
-    {"camera_down", "Camera down"}, {"camera_right", "Camera right"},
+    {"camera_down", "Camera down"}, {"camera_right", "Camera right"}, {"jump", "Jump (L and R together)"},
 };
 
 // SceCtrlButtons for the actions that are buttons.
 constexpr std::uint32_t kButtonBits[kActions] = {
     0u, 0u, 0u, 0u, 0x1000u, 0x2000u, 0x4000u, 0x8000u, 0x0100u, 0x0200u, 0x0008u, 0x0001u,
-    0x0010u, 0x0080u, 0x0040u, 0x0020u, 0u, 0u, 0u, 0u,
+    0x0010u, 0x0080u, 0x0040u, 0x0020u, 0u, 0u, 0u, 0u, 0u,
 };
 
 Bindings make_default() {
@@ -131,6 +131,22 @@ std::string_view trim(std::string_view text) {
 }
 
 } // namespace
+
+void keep_saved(Bindings &bindings, const std::array<bool, kActions> &saved) {
+    for (std::size_t i = 0; i < kActions; ++i) {
+        if (saved[i]) continue;
+        Slots &slots = bindings[i];
+        for (Binding &binding : slots) {
+            if (binding == kNone) continue;
+            for (std::size_t j = 0; j < kActions; ++j) {
+                if (!saved[j]) continue;
+                for (const Binding other : bindings[j])
+                    if (other == binding) binding = kNone;
+            }
+        }
+        if (slots[0] == kNone) std::swap(slots[0], slots[1]);
+    }
+}
 
 const Bindings &default_bindings() {
     static const Bindings value = make_default();
@@ -232,6 +248,7 @@ PadInput read(const Bindings &bindings, const std::function<bool(Binding)> &held
     pad.stick_y = axis(Action::StickUp, Action::StickDown);
     pad.camera_x = axis(Action::CameraLeft, Action::CameraRight);
     pad.camera_y = axis(Action::CameraUp, Action::CameraDown);
+    pad.jump = on[static_cast<std::size_t>(Action::Jump)];
     return pad;
 }
 

@@ -66,6 +66,15 @@ echo "linking resources"
 # The licences of what the APK carries: the third-party notices, SDL's and
 # FFmpeg's (with where its source is), and the font's when it is packed.
 mkdir -p "$work/assets/licenses"
+kit="$(cd "$here/../.." && pwd)"
+cp "$kit/LICENSE" "$work/assets/licenses/PortableKit-LICENSE.txt"
+cp "$kit/third_party/imgui/LICENSE.txt" "$work/assets/licenses/DearImGui-LICENSE.txt"
+cp "$kit/third_party/tiny_aes/UNLICENSE" "$work/assets/licenses/tiny-AES-c-UNLICENSE.txt"
+cp "$kit/third_party/xxhash/LICENSE" "$work/assets/licenses/xxHash-LICENSE.txt"
+game_repo="${GAME_REPO:-$(git -C "$game_res" rev-parse --show-toplevel 2>/dev/null || echo "$game_res")}"
+if [[ -f "$game_repo/LICENSE" ]]; then
+    cp "$game_repo/LICENSE" "$work/assets/licenses/Game-LICENSE.txt"
+fi
 if [[ -n "${NOTICES:-}" ]]; then cp "$NOTICES" "$work/assets/licenses/"; fi
 cp "$sdl_dir/LICENSE.txt" "$work/assets/licenses/SDL3-LICENSE.txt"
 cp "$build_dir"/bin/lib/FFmpeg-COPYING.LGPLv2.1.txt "$build_dir"/bin/lib/FFmpeg-SOURCE.txt "$work/assets/licenses/"
@@ -93,9 +102,10 @@ lib="$work/lib/arm64-v8a"
 cp "$sdl_lib" "$lib/libSDL3.so"
 cp "$build_dir/bin/libmain.so" "$lib/"
 cp "$build_dir"/bin/lib/libavcodec.so "$build_dir"/bin/lib/libavutil.so "$lib/"
+shopt -s nullglob
 overlays=("$build_dir"/bin/overlays/libovl*.so)
 if [[ -n "$overlay_limit" ]]; then overlays=("${overlays[@]:0:$overlay_limit}"); fi
-cp "${overlays[@]}" "$lib/"
+if [[ ${#overlays[@]} -gt 0 ]]; then cp "${overlays[@]}" "$lib/"; fi
 strip="$(ls -d "$ANDROID_NDK"/toolchains/llvm/prebuilt/*/bin/llvm-strip | head -1)"
 "$strip" --strip-unneeded "$lib"/*.so
 # Every function a packed library imports must be in Android $min_sdk's system

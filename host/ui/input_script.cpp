@@ -8,6 +8,7 @@
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <deque>
@@ -43,6 +44,11 @@ struct State {
         std::uint8_t mouse_button{};
     };
     std::vector<Release> releases;
+    // The virtual pad's motion sensors (tilt, gyro), sent again every frame
+    // as a real pad streams them.
+    bool sensors{};
+    float accel[3]{0.0f, 9.80665f, 0.0f};
+    float gyro[3]{};
     // Strings handed to SDL events must outlive them.
     std::deque<std::string> strings;
     // <prefix>_INPUT_LIVE: a file whose appended lines are read as they come.
@@ -97,6 +103,8 @@ std::pair<std::string, std::uint64_t> name_and_frames(const std::string &argumen
 }
 
 bool mouse_step(const std::string &action) { return action == "mouse" || action == "click"; }
+
+bool sensor_step(const std::string &action) { return action == "tilt" || action == "gyro"; }
 
 void run(const Step &step) {
     State &s = state();
@@ -162,6 +170,27 @@ void run(const Step &step) {
             return;
         }
         SDL_SetJoystickVirtualAxis(s.pad, axis, static_cast<Sint16>(std::clamp(value, -1.0f, 1.0f) * 32767.0f));
+    } else if (step.action == "tilt") {
+        if (s.pad == nullptr) return;
+        float roll = 0.0f;
+        float pitch = 0.0f;
+        std::stringstream(step.argument) >> roll >> pitch;
+        constexpr float kRadians = 3.14159265358979f / 180.0f;
+        constexpr float kGravity = 9.80665f;
+        // What a pad at rest reads: the reaction to gravity, straight up.
+        s.accel[0] = -std::sin(roll * kRadians) * kGravity;
+        s.accel[1] = std::cos(roll * kRadians) * std::cos(pitch * kRadians) * kGravity;
+        s.accel[2] = std::cos(roll * kRadians) * std::sin(pitch * kRadians) * kGravity;
+    } else if (step.action == "gyro") {
+        if (s.pad == nullptr) return;
+        float x = 0.0f;
+        float y = 0.0f;
+        float z = 0.0f;
+        std::stringstream(step.argument) >> x >> y >> z;
+        constexpr float kRadians = 3.14159265358979f / 180.0f;
+        s.gyro[0] = x * kRadians;
+        s.gyro[1] = y * kRadians;
+        s.gyro[2] = z * kRadians;
     } else if (step.action == "text") {
         SDL_Event event{};
         event.type = SDL_EVENT_TEXT_INPUT;
@@ -207,7 +236,7 @@ void sort_steps(State &s) {
 }
 
 // Reads the lines appended to the live file since the last call. Their frames
-// count from now, so a line `30:pad a` presses ○ half a second after it is read.
+// count from now, so a line `30:pad a` presses the south button half a second after it is read.
 void read_live(State &s) {
     std::ifstream file(s.live_path, std::ios::binary);
     if (!file) return;
@@ -247,6 +276,7 @@ void attach() {
         if (file) s.live_offset = file.tellg();
         uses_pad = true;
         uses_mouse = true;
+        s.sensors = true;
         std::cout << "[script] reading live input from " << s.live_path << std::endl;
     }
     if (const char *text = portablekit::env("INPUT_SCRIPT"); text != nullptr) {
@@ -255,7 +285,8 @@ void attach() {
         while (std::getline(list, item, ';')) {
             Step step;
             if (!parse_step(item, 0u, step)) continue;
-            uses_pad = uses_pad || step.action == "pad" || step.action == "axis";
+            uses_pad = uses_pad || step.action == "pad" || step.action == "axis" || sensor_step(step.action);
+            s.sensors = s.sensors || sensor_step(step.action);
             uses_mouse = uses_mouse || mouse_step(step.action);
             s.steps.push_back(step);
         }
@@ -281,6 +312,13 @@ void attach_pad(State &s) {
     desc.button_mask = (1u << SDL_GAMEPAD_BUTTON_COUNT) - 1u;
     // The renderer gives the game this pad over a real one by its name.
     desc.name = kInputScriptName;
+    // A gyroscope and an accelerometer only for a script that moves them, so
+    // every other script's pad stays the plain one it always was.
+    static const SDL_VirtualJoystickSensorDesc kSensors[] = {{SDL_SENSOR_ACCEL, 60.0f}, {SDL_SENSOR_GYRO, 60.0f}};
+    if (s.sensors) {
+        desc.nsensors = 2u;
+        desc.sensors = kSensors;
+    }
     const SDL_JoystickID id = SDL_AttachVirtualJoystick(&desc);
     if (id == 0) {
         std::cout << "[script] cannot attach a virtual gamepad: " << SDL_GetError() << std::endl;
@@ -293,7 +331,7 @@ void attach_pad(State &s) {
 
 void tick() {
     State &s = state();
-    if (s.steps.empty() && s.releases.empty() && s.live_path.empty()) return;
+    if (s.steps.empty() && s.releases.empty() && s.live_path.empty() && !s.sensors) return;
     ++s.frame;
     if (!s.live_path.empty() && s.frame % 10u == 0u) read_live(s);
     for (auto it = s.releases.begin(); it != s.releases.end();) {
@@ -309,6 +347,11 @@ void tick() {
     while (!s.steps.empty() && s.steps.front().frame <= s.frame) {
         run(s.steps.front());
         s.steps.pop_front();
+    }
+    if (s.sensors && s.pad != nullptr) {
+        const Uint64 now = SDL_GetTicksNS();
+        SDL_SendJoystickVirtualSensorData(s.pad, SDL_SENSOR_ACCEL, now, s.accel, 3);
+        SDL_SendJoystickVirtualSensorData(s.pad, SDL_SENSOR_GYRO, now, s.gyro, 3);
     }
 }
 
