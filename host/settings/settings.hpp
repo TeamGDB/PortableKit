@@ -1,6 +1,7 @@
 #pragma once
 
 #include "input/bindings.hpp"
+#include "input/tilt.hpp"
 
 #include <cstdint>
 #include <string>
@@ -30,6 +31,9 @@ enum class PresentMode { Fifo, Mailbox, Immediate };
 enum class Aspect { Original, Stretch, Fill };
 enum class PerfDisplay { Off, Overlay, OverlayAndLog, Log };
 enum class RightStick { Camera, DPad, Off };
+// The gamepad button that presses a tilting game's both tilt buttons at once
+// (LocoRoco's jump), instead of what it presses otherwise.
+enum class JumpButton { Off, LeftStick, South, East, West, North };
 // What answers the game when it asks for text such as the player's name.
 enum class NameEntry { Keyboard, Fixed };
 // Presents per second. The game makes 30 frames a second; the faster rates
@@ -64,7 +68,10 @@ struct Settings {
     bool mute{};
 
     // Controls
-    bool confirm_south{};              // confirm (circle) on the south face button
+    // The game's confirm button on the south face button rather than the
+    // east one. The default follows the console the profile describes: south
+    // where cross confirms, east where circle does.
+    bool confirm_south{};
     float dead_zone{0.15f};
     float trigger{0.25f};
     // What LT/RT (L2/R2) press past the trigger point: 0 is L and R like the
@@ -97,6 +104,18 @@ struct Settings {
     float touch_opacity{0.5f};         // 0.1-1
     float touch_size{1.0f};            // 0.6-1.6 of the default size
     float touch_camera_speed{180.0f};  // degrees the camera turns for a drag across the screen's height
+    // Tilt controls, for a game that tilts (GameProfile::tilt): the roll of
+    // a gamepad with motion sensors, or of the phone itself, presses the
+    // game's tilt buttons (input/tilt.hpp). Off until the player turns it on.
+    bool tilt{};
+    input::tilt::Mode tilt_mode{input::tilt::Mode::Angle};
+    float tilt_full{12.0f};            // degrees of roll from neutral for a full tilt
+    float tilt_dead_zone{4.0f};        // degrees of roll from neutral before anything is pressed
+    bool tilt_invert{};
+    float tilt_level_limit{10.0f};     // Angle + level horizon: degrees the picture turns at most
+    // For a game that tilts: the gamepad button that jumps. L3 by default,
+    // which no PSP game can read, so it takes nothing from the game.
+    JumpButton jump_button{JumpButton::LeftStick};
     NameEntry name_entry{NameEntry::Keyboard};  // on-screen keyboard, or the name below at once
     std::string name{game_default_name()};  // the fixed name
 

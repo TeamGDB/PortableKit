@@ -109,6 +109,16 @@ const Names<PerfDisplay> kPerfDisplays{{{PerfDisplay::Off, "off"},
                                         {PerfDisplay::Overlay, "overlay"},
                                         {PerfDisplay::OverlayAndLog, "overlay+log"},
                                         {PerfDisplay::Log, "log"}}};
+const Names<input::tilt::Mode> kTiltModes{{{input::tilt::Mode::Angle, "angle"},
+                                            {input::tilt::Mode::AngleLevel, "level"},
+                                            {input::tilt::Mode::AngleLevel, "horizon"},
+                                            {input::tilt::Mode::Rate, "rate"}}};
+const Names<JumpButton> kJumpButtons{{{JumpButton::Off, "off"},
+                                      {JumpButton::LeftStick, "l3"},
+                                      {JumpButton::South, "south"},
+                                      {JumpButton::East, "east"},
+                                      {JumpButton::West, "west"},
+                                      {JumpButton::North, "north"}}};
 const Names<RightStick> kRightSticks{
     {{RightStick::Camera, "camera"}, {RightStick::DPad, "dpad"}, {RightStick::Off, "off"}}};
 // A trigger profile by the key the game gives it, or "standard" for L and R.
@@ -304,6 +314,41 @@ const std::vector<Field> &fields() {
          [](const Settings &s) { return format_float(s.touch_camera_speed); }, nullptr},
         BOOL_FIELD("input.invert_mouse_x", invert_mouse_x),
         BOOL_FIELD("input.invert_mouse_y", invert_mouse_y),
+        {"input.tilt", "TILT",
+         [](Settings &s, const std::string &t) { return parse_bool(t, s.tilt); },
+         [](const Settings &s) { return std::string(s.tilt ? "1" : "0"); },
+         [](Settings &s, const char *t) { s.tilt = variable_flag(t); }},
+        {"input.tilt_mode", "TILT_MODE",
+         [](Settings &s, const std::string &t) { return kTiltModes.parse(t, s.tilt_mode); },
+         [](const Settings &s) { return kTiltModes.format(s.tilt_mode); },
+         [](Settings &s, const char *t) {
+             if (!kTiltModes.parse(t, s.tilt_mode)) std::cerr << "[settings] " << env_name("TILT_MODE") << ": angle, rate, or level (also horizon)\n";
+         }},
+        {"input.tilt_full", "TILT_FULL",
+         [](Settings &s, const std::string &t) {
+             return parse_float(t, input::tilt::kMinFullTilt, input::tilt::kMaxFullTilt, s.tilt_full);
+         },
+         [](const Settings &s) { return format_float(s.tilt_full); },
+         [](Settings &s, const char *t) {
+             s.tilt_full = variable_float(t, 12.0f, input::tilt::kMinFullTilt, input::tilt::kMaxFullTilt);
+         }},
+        {"input.tilt_dead_zone", "TILT_DEAD_ZONE",
+         [](Settings &s, const std::string &t) {
+             return parse_float(t, input::tilt::kMinDeadZone, input::tilt::kMaxDeadZone, s.tilt_dead_zone);
+         },
+         [](const Settings &s) { return format_float(s.tilt_dead_zone); },
+         [](Settings &s, const char *t) {
+             s.tilt_dead_zone = variable_float(t, 4.0f, input::tilt::kMinDeadZone, input::tilt::kMaxDeadZone);
+         }},
+        BOOL_FIELD("input.tilt_invert", tilt_invert),
+        {"input.jump_button", nullptr,
+         [](Settings &s, const std::string &t) { return kJumpButtons.parse(t, s.jump_button); },
+         [](const Settings &s) { return kJumpButtons.format(s.jump_button); }, nullptr},
+        {"input.tilt_level_limit", nullptr,
+         [](Settings &s, const std::string &t) {
+             return parse_float(t, input::tilt::kMinLevelLimit, input::tilt::kMaxLevelLimit, s.tilt_level_limit);
+         },
+         [](const Settings &s) { return format_float(s.tilt_level_limit); }, nullptr},
         {"input.name_entry", "OSK_MODE",
          [](Settings &s, const std::string &t) { return kNameEntries.parse(t, s.name_entry); },
          [](const Settings &s) { return kNameEntries.format(s.name_entry); },
@@ -437,6 +482,22 @@ void load(State &s) {
         field.parse_variable(s.values, text);
         s.overrides[field.key] = env_name(field.variable);
     }
+    // Bindings settings.ini did not hold are defaults, which must not take a
+    // key it gave another control.
+    std::array<bool, input::kActions> saved{};
+    bool any_saved = false;
+    for (std::size_t i = 0; i < input::kActions; ++i) {
+        saved[i] = s.file.count(std::string("input.bind.") + input::info(static_cast<input::Action>(i)).key) != 0u;
+        any_saved = any_saved || saved[i];
+    }
+    if (any_saved) input::keep_saved(s.values.bindings, saved);
+    if (portablekit::env("TRACE_PAD") != nullptr) {
+        std::cout << "[pad] keyboard:";
+        for (std::size_t i = 0; i < input::kActions; ++i)
+            std::cout << " " << input::info(static_cast<input::Action>(i)).key << "="
+                      << input::format(s.values.bindings[i]) << (saved[i] ? "" : "*");
+        std::cout << " (* the game's default); mouse " << (s.values.mouse ? "on" : "off") << std::endl;
+    }
     // A fixed name in the environment is meant for unattended runs, which
     // nobody is there to type in, so it also answers at once unless
     // the OSK_MODE variable says otherwise.
@@ -461,6 +522,11 @@ std::string game_default_name() {
 
 Settings defaults_for(Platform platform) {
     Settings values{};
+    // Confirm where a console of the game's region has it: cross, the south
+    // button, outside Japan; circle, the east button, in Japan.
+    values.confirm_south = game().confirm_button == 1u;
+    // The game's keyboard first; a phone then turns the mouse off either way.
+    if (const auto keyboard = game().keyboard_defaults) keyboard(values.bindings, values.mouse);
     if (platform == Platform::Android) {
         values.aspect = Aspect::Fill;
         values.fullscreen = true;

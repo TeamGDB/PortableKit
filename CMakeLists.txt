@@ -345,6 +345,17 @@ if(PSPRECOMP_BUILD_TESTS)
     add_test(NAME portablekit_profile_tests COMMAND portablekit_profile_tests)
 endif()
 
+# Tilt controls: the device's roll from its motion sensors as a game's tilt
+# buttons, with synthetic sensor readings.
+if(PSPRECOMP_BUILD_TESTS)
+    add_executable(portablekit_tilt_tests
+        "${PORTABLEKIT_ROOT}/tests/tilt_tests.cpp"
+        "${PORTABLEKIT_ROOT}/host/input/tilt.cpp")
+    target_include_directories(portablekit_tilt_tests PRIVATE "${PORTABLEKIT_ROOT}/host")
+    set_target_properties(portablekit_tilt_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME portablekit_tilt_tests COMMAND portablekit_tilt_tests)
+endif()
+
 # Texture pack import: finding a pack in the layouts packs come in, the
 # checks made before copying, and the copy, swap and backup; and the PSP's DXT
 # block layout. No game data.

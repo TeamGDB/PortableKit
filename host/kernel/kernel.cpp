@@ -2,6 +2,7 @@
 #include "kernel.hpp"
 
 #include "kernel/fast_loading.hpp"
+#include "kernel/stall_watchdog.hpp"
 #include "kernel/load_trace.hpp"
 #include "perf/frame_stats.hpp"
 #include "settings/settings.hpp"
@@ -9,6 +10,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <thread>
@@ -417,6 +419,7 @@ void Kernel::schedule(AllegrexContext &ctx) {
             return;
         }
 
+        stall_watchdog::idle(*this);
         const auto next = next_event_us();
         if (!next || idle_vblanks_ > kIdleVBlankLimit) {
             std::string report = "PSP scheduler deadlock: no runnable thread";
@@ -434,6 +437,65 @@ void Kernel::schedule(AllegrexContext &ctx) {
             return;
         }
         advance_clock(*next);
+    }
+}
+
+void Kernel::dump_state(std::ostream &out) const {
+    const auto hex = [](std::uint32_t value) {
+        char text[16];
+        std::snprintf(text, sizeof(text), "0x%08X", value);
+        return std::string(text);
+    };
+    const auto real_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                                   pacing_real_base_)
+                             .count();
+    out << "[stall] clock " << now_us_ << " us, next vblank " << next_vblank_us_ << " us, vblanks " << vblank_count_
+        << ", idle vblanks " << idle_vblanks_ << ", current thread " << current_uid_ << ", interrupts "
+        << (interrupts_enabled_ ? "on" : "off") << " (" << pending_interrupts_.size() << " pending"
+        << (interrupt_active_ ? ", one running" : "") << "), dispatch " << (dispatch_enabled_ ? "on" : "off")
+        << "\n[stall] pacing " << (pacing_fast_ ? "fast loading" : "normal");
+    if (pacing_started_)
+        out << ", " << (now_us_ - pacing_virtual_base_) / 1000.0 << " ms emulated against " << real_ms
+            << " ms real since its base";
+    else
+        out << ", not started (unpaced, or just resynchronised)";
+    out << "\n";
+    for (const auto &[uid, thread] : threads_) {
+        out << "[stall] thread " << uid << " '" << thread->name << "' " << status_name(thread->status) << " prio "
+            << thread->priority << " pc " << hex(thread->context.pc) << " ra " << hex(thread->context.gpr[31])
+            << " sp " << hex(thread->context.gpr[29]);
+        if (thread->status == ThreadStatus::Waiting) {
+            const WaitState &wait = thread->wait;
+            out << " waits " << wait_name(wait.type) << " object " << wait.object << " value " << hex(wait.value)
+                << " mode " << wait.mode;
+            if (wait.deadline_us)
+                out << " deadline " << (*wait.deadline_us >= now_us_ ? "+" : "-")
+                    << (*wait.deadline_us >= now_us_ ? *wait.deadline_us - now_us_ : now_us_ - *wait.deadline_us)
+                    << " us";
+            switch (wait.type) {
+            case WaitType::Semaphore:
+                if (const auto it = semaphores.find(wait.object); it != semaphores.end())
+                    out << " (sema '" << it->second.name << "' count " << it->second.count << "/"
+                        << it->second.max_count << ", " << it->second.waiters.size() << " waiting)";
+                break;
+            case WaitType::EventFlag:
+                if (const auto it = event_flags.find(wait.object); it != event_flags.end())
+                    out << " (flag '" << it->second.name << "' pattern " << hex(it->second.pattern) << ", "
+                        << it->second.waiters.size() << " waiting)";
+                break;
+            case WaitType::Mutex:
+                if (const auto it = mutexes.find(wait.object); it != mutexes.end())
+                    out << " (mutex '" << it->second.name << "' owner " << it->second.owner << " count "
+                        << it->second.lock_count << ")";
+                break;
+            case WaitType::Mailbox:
+                if (const auto it = mailboxes.find(wait.object); it != mailboxes.end())
+                    out << " (mailbox '" << it->second.name << "' " << it->second.messages.size() << " messages)";
+                break;
+            default: break;
+            }
+        }
+        out << "\n";
     }
 }
 

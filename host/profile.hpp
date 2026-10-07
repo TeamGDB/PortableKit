@@ -11,6 +11,8 @@
 // derive from the executable it was given. Anything the ELF already says (its
 // entry point, its segments, its imports) is read from the ELF, not declared.
 
+#include "input/bindings.hpp"
+
 #include <array>
 #include <cstdint>
 #include <span>
@@ -43,6 +45,21 @@ struct TriggerProfile {
     const char *label;   // the menu, e.g. "Bows (R / △)"
     std::uint32_t left;  // the PSP buttons L2 presses, as SceCtrlButtons bits
     std::uint32_t right; // and R2
+};
+
+// A game played by tilting its world (LocoRoco tilts with L and R): what the
+// device's roll presses when the player turns tilt controls on
+// (input/tilt.hpp, input/motion.hpp).
+struct TiltControls {
+    std::uint32_t left;  // the PSP buttons held to tilt left, as SceCtrlButtons bits
+    std::uint32_t right; // and right
+    // True when the game eases its tilt towards the held side, so pressing
+    // a button part of the time tilts it part of the way: the roll between
+    // the dead zone and a full tilt then presses for that share of frames.
+    // False: past the dead zone the button is simply held.
+    bool proportional;
+    // What the menu adds about the game's own controls, a whole sentence.
+    const char *note;
 };
 
 // Another release of the game than the one a port supports, and what the
@@ -203,6 +220,15 @@ struct GameProfile {
     // What the menu says about them, after "Standard: L and R, like the
     // shoulders."
     const char *trigger_profiles_note = nullptr;
+    // Tilt controls from motion sensors. Null: the game does not tilt, and
+    // the menu offers none.
+    const TiltControls *tilt = nullptr;
+    // The keyboard and mouse this game starts with, for a game played
+    // otherwise than the framework's defaults suppose (WASD and the mouse
+    // for a camera): gets the framework's bindings and mouse setting and
+    // changes what it needs. Only what settings.ini does not hold is taken
+    // from here, so a player's own bindings stay. Null: the framework's.
+    void (*keyboard_defaults)(input::Bindings &bindings, bool &mouse) = nullptr;
 
     // --- Hooks -------------------------------------------------------------
     // Called after the framework has registered its own HLE, so a game can add
