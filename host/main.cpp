@@ -155,14 +155,14 @@ void sync_memory_stick_patch(const GameFiles &files) {
     const std::filesystem::path source = files.disc_image / folder_name;
     std::error_code ec;
     if (!std::filesystem::is_directory(source, ec) || ec) {
-        std::cerr << "[patch] no patch folder at " << source.string() << "\\n";
+        std::cerr << "[patch] no patch folder at " << source.string() << "\n";
         return;
     }
 
     const std::filesystem::path target = files.memory_stick / "PSP" / "GAME" / folder_name;
     std::filesystem::create_directories(target.parent_path(), ec);
     if (ec) {
-        std::cerr << "[patch] cannot create " << target.parent_path().string() << ": " << ec.message() << "\\n";
+        std::cerr << "[patch] cannot create " << target.parent_path().string() << ": " << ec.message() << "\n";
         return;
     }
     std::filesystem::copy(source, target,
@@ -171,11 +171,11 @@ void sync_memory_stick_patch(const GameFiles &files) {
                           ec);
     if (ec) {
         std::cerr << "[patch] failed to copy " << source.string() << " to " << target.string()
-                  << ": " << ec.message() << "\\n";
+                  << ": " << ec.message() << "\n";
         return;
     }
     std::cerr << "[patch] copied " << source.string() << " to virtual ms0:/" << "PSP/GAME/"
-              << folder_name << "\\n";
+              << folder_name << "\n";
 }
 
 // The layout a game_dir has always had; the profile's game directory by default.
