@@ -949,7 +949,7 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
         const std::uint32_t size = static_cast<std::uint32_t>(
             std::min<std::uint64_t>(file.size, std::numeric_limits<std::uint32_t>::max()));
         std::cerr << "[npdrm] sceNpDrmEdataGetDataSize fd=" << fd << " path=" << file.path
-                  << " size=" << size << (file.filter ? " (filtered)" : " (raw; decryption not applied)") << "\\n";
+                  << " size=" << size << (file.filter ? " (filtered)" : " (raw; decryption not applied)") << "\n";
         kernel().finish(ctx, size);
     });
 
