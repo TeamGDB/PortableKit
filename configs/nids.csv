@@ -571,3 +571,4 @@ scePspNpDrm_user,0x08D98894,sceNpDrmEdataSetupKey
 ThreadManForUser,0x8DAFF657,sceKernelCreateTlspl
 ThreadManForUser,0x32BF938E,sceKernelDeleteTlspl
 Kernel_Library,0xFA835CDE,sceKernelGetTlsAddr
+scePspNpDrm_user,0x219EF5CC,sceNpDrmEdataGetDataSize
