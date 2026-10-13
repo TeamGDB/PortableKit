@@ -218,7 +218,7 @@ std::optional<std::pair<std::uint64_t, std::uint64_t>> parse_lbn_path(const std:
 std::filesystem::path host_path(const std::string &path) { return io().memory_stick / path; }
 
 std::string normalized_path(std::string path) {
-    std::replace(path.begin(), path.end(), '\\\\', '/');
+    std::replace(path.begin(), path.end(), '\\', '/');
     std::transform(path.begin(), path.end(), path.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     while (!path.empty() && path.front() == '/') path.erase(path.begin());
