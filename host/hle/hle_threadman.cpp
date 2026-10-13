@@ -925,6 +925,38 @@ void register_lightweight_mutexes(HleRegistrar &hle) {
     };
     hle.add("Kernel_Library", "sceKernelLockLwMutex", lock);
     hle.add("Kernel_Library", "sceKernelLockLwMutexCB", lock);
+    // Non-blocking counterpart to sceKernelLockLwMutex. Unlike the generic
+    // logging stub, this must report contention so callers can decide whether
+    // to retry or take their file-system error path.
+    hle.add("Kernel_Library", "sceKernelTryLockLwMutex_600", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t work_area = arg(ctx, 0);
+        const std::int32_t count = as_signed(arg(ctx, 1));
+        SceUID uid = 0;
+        Mutex *mutex = lwmutex::find(work_area, uid);
+        if (mutex == nullptr) {
+            kernel().finish(ctx, error::kMutexNotFound);
+            return;
+        }
+        if (count <= 0) {
+            kernel().finish(ctx, error::kIllegalCount);
+            return;
+        }
+        if (mutex->lock_count == 0) {
+            mutex->owner = kernel().current_uid();
+            mutex->lock_count = count;
+        } else if (mutex->owner == kernel().current_uid()) {
+            if ((mutex->attributes & kMutexAttrRecursive) == 0u) {
+                kernel().finish(ctx, error::kMutexRecursiveNotAllowed);
+                return;
+            }
+            mutex->lock_count += count;
+        } else {
+            kernel().finish(ctx, error::kMutexLocked);
+            return;
+        }
+        lwmutex::write_state(rt.memory(), work_area, *mutex);
+        kernel().finish(ctx, 0u);
+    });
     hle.add("Kernel_Library", "sceKernelUnlockLwMutex", [](Runtime &rt, AllegrexContext &ctx) {
         const std::uint32_t work_area = arg(ctx, 0);
         const std::int32_t count = as_signed(arg(ctx, 1));

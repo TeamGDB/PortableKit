@@ -248,6 +248,25 @@ bool execute_simple(Runtime &rt, AllegrexContext &ctx, const DecodedInstruction 
     const std::uint32_t rt_value = ctx.gpr[d.rt];
 
     switch (d.kind) {
+    case OpcodeKind::Break: {
+        // BREAK raises a guest exception on a real Allegrex CPU. Until the
+        // runtime has a guest exception-vector implementation, stop explicitly
+        // with the breakpoint code and live registers instead of reporting a
+        // generic unsupported instruction. This is especially useful for
+        // guest assertions, which commonly terminate by executing BREAK.
+        const std::uint32_t break_code = (d.word >> 6u) & 0x000FFFFFu;
+        ctx.pc = pc;
+        rt.stop("Guest BREAK exception at " + hex32(pc)
+                + " code=" + hex32(break_code)
+                + " instruction=" + hex32(d.word)
+                + " ra=" + hex32(ctx.gpr[31])
+                + " v0=" + hex32(ctx.gpr[2])
+                + " a0=" + hex32(ctx.gpr[4])
+                + " a1=" + hex32(ctx.gpr[5])
+                + " a2=" + hex32(ctx.gpr[6])
+                + " a3=" + hex32(ctx.gpr[7]));
+        return false;
+    }
     case OpcodeKind::Nop: break;
     // PSP CACHE is a hint against a cache the host mapping does not have.
     case OpcodeKind::Cache: break;
