@@ -282,6 +282,8 @@ std::int64_t open_file(const std::string &full_path, std::uint32_t flags) {
                 file.kind = OpenFile::Kind::Disc;
                 file.disc_offset = static_cast<std::uint64_t>(entry->lba) * IsoImage::kSectorSize;
                 file.size = entry->size;
+                std::cerr << "[io] alias open " << full_path << " -> disc0:/"
+                          << entry->name << " size=" << entry->size << "\\n";
                 const std::uint32_t fd = io().next_fd++;
                 io().files.emplace(fd, std::move(file));
                 return fd;
