@@ -11,6 +11,76 @@
 #include <SDL3/SDL_main.h>
 
 #include <pthread.h>
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <cstdint>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <string>
+
+int portablekit_main(int argc, char **argv);
+
+namespace {
+
+constexpr std::size_t kGameStackBytes = 64u * 1024u * 1024u;
+
+struct Launch {
+    int argc;
+    char **argv;
+    int result;
+};
+
+void *run_game(void *argument) {
+    auto *launch = static_cast<Launch *>(argument);
+    launch->result = portablekit_main(launch->argc, launch->argv);
+    return nullptr;
+}
+
+// An app has no terminal: what the program prints goes to <app_name>.log in
+// its internal storage, where `adb shell run-as` and the menu's Save the log
+// reach it; the one before is kept as <app_name>-previous.log.
+void redirect_output() {
+    // Prefer the folder the player chose in Android's system picker. The
+    // Java bridge retains its SAF permission across restarts, so the log is
+    // available from Documents without ADB even after a native crash.
+    const int picked = portablekit::android::open_crash_log(portablekit::game().project_name);
+    if (picked >= 0) {
+        if (::dup2(picked, STDOUT_FILENO) >= 0 && ::dup2(picked, STDERR_FILENO) >= 0) {
+            ::close(picked);
+            std::setvbuf(stdout, nullptr, _IOLBF, 0);
+            std::setvbuf(stderr, nullptr, _IONBF, 0);
+            std::fprintf(stderr, "\\n=== %s startup ===\\n", portablekit::game().project_name);
+            return;
+        }
+        ::close(picked);
+    }
+
+    // A cancelled picker or an unavailable document provider must not prevent
+    // the app from launching; retain the private-storage fallback.
+    const char *storage = SDL_GetAndroidInternalStoragePath();
+    if (storage == nullptr) return;
+    const std::string log = std::string(storage) + "/" + portablekit::game().project_name + ".log";
+    std::rename(log.c_str(),
+                (std::string(storage) + "/" + portablekit::game().project_name + "-previous.log").c_str());
+    if (std::freopen(log.c_str(), "w", stdout) != nullptr) std::setvbuf(stdout, nullptr, _IOLBF, 0);
+    if (std::freopen(log.c_str(), "a", stderr) != nullptr) std::setvbuf(stderr, nullptr, _IONBF, 0);
+}/ The entry point of the Android app. SDLActivity loads libmain.so and calls
+// SDL_main on a Java thread whose stack is far too small for chained AOT
+// calls, and an app cannot restart itself with a larger one the way the Linux
+// executable does. So the game runs on a thread of its own with the 64 MiB
+// stack the other platforms give their main thread.
+
+#include "app_paths.hpp"
+#include "profile.hpp"
+
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_main.h>
+
+#include <pthread.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include <cstdint>
 #include <cstdio>
