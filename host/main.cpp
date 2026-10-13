@@ -143,6 +143,41 @@ struct GameFiles {
     std::filesystem::path memory_stick;
 };
 
+// Some games ship an install/patch folder beside PSP_GAME in the extracted
+// game root, but address it through ms0:/PSP/GAME/<folder>. Mirror that folder
+// into the virtual memory stick before booting so the guest's PSP path resolves.
+void sync_memory_stick_patch(const GameFiles &files) {
+    const char *folder_name = portablekit::game().memory_stick_patch_folder;
+    if (folder_name == nullptr || *folder_name == '\0' ||
+        files.disc_image.empty() || !std::filesystem::is_directory(files.disc_image))
+        return;
+
+    const std::filesystem::path source = files.disc_image / folder_name;
+    std::error_code ec;
+    if (!std::filesystem::is_directory(source, ec) || ec) {
+        std::cerr << "[patch] no patch folder at " << source.string() << "\\n";
+        return;
+    }
+
+    const std::filesystem::path target = files.memory_stick / "PSP" / "GAME" / folder_name;
+    std::filesystem::create_directories(target.parent_path(), ec);
+    if (ec) {
+        std::cerr << "[patch] cannot create " << target.parent_path().string() << ": " << ec.message() << "\\n";
+        return;
+    }
+    std::filesystem::copy(source, target,
+                          std::filesystem::copy_options::recursive |
+                              std::filesystem::copy_options::overwrite_existing,
+                          ec);
+    if (ec) {
+        std::cerr << "[patch] failed to copy " << source.string() << " to " << target.string()
+                  << ": " << ec.message() << "\\n";
+        return;
+    }
+    std::cerr << "[patch] copied " << source.string() << " to virtual ms0:/" << "PSP/GAME/"
+              << folder_name << "\\n";
+}
+
 // The layout a game_dir has always had; the profile's game directory by default.
 GameFiles files_in_game_directory(const std::filesystem::path &game_dir) {
     GameFiles files;
@@ -355,6 +390,7 @@ int main(int argc, char **argv) {
 
         const std::optional<GameFiles> files = locate_game(options);
         if (!files) return 1;
+        sync_memory_stick_patch(*files);
         const std::filesystem::path &executable = files->executable;
         portablekit::ProfilePaths paths;
         paths.disc_image = files->disc_image;
