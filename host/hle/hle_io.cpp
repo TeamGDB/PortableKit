@@ -237,6 +237,11 @@ std::optional<IsoImage::Entry> aliased_disc_file(const std::string &memory_stick
     return std::nullopt;
 }
 
+bool is_disc_file_alias(const OpenFile &file) {
+    const SplitPath split = split_path(file.path);
+    return split.device == Device::MemoryStick && aliased_disc_file(split.path).has_value();
+}
+
 bool trace_io() {
     static const bool enabled = portablekit::env("TRACE_IO") != nullptr;
     return enabled;
@@ -600,6 +605,15 @@ std::uint32_t ioctl_op(Runtime &rt, AllegrexContext &ctx) {
         std::string error;
         auto opened = pgd::PgdFile::open(header, vkey, raw_size, pgd::player_keys(), error);
         if (!opened) {
+            // GOD EATER 2 opens its disc-resident RDP archives through ms0:
+            // with the PGD-key flag, but these RDP files are not PGD containers.
+            // Preserve the raw archive view instead of failing the whole open.
+            if (error == "not a PGD file" && is_disc_file_alias(file)) {
+                log_once("rdp-raw-" + file.path, "[pgd] " + file.path +
+                         ": raw disc archive, skipping PGD decryption");
+                file.position = 0u;
+                return 0u;
+            }
             log_once("pgd-" + file.path, "[pgd] " + file.path + ": cannot decrypt: " + error +
                                              " (see docs/DESKTOP_APP.md, \"PGD data\")");
             return kPgdUnusable;
