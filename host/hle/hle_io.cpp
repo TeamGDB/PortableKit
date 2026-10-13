@@ -217,6 +217,26 @@ std::optional<std::pair<std::uint64_t, std::uint64_t>> parse_lbn_path(const std:
 
 std::filesystem::path host_path(const std::string &path) { return io().memory_stick / path; }
 
+std::string normalized_path(std::string path) {
+    std::replace(path.begin(), path.end(), '\\\\', '/');
+    std::transform(path.begin(), path.end(), path.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    while (!path.empty() && path.front() == '/') path.erase(path.begin());
+    while (!path.empty() && path.back() == '/') path.pop_back();
+    return path;
+}
+
+std::optional<IsoImage::Entry> aliased_disc_file(const std::string &memory_stick_path) {
+    if (!io().disc) return std::nullopt;
+    const std::string requested = normalized_path(memory_stick_path);
+    for (const DiscFileAlias &alias : game().disc_file_aliases) {
+        if (normalized_path(alias.memory_stick_path) != requested) continue;
+        const auto entry = io().disc->find(alias.disc_path);
+        if (entry && !entry->directory) return entry;
+    }
+    return std::nullopt;
+}
+
 bool trace_io() {
     static const bool enabled = portablekit::env("TRACE_IO") != nullptr;
     return enabled;
@@ -255,7 +275,19 @@ std::int64_t open_file(const std::string &full_path, std::uint32_t flags) {
         const auto path = host_path(split.path);
         std::error_code ec;
         const bool exists = std::filesystem::exists(path, ec);
-        if (!exists && (flags & kOpenCreate) == 0u) return static_cast<std::int32_t>(io_error::kFileNotFound);
+        if (!exists && (flags & kOpenCreate) == 0u) {
+            // Some titles store their RDP archives on the UMD but address them
+            // through an install/save-data path on the memory stick.
+            if (const auto entry = aliased_disc_file(split.path)) {
+                file.kind = OpenFile::Kind::Disc;
+                file.disc_offset = static_cast<std::uint64_t>(entry->lba) * IsoImage::kSectorSize;
+                file.size = entry->size;
+                const std::uint32_t fd = io().next_fd++;
+                io().files.emplace(fd, std::move(file));
+                return fd;
+            }
+            return static_cast<std::int32_t>(io_error::kFileNotFound);
+        }
         std::ios::openmode mode = std::ios::binary | std::ios::in;
         if ((flags & kOpenWrite) != 0u) {
             std::filesystem::create_directories(path.parent_path(), ec);
@@ -807,6 +839,9 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
             if (std::filesystem::exists(host, ec)) {
                 const bool directory = std::filesystem::is_directory(host, ec);
                 write_stat(rt.memory(), arg(ctx, 1), directory, directory ? 0u : std::filesystem::file_size(host, ec), 0u);
+                result = 0u;
+            } else if (const auto entry = aliased_disc_file(split.path)) {
+                write_stat(rt.memory(), arg(ctx, 1), false, entry->size, entry->lba);
                 result = 0u;
             }
         }
