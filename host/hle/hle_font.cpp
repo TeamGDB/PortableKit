@@ -303,6 +303,21 @@ void register_font(HleRegistrar &hle) {
         if (arg(ctx, 3) != 0u) rt.memory().store32(arg(ctx, 3), 0u);
         kernel().finish(ctx, fonts::ready() ? kFontHandle : 0u);
     });
+    // The game embeds a font in guest memory and opens it through this API.
+    // Glyphs are rendered by the existing host font backend, so the PSP font
+    // bytes are not parsed here; however, returning the logging-stub value 0
+    // causes the game's font initialization assertion to fail.
+    hle.add("sceLibFont", "sceFontOpenUserMemory", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t library = arg(ctx, 0);
+        const std::uint32_t font_data = arg(ctx, 1);
+        const std::uint32_t font_size = arg(ctx, 2);
+        const std::uint32_t mode = arg(ctx, 3);
+        const std::uint32_t error_code = arg(ctx, 4);
+        trace("OpenUserMemory lib=%08X data=%08X size=%08X mode=%08X error=%08X ra=%08X",
+              library, font_data, font_size, mode, error_code, ctx.gpr[31]);
+        if (error_code != 0u) rt.memory().store32(error_code, 0u);
+        kernel().finish(ctx, fonts::ready() && font_data != 0u && font_size != 0u ? kFontHandle : 0u);
+    });
     hle.add("sceLibFont", "sceFontClose", [](Runtime &, AllegrexContext &ctx) {
         trace("Close font=%08X", arg(ctx, 0));
         kernel().finish(ctx, 0u);
