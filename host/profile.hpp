@@ -38,6 +38,13 @@ struct SaveFolder {
     bool exported;           // included when the player exports or backs up
 };
 
+ // A file physically stored on the disc but opened by the game through ms0:.
+ // Paths are relative to their device (no "ms0:/" or "disc0:/").
+struct DiscFileAlias {
+    const char *memory_stick_path;
+    const char *disc_path;
+};
+
 // A choice of what LT/RT (L2/R2) press past the trigger point, beside the
 // framework's own: L and R, like the shoulders.
 struct TriggerProfile {
@@ -201,6 +208,8 @@ struct GameProfile {
     std::span<const SaveFolder> save_folders;
     // Optional patch/install folder beside PSP_GAME in an extracted game root, mirrored to ms0:/PSP/GAME/<name>.
     const char *memory_stick_patch_folder = nullptr;
+    // Optional disc files exposed at game-requested memory-stick paths.
+    std::span<const DiscFileAlias> disc_file_aliases = {};
 
     // --- What the player is called -----------------------------------------
     // How the interface names the name the game asks for: "Hunter name".
