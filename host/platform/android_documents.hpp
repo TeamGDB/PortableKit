@@ -24,6 +24,14 @@ struct PickedImport {
 // work. `staging` is emptied first. Nothing when the player cancels.
 [[nodiscard]] std::optional<PickedImport> pick_saves_to_import(const std::filesystem::path &staging);
 
+struct PickedGameFolder {
+    std::filesystem::path staged;
+    std::string error;
+};
+// Opens Android's folder picker and copies a selected extracted PSP game into
+// app-private storage. Cancelling returns nullopt so setup can offer ISO picking.
+[[nodiscard]] std::optional<PickedGameFolder> pick_game_folder_to_copy(const std::filesystem::path &staging);
+
 struct PickedExport {
     std::string where;  // the picked folder, for the player
     std::string error;  // empty: the copy worked

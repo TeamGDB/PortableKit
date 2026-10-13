@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <fstream>
@@ -134,6 +135,32 @@ bool find_and_copy(const std::string &uri, const std::string &name, const fs::pa
     return true;
 }
 
+bool copy_game_tree(const std::string &folder_uri, const fs::path &target, std::string &error, int depth = 0) {
+    if (depth > 64) {
+        error = "the selected game folder has too many nested directories";
+        return false;
+    }
+    const auto entries = list_folder(folder_uri);
+    if (!entries) {
+        error = "cannot read the selected game folder";
+        return false;
+    }
+    std::error_code ec;
+    fs::create_directories(target, ec);
+    if (ec) {
+        error = "cannot create " + target.string();
+        return false;
+    }
+    for (const Entry &entry : *entries) {
+        if (entry.directory) {
+            if (!copy_game_tree(entry.uri, target / entry.name, error, depth + 1)) return false;
+        } else if (!copy_document_to_file(entry.uri, target / entry.name, error)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool copy_tree(const fs::path &local, const std::string &folder_uri, std::string &error) {
     const std::optional<std::string> made = create(folder_uri, local.filename().string(), true);
     if (!made) {
@@ -175,6 +202,63 @@ std::optional<PickedImport> pick_saves_to_import(const fs::path &staging) {
     const std::string root_name = where.substr(where.rfind('/') + 1);
     if (!find_and_copy(root_uri, root_name, root / "SAVEDATA", 0, error))
         picked.error = "Copying from the chosen folder failed: " + error + ".";
+    return picked;
+}
+
+std::optional<PickedGameFolder> pick_game_folder_to_copy(const fs::path &staging) {
+    const std::optional<std::string> tree = pick_folder();
+    if (!tree) return std::nullopt;
+    PickedGameFolder picked;
+    const std::string root_uri = tree_root(*tree);
+    const auto root_entries = list_folder(root_uri);
+    if (!root_entries) {
+        picked.error = "Android would not let the app read the selected folder.";
+        return picked;
+    }
+    const auto psp_game = std::find_if(root_entries->begin(), root_entries->end(),
+                                       [](const Entry &entry) { return entry.directory && entry.name == "PSP_GAME"; });
+    if (psp_game == root_entries->end()) {
+        picked.error = "Choose the extracted game folder whose top level contains PSP_GAME.";
+        return picked;
+    }
+    const auto psp_entries = list_folder(psp_game->uri);
+    if (!psp_entries || std::none_of(psp_entries->begin(), psp_entries->end(),
+                                     [](const Entry &entry) { return !entry.directory && entry.name == "PARAM.SFO"; })) {
+        picked.error = "The selected folder has no PSP_GAME/PARAM.SFO.";
+        return picked;
+    }
+    const auto sysdir = std::find_if(psp_entries->begin(), psp_entries->end(),
+                                     [](const Entry &entry) { return entry.directory && entry.name == "SYSDIR"; });
+    if (sysdir == psp_entries->end()) {
+        picked.error = "The selected folder has no PSP_GAME/SYSDIR directory.";
+        return picked;
+    }
+    const auto sys_entries = list_folder(sysdir->uri);
+    if (!sys_entries || std::none_of(sys_entries->begin(), sys_entries->end(),
+                                     [](const Entry &entry) { return !entry.directory && entry.name == "EBOOT.BIN"; })) {
+        picked.error = "The selected folder has no PSP_GAME/SYSDIR/EBOOT.BIN.";
+        return picked;
+    }
+
+    std::error_code ec;
+    fs::create_directories(staging, ec);
+    const fs::path partial = staging / "extracted-game.part";
+    const fs::path target = staging / "extracted-game";
+    fs::remove_all(partial, ec);
+    std::string error;
+    if (!copy_game_tree(root_uri, partial, error)) {
+        fs::remove_all(partial, ec);
+        picked.error = "Copying the extracted game failed: " + error + ".";
+        return picked;
+    }
+    fs::remove_all(target, ec);
+    fs::rename(partial, target, ec);
+    if (ec) {
+        fs::remove_all(partial, ec);
+        picked.error = "Could not keep the extracted game in app storage.";
+        return picked;
+    }
+    picked.staged = target;
     return picked;
 }
 

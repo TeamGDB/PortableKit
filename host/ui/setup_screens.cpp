@@ -16,6 +16,7 @@
 #include "settings/settings.hpp"
 #if defined(PORTABLEKIT_ANDROID_APP)
 #include "platform/android_jni.hpp"
+#include "platform/android_documents.hpp"
 #endif
 
 #include "imgui.h"
@@ -146,6 +147,15 @@ bool SetupScreens::introduce(const fs::path &data_dir) {
 #if defined(PORTABLEKIT_ANDROID_APP)
 std::optional<fs::path> SetupScreens::choose_image() {
     for (;;) {
+        // Android's SAF picker can choose a folder as well as a single ISO.
+        // A selected folder is copied into app-private storage before checks.
+        const auto picked_folder = android::pick_game_folder_to_copy(data_dir_);
+        if (picked_folder) {
+            if (picked_folder->error.empty()) return picked_folder->staged;
+            std::cerr << "Setup: " << picked_folder->error << "\n";
+            if (!offer_retry(picked_folder->error)) return std::nullopt;
+            continue;
+        }
         const std::optional<std::string> uri = android::pick_document();
         if (!uri) return std::nullopt;
         std::cout << "[setup] picked " << *uri << std::endl;
@@ -173,9 +183,19 @@ std::optional<fs::path> SetupScreens::choose_image() {
     if (dropped_) return std::exchange(dropped_, std::nullopt);
     Layer &layer = Layer::get();
     layer.set_interactive(true);
+    FileBrowser::Options options;
+    options.filter_name = ".iso or extracted game folders";
+    options.listed_name = ".iso images and extracted game folders";
+    options.empty_note = "No folders or .iso images here.";
+    options.choose_on_open = [](const fs::path &folder) {
+        std::error_code ec;
+        return fs::is_regular_file(folder / "PSP_GAME" / "PARAM.SFO", ec) && !ec &&
+               fs::is_regular_file(folder / "PSP_GAME" / "SYSDIR" / "EBOOT.BIN", ec) && !ec;
+    };
     FileBrowser browser(settings::current().last_folder.empty()
                             ? FileBrowser::home()
-                            : install::path_from_utf8(settings::current().last_folder));
+                            : install::path_from_utf8(settings::current().last_folder),
+                        std::move(options));
     std::optional<fs::path> chosen;
     layer.run(
         [&] {
@@ -186,10 +206,10 @@ std::optional<fs::path> SetupScreens::choose_image() {
             const bool back = layer.take_back();
             const ImGuiKey cancel = layer.confirm_south() ? ImGuiKey_GamepadFaceRight : ImGuiKey_GamepadFaceDown;
             const bool pad_back = ImGui::IsKeyPressed(cancel, false);
-            begin_panel("##browser", "Choose the disc image", kSubtitle, false);
+            begin_panel("##browser", "Choose game image or extracted folder", kSubtitle, false);
             begin_content();
             const FileBrowser::Result result = browser.frame(back || pad_back);
-            layer.set_description(std::string("Look for the .iso image of ") + portablekit::game().disc_id_display +
+            layer.set_description(std::string("Choose an .iso image or open a folder containing PSP_GAME/PARAM.SFO and PSP_GAME/SYSDIR/EBOOT.BIN for ") + portablekit::game().disc_id_display +
                                   ". Removable drives and SD cards are listed next to Home.");
             begin_footer();
             if (layer.input_device() == InputDevice::Gamepad)
@@ -213,6 +233,7 @@ std::optional<fs::path> SetupScreens::choose_image() {
 std::optional<install::ImageStorage> SetupScreens::choose_storage(const fs::path &image,
                                                                   const install::ImageInfo &info,
                                                                   const fs::path &data_dir) {
+    if (info.is_directory) return install::ImageStorage::InPlace;
 #if defined(PORTABLEKIT_ANDROID_APP)
     // Already copied into the data folder by choose_image().
     (void)image;

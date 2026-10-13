@@ -39,6 +39,13 @@ private:
     void scan_directory(std::uint32_t lba, std::uint32_t size, const std::string &prefix, int depth);
     [[nodiscard]] static std::string normalize(std::string path);
 
+    struct HostFile {
+        std::filesystem::path path;
+        std::uint64_t size{};
+    };
+    bool host_directory_{};
+    std::map<std::uint64_t, HostFile> host_files_;
+    std::filesystem::path host_root_;
     std::ifstream file_;
     std::uint64_t size_bytes_{};
     std::map<std::string, Entry> entries_;
