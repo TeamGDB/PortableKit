@@ -5,6 +5,7 @@
 // stack the other platforms give their main thread.
 
 #include "app_paths.hpp"
+#include "platform/android_jni.hpp"
 #include "profile.hpp"
 
 #include <SDL3/SDL.h>
