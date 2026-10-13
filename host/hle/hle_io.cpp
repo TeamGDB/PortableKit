@@ -75,6 +75,7 @@ struct OpenFile {
     std::uint64_t disc_offset{};  // absolute image offset of byte 0
     std::uint64_t size{};
     std::uint64_t position{};
+    std::uint32_t alias_diagnostic_reads{};
     // The raw disc device counts 2048-byte sectors, not bytes: a seek moves
     // to a sector, a read asks for that many sectors and answers with how
     // many it got. Everything else here counts bytes, so size and position
@@ -466,6 +467,27 @@ std::uint32_t read_file_op(Runtime &rt, std::uint32_t fd, std::uint32_t address,
         result = static_cast<std::uint32_t>(buffer.size());
     }
     rt.memory().copy_in(address, buffer);
+
+    // GOD EATER 2 asserts while parsing DATA.RDP. Log a bounded sample of
+    // reads from the disc-backed aliases to reveal offsets, read sizes, and
+    // the bytes returned to the guest. This does not modify the file data.
+    if (is_disc_file_alias(file) && file.alias_diagnostic_reads < 8u) {
+        std::cerr << "[rdp-debug] path=" << file.path
+                  << " offset=" << file.position
+                  << " requested=" << requested
+                  << " got=" << buffer.size()
+                  << " first_bytes=";
+        const std::size_t byte_count = std::min<std::size_t>(buffer.size(), 16u);
+        constexpr char hex[] = "0123456789ABCDEF";
+        for (std::size_t i = 0; i < byte_count; ++i) {
+            const unsigned byte = buffer[i];
+            std::cerr << hex[(byte >> 4u) & 0x0Fu] << hex[byte & 0x0Fu] << ' ';
+        }
+        if (buffer.empty()) std::cerr << "<empty>";
+        std::cerr << '\n';
+        ++file.alias_diagnostic_reads;
+    }
+
     // A disc read is what tells a load from play (kernel/fast_loading.hpp).
     if (file.kind == OpenFile::Kind::Disc) {
         load_trace::note_disc_read(buffer.size());
