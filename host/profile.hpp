@@ -199,6 +199,8 @@ struct GameProfile {
     // --- Save data ---------------------------------------------------------
     const char *save_game_name;             // the main folder, e.g. "ULJM05800"
     std::span<const SaveFolder> save_folders;
+    // Optional patch/install folder beside PSP_GAME in an extracted game root, mirrored to ms0:/PSP/GAME/<name>.
+    const char *memory_stick_patch_folder = nullptr;
 
     // --- What the player is called -----------------------------------------
     // How the interface names the name the game asks for: "Hunter name".
