@@ -952,6 +952,115 @@ void register_lightweight_mutexes(HleRegistrar &hle) {
     });
 }
 
+struct TlsPool {
+    SceUID memory_block{};
+    std::uint32_t base{};
+    std::uint32_t block_size{};
+    std::uint32_t block_count{};
+    std::map<SceUID, std::uint32_t> thread_slots;
+};
+
+std::map<SceUID, TlsPool> &tls_pools() {
+    static std::map<SceUID, TlsPool> pools;
+    return pools;
+}
+
+void register_tls_pools(HleRegistrar &hle) {
+    // PSP TLS pools provide one fixed-size block per thread. The pool's guest
+    // memory is allocated once; each thread receives its own zeroed slot on
+    // the first sceKernelGetTlsAddr call.
+    hle.add("ThreadManForUser", "sceKernelCreateTlspl", [](Runtime &rt, AllegrexContext &ctx) {
+        constexpr std::uint32_t kTlsOptionsSize = 8u;
+        const std::string name = read_cstring(rt.memory(), arg(ctx, 0), 32u);
+        const std::uint32_t requested_size = arg(ctx, 3);
+        const std::uint32_t count = arg(ctx, 4);
+        if (requested_size == 0u || count == 0u) {
+            kernel().finish(ctx, error::kIllegalArgument);
+            return;
+        }
+
+        std::uint32_t alignment = 4u;
+        const std::uint32_t options = arg(ctx, 5);
+        if (rt.memory().contains(options, kTlsOptionsSize) && rt.memory().load32(options) >= kTlsOptionsSize) {
+            const std::uint32_t requested_alignment = rt.memory().load32(options + 4u);
+            if (requested_alignment != 0u) {
+                if ((requested_alignment & (requested_alignment - 1u)) != 0u) {
+                    kernel().finish(ctx, error::kIllegalArgument);
+                    return;
+                }
+                alignment = std::max(4u, requested_alignment);
+            }
+        }
+
+        const std::uint64_t block_size =
+            (static_cast<std::uint64_t>(requested_size) + alignment - 1u) & ~static_cast<std::uint64_t>(alignment - 1u);
+        const std::uint64_t total_size = block_size * count;
+        if (block_size == 0u || total_size > 0xFFFFFFFFu) {
+            kernel().finish(ctx, error::kNoMemory);
+            return;
+        }
+
+        const std::int32_t memory_block =
+            kernel().allocate_block("tls:" + name, 1u, static_cast<std::uint32_t>(total_size), alignment);
+        if (memory_block < 0) {
+            kernel().finish(ctx, static_cast<std::uint32_t>(memory_block));
+            return;
+        }
+        const MemoryBlock *block = kernel().find_block(memory_block);
+        if (block == nullptr) {
+            kernel().free_block(memory_block);
+            kernel().finish(ctx, error::kNoMemory);
+            return;
+        }
+        for (std::uint32_t i = 0; i < total_size; ++i) rt.memory().store8(block->address + i, 0u);
+
+        const SceUID uid = kernel().allocate_uid();
+        tls_pools().emplace(uid, TlsPool{memory_block, block->address, static_cast<std::uint32_t>(block_size), count, {}});
+        kernel().finish(ctx, static_cast<std::uint32_t>(uid));
+    });
+
+    hle.add("ThreadManForUser", "sceKernelDeleteTlspl", [](Runtime &, AllegrexContext &ctx) {
+        constexpr std::uint32_t kUnknownTlspl = 0x800201D0u;
+        const SceUID uid = static_cast<SceUID>(arg(ctx, 0));
+        auto found = tls_pools().find(uid);
+        if (found == tls_pools().end()) {
+            kernel().finish(ctx, kUnknownTlspl);
+            return;
+        }
+        kernel().free_block(found->second.memory_block);
+        tls_pools().erase(found);
+        kernel().finish(ctx, 0u);
+    });
+
+    hle.add("Kernel_Library", "sceKernelGetTlsAddr", [](Runtime &, AllegrexContext &ctx) {
+        constexpr std::uint32_t kUnknownTlspl = 0x800201D0u;
+        constexpr std::uint32_t kTlsPoolFull = 0x800201D1u;
+        const SceUID uid = static_cast<SceUID>(arg(ctx, 0));
+        auto found = tls_pools().find(uid);
+        if (found == tls_pools().end()) {
+            kernel().finish(ctx, kUnknownTlspl);
+            return;
+        }
+
+        TlsPool &pool = found->second;
+        const SceUID thread = kernel().current_uid();
+        if (const auto slot = pool.thread_slots.find(thread); slot != pool.thread_slots.end()) {
+            kernel().finish(ctx, pool.base + slot->second * pool.block_size);
+            return;
+        }
+
+        for (std::uint32_t candidate = 0; candidate < pool.block_count; ++candidate) {
+            const bool occupied = std::any_of(pool.thread_slots.begin(), pool.thread_slots.end(),
+                [candidate](const auto &entry) { return entry.second == candidate; });
+            if (occupied) continue;
+            pool.thread_slots.emplace(thread, candidate);
+            kernel().finish(ctx, pool.base + candidate * pool.block_size);
+            return;
+        }
+        kernel().finish(ctx, kTlsPoolFull);
+    });
+}
+
 void register_kernel_library(HleRegistrar &hle) {
     // Bytes left on the current thread's stack, which a game checks before it
     // recurses. A stub returning 0 says the stack is exhausted, and the game
@@ -1681,6 +1790,7 @@ void register_threadman(HleRegistrar &hle) {
     register_msg_pipes(hle);
     register_callbacks_and_timers(hle);
     register_kernel_library(hle);
+    register_tls_pools(hle);
 }
 
 } // namespace portablekit
