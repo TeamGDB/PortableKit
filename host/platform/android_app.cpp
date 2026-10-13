@@ -50,7 +50,7 @@ void redirect_output() {
         if (out_ok >= 0 && err_ok >= 0) {
             std::setvbuf(stdout, nullptr, _IOLBF, 0);
             std::setvbuf(stderr, nullptr, _IONBF, 0);
-            std::fprintf(stderr, "\\n=== %s startup ===\\n", portablekit::game().project_name);
+            std::fprintf(stderr, "\n=== %s startup ===\n", portablekit::game().project_name);
             return;
         }
     }
