@@ -934,6 +934,26 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
         kernel().finish(ctx, ioctl_op(rt, ctx));
     });
 
+    // sceNpDrmEdataGetDataSize delegates to IoIoctl(0x04100010) on PSP.
+    // Until EDAT/NPDRM decryption is implemented, report the opened file's
+    // current size rather than the generated stub's default zero. If a file
+    // filter has already been installed, file.size is its visible data size.
+    hle.add("scePspNpDrm_user", "sceNpDrmEdataGetDataSize", [](Runtime &, AllegrexContext &ctx) {
+        const std::uint32_t fd = arg(ctx, 0);
+        const auto found = io().files.find(fd);
+        if (found == io().files.end()) {
+            kernel().finish(ctx, io_error::kBadFileDescriptor);
+            return;
+        }
+        const OpenFile &file = found->second;
+        const std::uint32_t size = static_cast<std::uint32_t>(
+            std::min<std::uint64_t>(file.size, std::numeric_limits<std::uint32_t>::max()));
+        std::cerr << "[npdrm] sceNpDrmEdataGetDataSize fd=" << fd << " path=" << file.path
+                  << " size=" << size << (file.filter ? " (filtered)" : " (raw; decryption not applied)") << "\\n";
+        kernel().finish(ctx, size);
+    });
+
+
     hle.add("IoFileMgrForUser", "sceIoDevctl", [](Runtime &rt, AllegrexContext &ctx) {
         const std::string device = read_cstring(rt.memory(), arg(ctx, 0), 64u);
         const std::uint32_t command = arg(ctx, 1);
