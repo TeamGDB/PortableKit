@@ -21,6 +21,9 @@ struct Insets {
 // The display cutout, in window pixels; zero where there is none.
 [[nodiscard]] Insets cutout_insets();
 
+// Opens the persistent user-selected log folder and returns an owned fd, or -1.
+[[nodiscard]] int open_crash_log(const std::string &app_name);
+
 // Ends this process and starts the app again; returns only if it cannot.
 void relaunch();
 

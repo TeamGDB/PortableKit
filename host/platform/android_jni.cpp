@@ -69,6 +69,18 @@ Insets cutout_insets() {
     return {values[0], values[1], values[2], values[3]};
 }
 
+int open_crash_log(const std::string &app_name) {
+    Call call;
+    if (!call.ok()) return -1;
+    jmethodID id = call.method("openCrashLog", "(Ljava/lang/String;)I");
+    if (id == nullptr) return -1;
+    jstring name = call.string(app_name);
+    const jint fd = call.env->CallStaticIntMethod(call.type, id, name);
+    call.env->DeleteLocalRef(name);
+    if (call.failed()) return -1;
+    return static_cast<int>(fd);
+}
+
 void relaunch() {
     Call call;
     if (!call.ok()) return;
