@@ -311,10 +311,11 @@ void register_font(HleRegistrar &hle) {
         const std::uint32_t library = arg(ctx, 0);
         const std::uint32_t font_data = arg(ctx, 1);
         const std::uint32_t font_size = arg(ctx, 2);
-        const std::uint32_t mode = arg(ctx, 3);
-        const std::uint32_t error_code = arg(ctx, 4);
-        trace("OpenUserMemory lib=%08X data=%08X size=%08X mode=%08X error=%08X ra=%08X",
-              library, font_data, font_size, mode, error_code, ctx.gpr[31]);
+        // PSP SDK signature is (library, fontData, fontSize, errorCodePtr):
+        // the fourth argument is a3, not t0/a fifth pseudo-argument.
+        const std::uint32_t error_code = arg(ctx, 3);
+        trace("OpenUserMemory lib=%08X data=%08X size=%08X error=%08X ra=%08X",
+              library, font_data, font_size, error_code, ctx.gpr[31]);
         if (error_code != 0u) rt.memory().store32(error_code, 0u);
         kernel().finish(ctx, fonts::ready() && font_data != 0u && font_size != 0u ? kFontHandle : 0u);
     });
