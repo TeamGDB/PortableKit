@@ -11,7 +11,7 @@ namespace portablekit::install {
 //
 //   EBOOT.ELF      the executable prepared from the player's disc image
 //   disc.iso       the copied disc image (absent when the image is used in place)
-//   settings.ini   where the disc image is, and the player's settings
+//   settings.ini   where the disc image or extracted game folder is, and the player's settings
 //
 // Save data is not here yet: ms0 stays where the host has always kept it.
 inline constexpr const char *kExecutableFile = "EBOOT.ELF";
@@ -45,7 +45,7 @@ void save_settings(const std::filesystem::path &data_dir, const UserSettings &se
 
 struct Installation {
     std::filesystem::path executable;
-    std::filesystem::path disc_image; // absolute
+    std::filesystem::path disc_image; // absolute path to an ISO image or extracted PSP game folder
     bool image_copied{};              // disc image lives in the data directory
 };
 

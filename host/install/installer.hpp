@@ -37,6 +37,7 @@ enum class ImageStorage {
 
 struct ImageInfo {
     std::uint64_t size_bytes{};
+    bool is_directory{};
 };
 
 // Checks that path is an unmodified image of the supported release: the disc

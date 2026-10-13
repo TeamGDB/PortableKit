@@ -207,7 +207,8 @@ std::optional<GameFiles> locate_game(const Options &options) {
         if (!run_setup) {
             if (const auto installed = install::find_installation(data_dir)) {
                 std::error_code ec;
-                if (std::filesystem::is_regular_file(installed->disc_image, ec)) {
+                if (std::filesystem::is_regular_file(installed->disc_image, ec) ||
+                    std::filesystem::is_directory(installed->disc_image, ec)) {
                     GameFiles files;
                     files.executable = installed->executable;
                     files.disc_image = installed->disc_image;

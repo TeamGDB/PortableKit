@@ -24,6 +24,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <system_error>
 #include <vector>
@@ -61,6 +62,38 @@ std::vector<std::uint8_t> read_file(IsoImage &iso, const IsoImage::Entry &entry)
     return data;
 }
 
+std::vector<std::uint8_t> read_host_file(const std::filesystem::path &path) {
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(path, ec);
+    if (ec || size > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+        throw InstallError("Cannot determine the size of \"" + path_to_utf8(path) + "\".");
+    std::vector<std::uint8_t> data(static_cast<std::size_t>(size));
+    std::ifstream in(path, std::ios::binary);
+    if (!in || (!data.empty() && !in.read(reinterpret_cast<char *>(data.data()), static_cast<std::streamsize>(data.size()))))
+        throw InstallError("Cannot read \"" + path_to_utf8(path) + "\".");
+    return data;
+}
+
+std::uint64_t extracted_folder_size(const std::filesystem::path &root) {
+    std::uint64_t total = 0u;
+    std::error_code ec;
+    for (std::filesystem::recursive_directory_iterator it(
+             root, std::filesystem::directory_options::skip_permission_denied, ec), end;
+         it != end; it.increment(ec)) {
+        if (ec) { ec.clear(); continue; }
+        const auto status = it->symlink_status(ec);
+        if (ec || std::filesystem::is_symlink(status) || !std::filesystem::is_regular_file(status)) {
+            ec.clear(); continue;
+        }
+        const auto size = it->file_size(ec);
+        if (ec) { ec.clear(); continue; }
+        if (size > std::numeric_limits<std::uint64_t>::max() - total)
+            throw InstallError("The extracted game folder is too large.");
+        total += size;
+    }
+    return total;
+}
+
 // String values of a PARAM.SFO (PSF) file.
 std::map<std::string, std::string> parse_sfo(const std::vector<std::uint8_t> &sfo) {
     std::map<std::string, std::string> values;
@@ -91,80 +124,88 @@ struct Inspection {
 };
 
 Inspection inspect(const std::filesystem::path &path) {
-    const std::string name = display_name(path);
+    const std::string name = path_to_utf8(path.filename());
     std::error_code ec;
-    if (!std::filesystem::is_regular_file(path, ec))
-        throw InstallError("\"" + path_to_utf8(path) + "\" is not a file " + std::string(portablekit::game().project_name) + " can open.");
-    {
-        std::ifstream in(path, std::ios::binary);
-        std::array<char, 4> magic{};
-        if (!in.read(magic.data(), magic.size()))
-            throw InstallError("\"" + name + "\" is empty or cannot be read.");
-        if (std::memcmp(magic.data(), "CISO", 4u) == 0 || std::memcmp(magic.data(), "ZISO", 4u) == 0)
-            throw InstallError("\"" + name + "\" is a compressed image. " + std::string(portablekit::game().project_name) + " needs an uncompressed .iso image of the "
-                               "disc; decompress it first.");
-    }
+    const bool directory = std::filesystem::is_directory(path, ec);
+    if (ec || (!directory && !std::filesystem::is_regular_file(path, ec)))
+        throw InstallError("\"" + path_to_utf8(path) + "\" is neither a disc image nor an extracted game folder.");
 
+    std::vector<std::uint8_t> sfo_bytes;
+    std::vector<std::uint8_t> eboot_bytes;
     std::optional<IsoImage> iso;
-    try {
-        iso.emplace(path);
-    } catch (const std::exception &) {
-        throw InstallError("\"" + name + "\" is not a disc image " + std::string(portablekit::game().project_name) + " can read. Choose an uncompressed .iso image "
-                           "of the game's PSP disc.");
+    if (directory) {
+        const auto sfo_path = path / path_from_utf8(portablekit::game().param_sfo_path_on_disc);
+        const auto eboot_path = path / path_from_utf8(portablekit::game().executable_path_on_disc);
+        if (!std::filesystem::is_regular_file(sfo_path, ec) || ec ||
+            !std::filesystem::is_regular_file(eboot_path, ec) || ec)
+            throw InstallError("\"" + name + "\" is not an extracted PSP game folder: it must contain PSP_GAME/PARAM.SFO and PSP_GAME/SYSDIR/EBOOT.BIN.");
+        sfo_bytes = read_host_file(sfo_path);
+        eboot_bytes = read_host_file(eboot_path);
+    } else {
+        {
+            std::ifstream in(path, std::ios::binary);
+            std::array<char, 4> magic{};
+            if (!in.read(magic.data(), magic.size()))
+                throw InstallError("\"" + name + "\" is empty or cannot be read.");
+            if (std::memcmp(magic.data(), "CISO", 4u) == 0 || std::memcmp(magic.data(), "ZISO", 4u) == 0)
+                throw InstallError("\"" + name + "\" is a compressed image. " + std::string(portablekit::game().project_name) + " needs an uncompressed .iso image; decompress it first.");
+        }
+        try {
+            iso.emplace(path);
+        } catch (const std::exception &) {
+            throw InstallError("\"" + name + "\" is not a disc image " + std::string(portablekit::game().project_name) + " can read. Choose an uncompressed .iso image or an extracted PSP_GAME folder.");
+        }
+        const auto sfo_entry = iso->find(portablekit::game().param_sfo_path_on_disc);
+        if (!sfo_entry || sfo_entry->directory) {
+            if (iso->find("PS3_GAME/PARAM.SFO"))
+                throw InstallError("\"" + name + "\" is a PlayStation 3 disc image. " + std::string(portablekit::game().project_name) + " needs the PSP game.");
+            throw InstallError("\"" + name + "\" is not a PSP game disc image: it has no PSP_GAME/PARAM.SFO.");
+        }
+        sfo_bytes = read_file(*iso, *sfo_entry);
     }
 
-    const auto sfo_entry = iso->find(portablekit::game().param_sfo_path_on_disc);
-    if (!sfo_entry || sfo_entry->directory) {
-        if (iso->find("PS3_GAME/PARAM.SFO"))
-            throw InstallError("\"" + name + "\" is a PlayStation 3 disc image. " + std::string(portablekit::game().project_name) + " needs the PSP disc image of " +
-                               portablekit::game().game_title + ": an .iso whose top level holds a PSP_GAME folder.");
-        throw InstallError("\"" + name + "\" is not a PSP game disc image: it has no PSP_GAME/PARAM.SFO.");
-    }
-    const auto sfo = parse_sfo(read_file(*iso, *sfo_entry));
+    const auto sfo = parse_sfo(sfo_bytes);
     const auto disc_id = sfo.find("DISC_ID");
     if (disc_id == sfo.end())
-        throw InstallError("\"" + name + "\" has no disc id in PSP_GAME/PARAM.SFO, so it is not an image " + std::string(portablekit::game().project_name) + " "
-                           "supports.");
+        throw InstallError("\"" + name + "\" has no disc id in PSP_GAME/PARAM.SFO, so it is not a game " + std::string(portablekit::game().project_name) + " supports.");
     if (disc_id->second != portablekit::game().disc_id) {
         const auto title = sfo.find("TITLE");
         std::string what = "\"" + name + "\" is ";
-        what += title != sfo.end() && !title->second.empty() ? title->second + " (" + disc_id->second + ")"
-                                                              : "disc " + disc_id->second;
+        what += title != sfo.end() && !title->second.empty() ? title->second + " (" + disc_id->second + ")" : "disc " + disc_id->second;
         const GameProfile &profile = portablekit::game();
         what += ". " + std::string(profile.project_name) + " supports only " + std::string(profile.game_title) +
-                (profile.release_name != nullptr ? ", " + std::string(profile.release_name) + " with disc id "
-                                                 : std::string(", disc id ")) +
+                (profile.release_name != nullptr ? ", " + std::string(profile.release_name) + " with disc id " : std::string(", disc id ")) +
                 profile.disc_id_display + ".";
         const auto other = std::find_if(profile.other_releases.begin(), profile.other_releases.end(),
                                         [&](const OtherRelease &release) { return disc_id->second == release.disc_id; });
-        what += other != profile.other_releases.end() ? " " + std::string(other->note)
-                                                      : std::string(" Other releases and regions are not supported.");
+        what += other != profile.other_releases.end() ? " " + std::string(other->note) : std::string(" Other releases and regions are not supported.");
         throw InstallError(what);
     }
 
-    const auto eboot_entry = iso->find(portablekit::game().executable_path_on_disc);
-    if (!eboot_entry || eboot_entry->directory)
-        throw InstallError("\"" + name + "\" has the right disc id but no PSP_GAME/SYSDIR/EBOOT.BIN. The image is "
-                           "incomplete or modified; make it again from your disc.");
+    if (!directory) {
+        const auto eboot_entry = iso->find(portablekit::game().executable_path_on_disc);
+        if (!eboot_entry || eboot_entry->directory)
+            throw InstallError("\"" + name + "\" has the right disc id but no PSP_GAME/SYSDIR/EBOOT.BIN.");
+        eboot_bytes = read_file(*iso, *eboot_entry);
+    }
+
     Inspection result;
-    result.eboot_bin = read_file(*iso, *eboot_entry);
+    result.eboot_bin = std::move(eboot_bytes);
     const std::string eboot_sha256 = psprecomp::sha256_bytes(result.eboot_bin);
     const bool plain = result.eboot_bin.size() > 4u && result.eboot_bin[0] == 0x7Fu && result.eboot_bin[1] == 'E' &&
                        result.eboot_bin[2] == 'L' && result.eboot_bin[3] == 'F';
-    // The release, an edition of it (ProfileVariant), or a plain executable
-    // the profile agrees to run without knowing it.
     const bool known = eboot_sha256 == portablekit::game().encrypted_executable_sha256 ||
                        portablekit::find_variant_by_encrypted(eboot_sha256) != nullptr ||
                        (plain && portablekit::is_known_executable(eboot_sha256));
     if (!known && plain && portablekit::game().run_unknown_executables)
         std::cerr << "warning: " << name << " holds an edition of " << portablekit::game().game_title
-                  << " this build does not know (executable SHA-256 " << eboot_sha256
-                  << "); it will run under the interpreter\n";
+                  << " this build does not know (executable SHA-256 " << eboot_sha256 << "); it will run under the interpreter\n";
     else if (!known)
         throw InstallError("\"" + name + "\" is " + portablekit::game().game_title + " (" + portablekit::game().disc_id_display +
-                           "), but its executable is not the version " + std::string(portablekit::game().project_name) + " supports. The image may be patched, "
-                           "modified or damaged; make it again from an unmodified disc.");
-    result.info.size_bytes = iso->size_bytes();
+                           "), but its executable is not the version " + std::string(portablekit::game().project_name) + " supports. The image may be patched, modified or damaged.");
+
+    result.info.is_directory = directory;
+    result.info.size_bytes = directory ? extracted_folder_size(path) : iso->size_bytes();
     return result;
 }
 
@@ -206,6 +247,8 @@ bool same_file(const std::filesystem::path &a, const std::filesystem::path &b) {
 void install_checked(const std::filesystem::path &image, ImageStorage storage, const std::filesystem::path &data_dir,
                      const ProgressFn &progress) {
     Inspection inspection = inspect(image);
+    if (inspection.info.is_directory && storage == ImageStorage::Copy)
+        throw InstallError("An extracted game folder must be used in place. Choose the folder containing PSP_GAME and keep it at that location.");
     std::filesystem::create_directories(data_dir);
 
     const std::filesystem::path copied = data_dir / kCopiedImageFile;
