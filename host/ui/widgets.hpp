@@ -2,6 +2,7 @@
 
 #include "imgui.h"
 
+#include <cstdint>
 #include <initializer_list>
 #include <string>
 
@@ -10,23 +11,42 @@
 // window, and every control works with a gamepad, a keyboard and a mouse.
 namespace portablekit::ui {
 
-// Colours from the project's logo: dark brown, bronze and gold.
+// Colours from the project's logo by default: dark brown, bronze and gold. A
+// game with a launcher theme replaces them with its own (set_palette).
 namespace colors {
-inline constexpr ImU32 kBackdrop = IM_COL32(12, 8, 5, 170);
-inline constexpr ImU32 kPanel = IM_COL32(30, 21, 15, 246);
-inline constexpr ImU32 kPanelEdge = IM_COL32(143, 93, 36, 255);
-inline constexpr ImU32 kRow = IM_COL32(255, 240, 210, 10);
-inline constexpr ImU32 kRowHover = IM_COL32(233, 199, 122, 28);
-inline constexpr ImU32 kRowFocus = IM_COL32(217, 166, 75, 64);
-inline constexpr ImU32 kAccent = IM_COL32(217, 166, 75, 255);
-inline constexpr ImU32 kAccentBright = IM_COL32(251, 230, 166, 255);
-inline constexpr ImU32 kText = IM_COL32(246, 220, 174, 255);
-inline constexpr ImU32 kTextDim = IM_COL32(179, 154, 124, 255);
-inline constexpr ImU32 kTextDisabled = IM_COL32(120, 103, 86, 255);
-inline constexpr ImU32 kDanger = IM_COL32(214, 102, 76, 255);
-inline constexpr ImU32 kGood = IM_COL32(150, 196, 120, 255);
-inline constexpr ImU32 kTrack = IM_COL32(255, 240, 210, 36);
+inline ImU32 kBackdrop = IM_COL32(12, 8, 5, 170);
+inline ImU32 kPanel = IM_COL32(30, 21, 15, 246);
+inline ImU32 kPanelEdge = IM_COL32(143, 93, 36, 255);
+inline ImU32 kRow = IM_COL32(255, 240, 210, 10);
+inline ImU32 kRowHover = IM_COL32(233, 199, 122, 28);
+inline ImU32 kRowFocus = IM_COL32(217, 166, 75, 64);
+inline ImU32 kAccent = IM_COL32(217, 166, 75, 255);
+inline ImU32 kAccentBright = IM_COL32(251, 230, 166, 255);
+inline ImU32 kOnAccent = IM_COL32(30, 21, 15, 255);  // text and marks on an accent fill
+inline ImU32 kText = IM_COL32(246, 220, 174, 255);
+inline ImU32 kTextDim = IM_COL32(179, 154, 124, 255);
+inline ImU32 kTextDisabled = IM_COL32(120, 103, 86, 255);
+inline ImU32 kDanger = IM_COL32(214, 102, 76, 255);
+inline ImU32 kGood = IM_COL32(150, 196, 120, 255);
+inline ImU32 kTrack = IM_COL32(255, 240, 210, 36);
 } // namespace colors
+
+// `color` with its alpha replaced.
+inline ImU32 with_alpha(ImU32 color, int alpha) {
+    return (color & ~IM_COL32_A_MASK) | (static_cast<ImU32>(alpha & 0xFF) << IM_COL32_A_SHIFT);
+}
+
+// Replaces the colours above, from 0xRRGGBB values. Call before the first
+// interface frame: the style is built from them.
+struct Palette {
+    std::uint32_t background;  // behind everything, and the dimming over the game
+    std::uint32_t panel;       // the menu's panel
+    std::uint32_t accent;      // focus, selection, primary buttons
+    std::uint32_t accent_bright;
+    std::uint32_t text;
+    std::uint32_t text_dim;
+};
+void set_palette(const Palette &palette);
 
 ImGuiStyle make_style(float scale, float font_size);
 

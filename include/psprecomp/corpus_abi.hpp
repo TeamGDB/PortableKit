@@ -26,7 +26,7 @@
 
 namespace psprecomp {
 
-inline constexpr std::uint32_t kCorpusAbiVersion = 1u;
+inline constexpr std::uint32_t kCorpusAbiVersion = 2u;
 
 #if defined(_MSC_VER)
 #define PSPRECOMP_CORPUS_FORCEINLINE __forceinline
@@ -218,6 +218,10 @@ struct CorpusHostApi {
     void (*register_function)(CorpusRuntime &, std::uint32_t address, CorpusFunction function, const char *name);
     void (*register_unit)(CorpusRuntime &, std::uint32_t unit_index, std::uint32_t unit_address,
                           std::uint32_t unit_span, CorpusFunction function, CorpusEntryFunction entry_function);
+    // Runs the guest code at ctx.pc in the interpreter, up to the next
+    // registered address (Runtime::run_interpreter_fallback). A unit generated
+    // with sparse entries calls it when entered at an address it has no entry for.
+    bool (*interpret)(CorpusRuntime &, AllegrexContext &);
 };
 
 // The part of psprecomp::Runtime that recompiled code sees. Runtime derives
@@ -285,6 +289,7 @@ public:
     [[nodiscard]] std::uint32_t aot_load_word_right(std::uint32_t address, std::uint32_t existing) {
         return api_->load_word_right(*this, address, existing);
     }
+    [[nodiscard]] bool interpret(AllegrexContext &ctx) { return api_->interpret(*this, ctx); }
     void aot_store_word_left(std::uint32_t address, std::uint32_t value) {
         api_->store_word_left(*this, address, value);
     }

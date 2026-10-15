@@ -14,6 +14,9 @@
 #include "install/user_data.hpp"
 #include "gpu/ge_state.hpp"
 #include "kernel/kernel.hpp"
+#if defined(PORTABLEKIT_HAS_RENDERER)
+#include "ui/launcher.hpp"
+#endif
 
 #include "psprecomp/common.hpp"
 #include "psprecomp/elf32.hpp"
@@ -96,10 +99,12 @@ std::uint64_t configured_max_dispatches() {
 
 std::string usage() {
     const std::string app = portablekit::game().app_name;
-    return "usage: " + app + " [game_dir]\n"
+    return "usage: " + app + " [--play | --launcher] [game_dir]\n"
            "       " + app + " --install [image.iso [--in-place]]\n"
            "       " + app + " --adhoc-server [port]\n"
            "  game_dir        play from a directory holding EBOOT.ELF, disc.iso and ms0/\n"
+           "  --play          start the game at once, without the launcher\n"
+           "  --launcher      show the launcher even if it was turned off\n"
            "  --install       run the setup again on screen, then play\n"
            "  --install image set up from image.iso without the setup screens, then exit\n"
            "  --in-place      use the image where it is instead of copying it\n"
@@ -113,6 +118,8 @@ struct Options {
     bool install = false;
     std::optional<std::filesystem::path> install_image;
     bool in_place = false;
+    bool play = false;      // skip the launcher
+    bool launcher = false;  // show the launcher even when turned off
 };
 
 class UsageError final : public std::runtime_error {
@@ -127,6 +134,8 @@ Options parse_options(int argc, char **argv) {
         if (arg == "--help" || arg == "-h") throw UsageError("");
         if (arg == "--install") options.install = true;
         else if (arg == "--in-place") options.in_place = true;
+        else if (arg == "--play") options.play = true;
+        else if (arg == "--launcher") options.launcher = true;
         else if (!arg.empty() && arg[0] == '-') throw UsageError("unknown option " + arg);
         else if (options.install && !options.install_image) options.install_image = portablekit::install::path_from_utf8(arg);
         else if (!options.install && !options.game_dir) options.game_dir = std::filesystem::path(arg);
@@ -134,6 +143,7 @@ Options parse_options(int argc, char **argv) {
     }
     if (options.in_place && !options.install_image) throw UsageError("--in-place needs --install image.iso");
     if (options.install && options.game_dir) throw UsageError("--install does not take a game_dir");
+    if (options.play && options.launcher) throw UsageError("--play and --launcher exclude each other");
     return options;
 }
 
@@ -419,6 +429,18 @@ int main(int argc, char **argv) {
             std::cout << "No recompiled code is linked; running under the interpreter.\n";
         }
 
+#if defined(PORTABLEKIT_HAS_RENDERER)
+        // The launcher, once the window is up and before any of the game runs.
+        if (!options.play) {
+            switch (portablekit::ui::run_launcher(paths.disc_image, options.launcher)) {
+            case portablekit::ui::LauncherChoice::Play: break;
+            case portablekit::ui::LauncherChoice::Quit: portablekit::adhoc_shutdown(); return 0;
+            case portablekit::ui::LauncherChoice::SetUp:
+                portablekit::adhoc_shutdown();
+                return portablekit::install::restart_for_setup(argv[0]);
+            }
+        }
+#endif
         runtime.run(elf.runtime_entry(load_base), configured_max_dispatches());
         std::cout << "Runtime stopped: " << runtime.stop_reason() << "\n";
         // Quit from the menu, a closed window or the game ending: the network

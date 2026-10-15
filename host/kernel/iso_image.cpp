@@ -92,4 +92,10 @@ std::vector<std::string> IsoImage::list(std::string directory) const {
     return names;
 }
 
+std::optional<std::string> IsoImage::path_at(std::uint32_t lba) const {
+    for (const auto &[path, entry] : entries_)
+        if (!entry.directory && entry.lba == lba) return path;
+    return std::nullopt;
+}
+
 } // namespace portablekit

@@ -110,8 +110,28 @@ struct AudioChannel {
     std::uint64_t cursor{};
 };
 
+// Frame skipping keeps the game at full speed when drawing every frame would
+// slow it. Each flip measures what a frame took in real time, drawn or
+// skipped, against the emulated time it stands for (one vblank, or two for a
+// game at 30 frames a second), and skips the share of frames that brings the
+// average within it. The skips are spread evenly, never two in a row, so the
+// picture loses frames steadily instead of the game stuttering and racing to
+// catch up.
+struct FrameSkip {
+    bool skipping{};       // this game frame draws nothing it redraws every frame
+    bool started{};
+    std::chrono::steady_clock::time_point last_real{};
+    std::uint64_t last_virtual_us{};
+    double drawn_ms{};     // average real time of a drawn frame
+    double skipped_ms{};   // of a skipped one
+    double period_ms{};    // average emulated time of a frame
+    double share{};        // of frames to skip, 0 to 0.5
+    double owed{};         // skips due, spread over the frames
+};
+
 struct MediaState {
     DisplayState display;
+    FrameSkip skip;
     std::uint32_t ctrl_cycle{};
     std::uint32_t ctrl_mode{};
     std::map<std::int32_t, GeCallback> ge_callbacks;
@@ -192,6 +212,8 @@ void run_ge_list(Runtime &rt, std::uint32_t id) {
         renderer.begin_display_list();
         media().ge.set_raw_vertices(renderer.gpu_decode(), renderer.check_gpu_decode());
         media().ge.set_draw_sink([&renderer, &memory](const gpu::DrawCall &call) { renderer.submit(call, memory); });
+        if (media().skip.skipping)
+            media().ge.set_skip_draw([&renderer](std::uint32_t address) { return renderer.redrawn_every_frame(address); });
     }
 #endif
     media().ge.set_transfer_sink([&rt](const gpu::BlockTransfer &transfer) { block_transfer(rt, transfer); });
@@ -207,6 +229,7 @@ void run_ge_list(Runtime &rt, std::uint32_t id) {
     }
     list.done = finished;
     media().ge.set_draw_sink(nullptr);
+    media().ge.set_skip_draw(nullptr);
     media().ge.set_transfer_sink(nullptr);
     perf::add_render_time(perf::Clock::now() - start);
 }
@@ -215,6 +238,61 @@ void run_ge_list(Runtime &rt, std::uint32_t id) {
 // The mouse's motion since the previous pump, as degrees for the camera
 // layer. Added after the flip, so whoever drives the camera takes it in the
 // update this frame leads to.
+// At each flip: what the frame took, and whether the next one is skipped.
+// <prefix>_FRAME_SKIP_SHARE=0.5 skips that share of frames whatever they
+// take, to see skipping on a machine that keeps up.
+void decide_frame_skip(gpu::VulkanRenderer &renderer, std::chrono::steady_clock::time_point now) {
+    FrameSkip &f = media().skip;
+    const std::uint64_t virtual_us = kernel().now_us();
+    const bool was_skipped = f.skipping;
+    f.skipping = false;
+    if (!renderer.can_skip_frames()) {
+        f = FrameSkip{};
+        return;
+    }
+    if (!f.started) {
+        f.started = true;
+        f.last_real = now;
+        f.last_virtual_us = virtual_us;
+        return;
+    }
+    const double real_ms = std::chrono::duration<double, std::milli>(now - f.last_real).count();
+    const double virtual_ms = static_cast<double>(virtual_us - f.last_virtual_us) / 1000.0;
+    f.last_real = now;
+    f.last_virtual_us = virtual_us;
+    // A pause, a load or a hitch says nothing about the frames around it.
+    if (real_ms <= 0.0 || real_ms > 100.0 || virtual_ms <= 0.0 || virtual_ms > 100.0) return;
+    const auto average = [](double &value, double sample) { value = value == 0.0 ? sample : value * 0.9 + sample * 0.1; };
+    average(was_skipped ? f.skipped_ms : f.drawn_ms, real_ms);
+    average(f.period_ms, virtual_ms);
+    static const double forced = [] {
+        const char *text = portablekit::env("FRAME_SKIP_SHARE");
+        return text != nullptr ? std::clamp(std::atof(text), 0.0, 0.5) : -1.0;
+    }();
+    if (forced >= 0.0) {
+        f.share = forced;
+    } else if (settings::current().half_rate) {
+        // Limit to 30 fps: every other frame while the game makes 60, as a
+        // game made for 30 draws; none while it makes 30 itself (its movies
+        // and menus), which would leave 15.
+        f.share = f.period_ms < 25.0 ? 0.5 : 0.0;
+    } else {
+        // The share s of skipped frames that makes the average fit the
+        // period: (1 - s) * drawn + s * skipped = period. A skipped frame not
+        // measured yet is taken to cost half a drawn one.
+        const double skipped = f.skipped_ms > 0.0 ? f.skipped_ms : f.drawn_ms * 0.5;
+        const double saving = f.drawn_ms - skipped;
+        // Two percent of slack, so a game that just keeps up is left alone.
+        const double over = f.drawn_ms - f.period_ms * 1.02;
+        f.share = over > 0.0 && saving > 0.0 ? std::clamp(over / saving, 0.0, 0.5) : 0.0;
+    }
+    f.owed = std::min(f.owed + f.share, 1.0);
+    if (!was_skipped && f.owed >= 1.0) {
+        f.owed -= 1.0;
+        f.skipping = true;
+    }
+}
+
 void feed_mouse(gpu::VulkanRenderer &renderer) {
     const settings::Settings &s = settings::current();
     // A drag on the touch screen: Touch camera speed degrees for the screen's
@@ -303,7 +381,10 @@ void present_frame(Runtime &rt) {
     renderer.set_fast_forward(fast_loading::active());
     // The real time the frame stands for, which frame interpolation spaces
     // its presents by: that of the vblank the game's frame started from.
-    const bool presented = renderer.present(address, kernel().real_time_of(frame_start_us(kernel().last_vblank_us())));
+    bool presented = false;
+    if (media().skip.skipping) renderer.skip_flip();
+    else presented = renderer.present(address, kernel().real_time_of(frame_start_us(kernel().last_vblank_us())));
+    decide_frame_skip(renderer, present_start);
     // The frame's camera has been measured by now, so the hunt for the guest
     // variables behind it can compare RAM against it.
     probe::camera_frame(rt, media().ge.view_matrix_source());
@@ -555,13 +636,49 @@ void register_display_ctrl(HleRegistrar &hle) {
         kernel().finish(ctx, 0u);
     });
     // The guest flipping the framebuffer is the end of a frame.
+    //
+    // The display reads the framebuffer at the vblank, so setting the buffer
+    // already set, within the same vblank period and with nothing drawn since,
+    // shows nothing new: it is not presented again. A game seen setting it
+    // ten times a frame paid for ten presents, about 10 ms each on MoltenVK,
+    // which the busy clock then made up with a 100 ms hold. <prefix>_PRESENT_EVERY_FLIP presents every call, as
+    // before.
     hle.add("sceDisplay", "sceDisplaySetFrameBuf", [](Runtime &rt, AllegrexContext &ctx) {
-        media().display.framebuffer = arg(ctx, 0);
-        media().display.buffer_width = arg(ctx, 1);
-        media().display.pixel_format = arg(ctx, 2);
+        DisplayState &display = media().display;
+        const bool same_buffer = display.framebuffer == arg(ctx, 0) && display.buffer_width == arg(ctx, 1) &&
+                                 display.pixel_format == arg(ctx, 2);
+        display.framebuffer = arg(ctx, 0);
+        display.buffer_width = arg(ctx, 1);
+        display.pixel_format = arg(ctx, 2);
         trace_pacing("sceDisplaySetFrameBuf");
         stall_watchdog::note_frame();
-        present_frame(rt);
+        static const bool every_flip = portablekit::env("PRESENT_EVERY_FLIP") != nullptr;
+        static std::uint64_t presented_vblank = ~0ull;
+        static std::uint64_t presented_draws = ~0ull;
+        std::uint64_t draws = 0u;
+#if defined(PORTABLEKIT_HAS_RENDERER)
+        if (media().renderer) draws = media().renderer->draws_submitted();
+#endif
+        if (every_flip || !same_buffer || presented_vblank != kernel().vblank_count() || presented_draws != draws) {
+            present_frame(rt);
+            presented_vblank = kernel().vblank_count();
+#if defined(PORTABLEKIT_HAS_RENDERER)
+            presented_draws = media().renderer ? media().renderer->draws_submitted() : 0u;
+#endif
+        }
+        // At most one flip a vblank for a game that asks for it
+        // (GameProfile::flips_wait_for_vblank).
+        static const bool limit = portablekit::game().flips_wait_for_vblank && !portablekit::env_set("FLIP_UNLIMITED");
+        static std::uint64_t flipped_vblank = ~0ull;
+        const std::uint64_t vblank = kernel().vblank_count();
+        const bool again = flipped_vblank == vblank;
+        flipped_vblank = again ? vblank + 1u : vblank;
+        if (limit && again) {
+            WaitState wait{};
+            wait.type = WaitType::VBlank;
+            kernel().block(ctx, wait, 0u);
+            return;
+        }
         kernel().finish(ctx, 0u);
     });
 
@@ -707,6 +824,19 @@ void register_vblank_waits(HleRegistrar &hle) {
     });
 }
 
+// <prefix>_TRACE_GE_CALLS: each list call with the real time it took and
+// the real time since the previous one, to see how a game feeds the GE.
+void trace_ge_call(const char *name, std::uint32_t id, std::chrono::steady_clock::time_point start) {
+    static const bool trace = portablekit::env("TRACE_GE_CALLS") != nullptr;
+    if (!trace) return;
+    static std::chrono::steady_clock::time_point previous = start;
+    const auto now = std::chrono::steady_clock::now();
+    std::printf("[gecall] %s %u took %.2f ms, %.2f ms after the previous call ended\n", name, id,
+                std::chrono::duration<double, std::milli>(now - start).count(),
+                std::chrono::duration<double, std::milli>(start - previous).count());
+    previous = now;
+}
+
 void register_ge(HleRegistrar &hle) {
     hle.add("sceGe_user", "sceGeEdramGetAddr", [](Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, kEdramBase); });
     hle.add("sceGe_user", "sceGeEdramGetSize", [](Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, kEdramSize); });
@@ -731,7 +861,9 @@ void register_ge(HleRegistrar &hle) {
         list.callback = static_cast<std::int32_t>(arg(ctx, 2));
         media().ge_lists[id] = std::move(list);
         perf::count_display_list();
+        const auto start = std::chrono::steady_clock::now();
         run_ge_list(rt, id);
+        trace_ge_call("enqueue", id, start);
         kernel().finish(ctx, id);
     };
     hle.add("sceGe_user", "sceGeListEnQueue", enqueue);
@@ -743,16 +875,20 @@ void register_ge(HleRegistrar &hle) {
             return;
         }
         found->second.stall = arg(ctx, 1) & 0x0FFFFFFFu;
+        const auto start = std::chrono::steady_clock::now();
         run_ge_list(rt, arg(ctx, 0));
+        trace_ge_call("stall", arg(ctx, 0), start);
         kernel().finish(ctx, 0u);
     });
     hle.add("sceGe_user", "sceGeListSync", [](Runtime &, AllegrexContext &ctx) {
+        trace_ge_call("listsync", arg(ctx, 0), std::chrono::steady_clock::now());
         auto found = media().ge_lists.find(arg(ctx, 0));
         // 0 = completed, 2 = still stalled (drawing).
         const std::uint32_t state = found == media().ge_lists.end() || found->second.done ? 0u : 2u;
         kernel().finish(ctx, state);
     });
     hle.add("sceGe_user", "sceGeDrawSync", [](Runtime &, AllegrexContext &ctx) {
+        trace_ge_call("drawsync", 0u, std::chrono::steady_clock::now());
         std::erase_if(media().ge_lists, [](const auto &item) { return item.second.done; });
         kernel().finish(ctx, 0u);
     });
@@ -1132,6 +1268,43 @@ void show_cpu_picture_in_vram(Runtime &rt, std::uint32_t address, std::uint32_t 
     media().renderer->upload_frame(address | kEdramBase, rt.memory().raw_pointer(address, bytes), width, height, stride);
 #else
     (void)rt, (void)address, (void)width, (void)height, (void)stride, (void)pixel_mode;
+#endif
+}
+
+namespace {
+std::string &movie_file() {
+    static std::string path;
+    return path;
+}
+} // namespace
+
+void remember_movie_file(const std::string &path) {
+    if (path.size() > 4u) {
+        std::string tail = path.substr(path.size() - 4u);
+        for (char &c : tail) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        if (tail == ".PMF") movie_file() = path;
+    }
+}
+
+std::string last_movie_file() { return movie_file(); }
+
+void show_large_picture_in_vram(std::uint32_t address, const std::uint8_t *rgba, std::uint32_t width,
+                                std::uint32_t height) {
+#if defined(PORTABLEKIT_HAS_RENDERER)
+    if ((address & 0x1F000000u) != kEdramBase || !media().renderer || !media().renderer->available()) return;
+    media().renderer->upload_frame(address | kEdramBase, rgba, width, height, width);
+#else
+    (void)address, (void)rgba, (void)width, (void)height;
+#endif
+}
+
+std::uint32_t host_pad_buttons() {
+#if defined(PORTABLEKIT_HAS_RENDERER)
+    if (!media().renderer || !media().renderer->available()) return 0u;
+    media().renderer->sample_pad();
+    return media().renderer->pad().buttons;
+#else
+    return 0u;
 #endif
 }
 

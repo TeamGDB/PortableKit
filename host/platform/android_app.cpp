@@ -14,6 +14,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -50,48 +51,72 @@ void redirect_output() {
     if (std::freopen(log.c_str(), "a", stderr) != nullptr) std::setvbuf(stderr, nullptr, _IONBF, 0);
 }
 
-// The APK carries the fallback font a release ships in fonts/, as an asset.
-// The font code maps files, so it is unpacked to the app's storage once and
-// found there.
-constexpr const char *kBundledFonts[] = {"NotoSansCJKjp-Regular.otf"};
+// The APK carries, as assets, the fallback font a release ships in fonts/ and
+// the launcher's images in launcher/. The font code maps files and the
+// launcher reads them, so they are unpacked to the app's storage once and
+// found there, as an app's bundled resources are on the desktop.
+void unpack_asset(const std::filesystem::path &root, const std::string &asset) {
+    std::error_code ec;
+    const std::filesystem::path target = root / asset;
+    std::filesystem::create_directories(target.parent_path(), ec);
+    SDL_IOStream *stream = SDL_IOFromFile(asset.c_str(), "rb");
+    if (stream == nullptr) return;
+    const Sint64 size = SDL_GetIOSize(stream);
+    if (size > 0 && std::filesystem::file_size(target, ec) == static_cast<std::uintmax_t>(size)) {
+        SDL_CloseIO(stream);
+        return;
+    }
+    std::size_t length = 0;
+    void *data = SDL_LoadFile_IO(stream, &length, true);
+    if (data == nullptr) return;
+    const std::filesystem::path partial = target.string() + ".partial";
+    {
+        std::ofstream out(partial, std::ios::binary | std::ios::trunc);
+        out.write(static_cast<const char *>(data), static_cast<std::streamsize>(length));
+    }
+    SDL_free(data);
+    std::filesystem::rename(partial, target, ec);
+}
 
-void unpack_bundled_fonts() {
+void unpack_bundled_resources() {
     const char *storage = SDL_GetAndroidInternalStoragePath();
     if (storage == nullptr) return;
     const std::filesystem::path root = std::filesystem::path(storage) / "bundled";
-    std::error_code ec;
-    std::filesystem::create_directories(root / "fonts", ec);
-    for (const char *name : kBundledFonts) {
-        const std::filesystem::path target = root / "fonts" / name;
-        const std::string asset = std::string("fonts/") + name;
-        SDL_IOStream *stream = SDL_IOFromFile(asset.c_str(), "rb");
-        if (stream == nullptr) continue;
-        const Sint64 size = SDL_GetIOSize(stream);
-        if (size > 0 && std::filesystem::file_size(target, ec) == static_cast<std::uintmax_t>(size)) {
-            SDL_CloseIO(stream);
-            continue;
-        }
-        std::size_t length = 0;
-        void *data = SDL_LoadFile_IO(stream, &length, true);
-        if (data == nullptr) continue;
-        const std::filesystem::path partial = target.string() + ".partial";
-        {
-            std::ofstream out(partial, std::ios::binary | std::ios::trunc);
-            out.write(static_cast<const char *>(data), static_cast<std::streamsize>(length));
-        }
-        SDL_free(data);
-        std::filesystem::rename(partial, target, ec);
+    unpack_asset(root, "fonts/NotoSansCJKjp-Regular.otf");
+    if (const portablekit::LauncherTheme *theme = portablekit::game().launcher) {
+        if (theme->backdrop_file != nullptr) unpack_asset(root, std::string("launcher/") + theme->backdrop_file);
+        if (theme->logo_file != nullptr) unpack_asset(root, std::string("launcher/") + theme->logo_file);
     }
     portablekit::set_bundled_resource_directory(root);
+}
+
+// An app has no shell to set the <prefix>_* variables that switch on traces
+// and fallbacks in: env.txt in the app's internal storage holds them, one
+// NAME=value a line, read at start. Only `adb shell run-as` on a debuggable
+// build reaches that folder, so players never meet it.
+void load_environment_file() {
+    const char *storage = SDL_GetAndroidInternalStoragePath();
+    if (storage == nullptr) return;
+    std::ifstream in(std::filesystem::path(storage) / "env.txt");
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const std::size_t equals = line.find('=');
+        if (line.empty() || line[0] == '#' || equals == std::string::npos || equals == 0u) continue;
+        const std::string name = line.substr(0, equals);
+        setenv(name.c_str(), line.c_str() + equals + 1u, 1);
+        std::printf("[env] %s from env.txt\n", name.c_str());
+    }
 }
 
 } // namespace
 
 int main(int argc, char *argv[]) {
     redirect_output();
+    load_environment_file();
     // Back opens the in-game menu instead of leaving the app.
     SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
-    unpack_bundled_fonts();
+    unpack_bundled_resources();
     Launch launch{argc, argv, 1};
     pthread_attr_t attributes;
     pthread_attr_init(&attributes);

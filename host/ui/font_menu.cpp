@@ -1,6 +1,7 @@
 #include "ui/font_menu.hpp"
 
 #include "ui/layer.hpp"
+#include "ui/save_screen.hpp"
 #include "ui/widgets.hpp"
 
 #include "fonts/game_font.hpp"
@@ -46,20 +47,6 @@ RowOptions options_for(const char *key, std::string description) {
         options.note = "Set by " + variable;
     }
     return options;
-}
-
-std::string file_url(const std::string &path) {
-    std::string url = "file://";
-    for (const unsigned char c : path) {
-        if (std::isalnum(c) != 0 || c == '/' || c == '-' || c == '_' || c == '.' || c == '~') {
-            url += static_cast<char>(c);
-        } else {
-            char escaped[4];
-            std::snprintf(escaped, sizeof(escaped), "%%%02X", c);
-            url += escaped;
-        }
-    }
-    return url;
 }
 
 void apply(const std::string &value) {
@@ -225,11 +212,7 @@ void font_rows() {
     if (button_row("Open the fonts folder",
                    {false, {}, "Fonts put in this folder (.ttf, .otf, .ttc) are listed first under Font: " +
                                    fonts::user_font_folder()})) {
-        const std::string folder = fonts::user_font_folder();
-        std::error_code ec;
-        std::filesystem::create_directories(install::path_from_utf8(folder), ec);
-        if (!SDL_OpenURL(file_url(folder).c_str()))
-            std::cout << "[menu] cannot open " << folder << ": " << SDL_GetError() << "\n";
+        open_folder(install::path_from_utf8(fonts::user_font_folder()));
     }
 }
 

@@ -1368,6 +1368,7 @@ struct RuntimeCorpusHost {
                CorpusFunction function, CorpusEntryFunction entry_function) {
                 host(rt).register_generated_unit(unit_index, unit_address, unit_span, function, entry_function);
             },
+            [](CorpusRuntime &rt, AllegrexContext &ctx) { return host(rt).run_interpreter_fallback(ctx); },
         };
         return api;
     }

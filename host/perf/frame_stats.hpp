@@ -78,6 +78,7 @@ void count_recorded_draws(std::uint32_t count);
 // shown per frame on the perf line: on a tiled GPU (phones) each pass loads
 // and stores its attachments, and each copy moves a whole target.
 void count_render_pass();
+void count_skipped_frame();  // a flip frame skipping did not draw
 void count_target_copy();
 // A render pass begun without loading what its first draw, a clear, writes.
 void count_cleared_pass();
@@ -118,6 +119,7 @@ struct Summary {
     double passes{};          // render passes per frame, presents between flips included
     double cleared_passes{};  // of those, begun without loading what a clear overwrites
     double copies{};          // full-size render target copies and blits per frame
+    double skipped{};         // flips not drawn by frame skipping, per real second
     double frame_avg_ms{};
     double frame_max_ms{};
     double guest_ms{};

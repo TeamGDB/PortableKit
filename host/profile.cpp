@@ -1,5 +1,7 @@
 #include "profile.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <string>
 
@@ -18,6 +20,18 @@ const char *env(const char *name) {
 bool env_set(const char *name) { return env(name) != nullptr; }
 
 std::string env_name(const char *name) { return std::string(game().env_prefix) + '_' + name; }
+
+bool texture_pack_fits(std::string_view disc_id) {
+    const auto same = [disc_id](std::string_view other) {
+        return other.size() == disc_id.size() &&
+               std::equal(other.begin(), other.end(), disc_id.begin(), [](char a, char b) {
+                   return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+               });
+    };
+    if (game().disc_id != nullptr && same(game().disc_id)) return true;
+    return std::any_of(game().texture_pack_releases.begin(), game().texture_pack_releases.end(),
+                       [&](const char *release) { return release != nullptr && same(release); });
+}
 
 namespace {
 const ProfileVariant *g_active_variant = nullptr;

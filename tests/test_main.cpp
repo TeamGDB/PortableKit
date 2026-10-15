@@ -1241,11 +1241,12 @@ static void test_automatic_cross_unit_tail_chaining() {
         std::ifstream generated(generated_dir / "generated_unit_0000.cpp");
         text.assign((std::istreambuf_iterator<char>(generated)), std::istreambuf_iterator<char>());
     }
-    require(text.find("(void)rt.invoke_chained_direct<&recomp_unit_0001_entry, 1u, 1u, 0x08804040u>(ctx, &aot_mem); return;") != std::string::npos,
+    require(text.find("(void)rt.invoke_chained_direct<&recomp_unit_0001_entry, 1u, 1u, 0x08804040u>(ctx, &aot_shared); return;") != std::string::npos,
             "Automatic codegen did not emit a direct-entry native chain across AOT units");
     require(text.find("ctx.pc = 0x08804040u; (void)rt.invoke_chained_direct") == std::string::npos,
             "Direct-entry chain still dirties ctx.pc on its successful hot path");
-    require(text.find("AotFastView &aot_mem)") != std::string::npos &&
+    require(text.find("AotFastView &aot_shared)") != std::string::npos &&
+            text.find("const AotFastView aot_mem = aot_shared;") != std::string::npos &&
             text.find("_entry(rt, ctx, 0u, aot_mem)") != std::string::npos,
             "Shared AOT memory was not threaded across generated-unit direct chains");
     // The register-cache lowering passes were removed: generated units must
@@ -1260,6 +1261,76 @@ static void test_automatic_cross_unit_tail_chaining() {
             "Automatic codegen did not include cross-unit native declarations");
     require(text.find("runtime.register_generated_unit(0u, 0x08804000u, 64u, &recomp_unit_0000, &recomp_unit_0000_entry);") != std::string::npos,
             "Automatic codegen did not register the dense generated-unit fast table");
+    std::filesystem::remove_all(root);
+#endif
+}
+
+// --sparse-entries keeps the analyzed blocks but makes dispatcher entries only
+// where control arrives from outside a block; anywhere else the unit hands the
+// address to the interpreter instead of stopping.
+static void test_automatic_sparse_entries() {
+#ifndef PSPRECOMP_CODEGEN_PATH
+    throw std::runtime_error("PSPRECOMP_CODEGEN_PATH was not provided by CMake");
+#else
+    const auto root = std::filesystem::temp_directory_path() / "psprecomp_sparse_entries_test";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    const auto read_unit = [](const std::filesystem::path &path) {
+        std::ifstream in(path);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    const auto generate = [&](const std::string &name, const std::vector<std::uint8_t> &bytes) {
+        const auto elf_path = root / (name + ".elf");
+        { std::ofstream out(elf_path, std::ios::binary); out.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size())); }
+        const auto generated_dir = root / name;
+        const std::string command = shell_quote(codegen_tool_path()) + " " + shell_quote(elf_path) +
+            " --auto " + shell_quote(generated_dir) + " 0x08804000 64 --sparse-entries";
+        require(std::system(shell_command(command).c_str()) == 0, "psp_recomp --sparse-entries failed");
+        return generated_dir;
+    };
+
+    // One function: entry, a branch, its fallthrough and its target. Only the
+    // entry is entered from outside; the other two are blocks reached by goto.
+    const auto branch_dir = generate("branch", make_branch_delay_test_elf());
+    const std::string text = read_unit(branch_dir / "generated_unit_0000.cpp");
+    require(text.find("runtime.register_function(0x08804000u") != std::string::npos,
+            "Sparse entries did not register the function entry");
+    require(text.find("runtime.register_function(0x0880400") == text.rfind("runtime.register_function(0x0880400"),
+            "Sparse entries registered more than the function entry");
+    require(text.find("L_0880400C:") != std::string::npos && text.find("L_08804010:") != std::string::npos,
+            "Sparse entries lost the branch's blocks");
+    require(text.find("L_08804008:") == std::string::npos,
+            "Sparse entries made a block of a delay slot");
+    require(text.find("rt.interpret(ctx)") != std::string::npos,
+            "Sparse entries do not interpret an address without an entry");
+
+    // A fixed branch into another unit still chains straight to its entry.
+    const auto cross_dir = generate("cross", make_cross_unit_branch_test_elf());
+    require(read_unit(cross_dir / "generated_unit_0000.cpp")
+                    .find("(void)rt.invoke_chained_direct<&recomp_unit_0001_entry, 1u, 1u, 0x08804040u>(ctx, &aot_shared); return;") !=
+                std::string::npos,
+            "Sparse entries did not make a cross-unit branch target an entry");
+
+    // A return tests the continuation of a same-unit call before dispatching.
+    auto call_bytes = make_branch_delay_test_elf();
+    const std::uint32_t call_code[] = {
+        0x0E201004u, // jal  0x08804010
+        0x00000000u, // nop
+        0x03E00008u, // jr   ra (the continuation)
+        0x00000000u, // nop
+        0x03E00008u, // 0x08804010: jr ra
+        0x00000000u, // nop
+        0x00000000u,
+    };
+    for (std::size_t i = 0; i < std::size(call_code); ++i) put32(call_bytes, 0x80u + i * 4u, call_code[i]);
+    const auto call_elf = root / "call.elf";
+    { std::ofstream out(call_elf, std::ios::binary); out.write(reinterpret_cast<const char *>(call_bytes.data()), static_cast<std::streamsize>(call_bytes.size())); }
+    const std::string hints_command = shell_quote(codegen_tool_path()) + " " + shell_quote(call_elf) +
+        " --auto " + shell_quote(root / "call") + " 0x08804000 64 --sparse-entries --return-hints";
+    require(std::system(shell_command(hints_command).c_str()) == 0, "psp_recomp --return-hints failed");
+    require(read_unit(root / "call" / "generated_unit_0000.cpp").find("if (jump_target == 0x08804008u) goto L_08804008;") !=
+                std::string::npos,
+            "--return-hints did not test the caller's continuation");
     std::filesystem::remove_all(root);
 #endif
 }
@@ -2186,6 +2257,7 @@ int main() {
         test_vfpu_branch_cfg_discovery();
         test_automatic_cfg_and_codegen();
         test_automatic_cross_unit_tail_chaining();
+        test_automatic_sparse_entries();
         test_materialized_function_pointer_discovery();
 
         auto relocation_elf = psprecomp::Elf32Image::from_bytes(make_relocation_test_prx(), "synthetic_relocation.prx");

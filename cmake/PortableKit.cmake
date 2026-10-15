@@ -28,6 +28,7 @@ set(PORTABLEKIT_HOST_SOURCES
     host/corpus_library.cpp
     host/audio/atrac_decoder.cpp
     host/movie/avc_decoder.cpp
+    host/movie/replacement_movie.cpp
     host/movie/psmf_demuxer.cpp
     host/movie/psmf_header.cpp
     host/audio/audio_sink.cpp
@@ -51,6 +52,7 @@ set(PORTABLEKIT_HOST_SOURCES
     host/kernel/rtc_time.cpp
     host/kernel/load_trace.cpp
     host/kernel/fast_loading.cpp
+    host/kernel/file_mods.cpp
     host/kernel/stall_watchdog.cpp
     host/kernel/load_detector.cpp
     host/kernel/iso_image.cpp
@@ -101,9 +103,12 @@ set(PORTABLEKIT_RENDERER_SOURCES
     host/ui/font_menu.cpp
     host/input/motion.cpp
     host/input/steam_deck_imu.cpp
+    host/ui/i18n.cpp
     host/ui/input_script.cpp
+    host/ui/launcher.cpp
     host/ui/layer.cpp
     host/ui/menu.cpp
+    host/ui/save_chooser.cpp
     host/ui/save_screen.cpp
     host/ui/setup_screens.cpp
     host/ui/text_input.cpp
@@ -276,6 +281,10 @@ function(portablekit_add_game target)
         if(MSVC)
             if(PSPRECOMP_GENERATED_OPT_LEVEL STREQUAL "0")
                 set(generated_options "/Od;/bigobj")
+            elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+                # clang-cl: /Ob0 would turn off inlining; its optimizer copes
+                # with these units, as clang does on the other platforms.
+                set(generated_options "/O${PSPRECOMP_GENERATED_OPT_LEVEL};/bigobj")
             else()
                 set(generated_options "/O${PSPRECOMP_GENERATED_OPT_LEVEL};/Ob0;/bigobj")
             endif()
@@ -315,7 +324,8 @@ function(portablekit_add_game target)
                 "kGeCheckVertexShader=GE_RAW_VERTICES,GE_CHECK_DECODE@${PORTABLEKIT_ROOT}/host/gpu/shaders/ge.vert"
                 "kGeFragmentShader=${PORTABLEKIT_ROOT}/host/gpu/shaders/ge.frag"
                 "kLevelVertexShader=${PORTABLEKIT_ROOT}/host/gpu/shaders/level.vert"
-                "kLevelFragmentShader=${PORTABLEKIT_ROOT}/host/gpu/shaders/level.frag")
+                "kLevelFragmentShader=${PORTABLEKIT_ROOT}/host/gpu/shaders/level.frag"
+                "kFxaaFragmentShader=${PORTABLEKIT_ROOT}/host/gpu/shaders/fxaa.frag")
             if(ANDROID)
                 # Pre-rotation of the finished frame for a display turned sideways.
                 list(APPEND shaders
@@ -634,6 +644,8 @@ function(_portablekit_add_overlay host_target meta_path output_dir)
         target_compile_definitions(${target} PRIVATE PSPRECOMP_IMPORT_HOST_SYMBOLS=1)
         if(PSPRECOMP_GENERATED_OPT_LEVEL STREQUAL "0")
             target_compile_options(${target} PRIVATE /Od /bigobj)
+        elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+            target_compile_options(${target} PRIVATE /O${PSPRECOMP_GENERATED_OPT_LEVEL} /bigobj)
         else()
             target_compile_options(${target} PRIVATE /O${PSPRECOMP_GENERATED_OPT_LEVEL} /Ob0 /bigobj)
         endif()

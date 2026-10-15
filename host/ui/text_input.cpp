@@ -382,7 +382,7 @@ void draw_field(ImDrawList *draw, float width) {
     const ImVec2 min = ImGui::GetCursorScreenPos();
     const ImVec2 max{min.x + width, min.y + height};
     ImGui::Dummy({width, height});
-    draw->AddRectFilled(min, max, IM_COL32(8, 5, 3, 150), px(6.0f));
+    draw->AddRectFilled(min, max, with_alpha(colors::kBackdrop, 150), px(6.0f));
     draw->AddRect(min, max, colors::kAccent, px(6.0f), 0, px(1.5f));
 
     // The counter on the right, red while the text is full or a key was
@@ -449,7 +449,7 @@ void draw_grid(ImDrawList *draw, const std::vector<Row> &rows, float width) {
             ImU32 ink = enabled ? colors::kText : colors::kTextDisabled;
             if (lit) {
                 fill = colors::kAccent;
-                ink = colors::kPanel;
+                ink = colors::kOnAccent;
             }
             if (hovered && !selected) fill = lit ? colors::kAccentBright : colors::kRowHover;
             const float rounding = px(6.0f);
@@ -539,7 +539,7 @@ void text_input_frame() {
     ImGui::PopFont();
     const ImVec2 line = ImGui::GetCursorScreenPos();
     draw->AddRectFilledMultiColor(line, {line.x + inner, line.y + px(2.0f)}, colors::kAccent,
-                                  IM_COL32(143, 93, 36, 0), IM_COL32(143, 93, 36, 0), colors::kAccent);
+                                  with_alpha(colors::kPanelEdge, 0), with_alpha(colors::kPanelEdge, 0), colors::kAccent);
     ImGui::Dummy({0.0f, px(8.0f)});
     if (!k.request.prompt.empty()) {
         paragraph(k.request.prompt, colors::kTextDim);
@@ -554,7 +554,7 @@ void text_input_frame() {
     }
 
     draw->AddLine({line.x, ImGui::GetCursorScreenPos().y}, {line.x + inner, ImGui::GetCursorScreenPos().y},
-                  IM_COL32(143, 93, 36, 90), px(1.0f));
+                  with_alpha(colors::kPanelEdge, 90), px(1.0f));
     ImGui::Dummy({0.0f, px(8.0f)});
     if (layer.input_device() == InputDevice::Gamepad) {
         hints({{Control::Confirm, "Type"},

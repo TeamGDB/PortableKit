@@ -70,9 +70,25 @@ bool holds_pack(const fs::path &folder) {
     return !folder.empty() && (is_file(folder / "textures.ini") || is_file(folder / "textures.zip"));
 }
 
+// Whether a pack made for `name` fits `game_id`: the same id, or, for the
+// game this port plays, a release its profile says has the same textures.
+bool fits(const std::string &name, const std::string &game_id) {
+    if (lower(name) == lower(game_id)) return true;
+    return lower(game_id) == lower(portablekit::game().disc_id) && portablekit::texture_pack_fits(name);
+}
+
 bool lists(const std::vector<std::string> &games, const std::string &game_id) {
-    const std::string wanted = lower(game_id);
-    return std::any_of(games.begin(), games.end(), [&](const std::string &game) { return lower(game) == wanted; });
+    return std::any_of(games.begin(), games.end(), [&](const std::string &game) { return fits(game, game_id); });
+}
+
+// The disc ids a pack folder for `game_id` may be named: its own first, then
+// the releases whose packs fit it.
+std::vector<std::string> pack_names(const std::string &game_id) {
+    std::vector<std::string> names{game_id};
+    if (lower(game_id) == lower(portablekit::game().disc_id))
+        for (const char *release : portablekit::game().texture_pack_releases)
+            if (release != nullptr) names.emplace_back(release);
+    return names;
 }
 
 // Files a copy leaves out: the file managers' own (.DS_Store, Thumbs.db,
@@ -155,15 +171,18 @@ fs::path find_pack(const fs::path &chosen, const std::string &game_id, std::stri
         fs::path folder;
         const char *layout;
     };
-    const Place exact[] = {
-        {child(textures, game_id), "Found in its textures folder."},
-        {child(chosen, game_id), "Found in the folder."},
-        {child(psp_textures, game_id), "Found in PPSSPP's PSP/TEXTURES folder."},
-    };
-    for (const Place &place : exact) {
-        if (holds_pack(place.folder)) {
-            layout = place.layout;
-            return place.folder;
+    for (const std::string &name : pack_names(game_id)) {
+        const Place exact[] = {
+            {child(textures, name), "Found in its textures folder."},
+            {child(chosen, name), "Found in the folder."},
+            {child(psp_textures, name), "Found in PPSSPP's PSP/TEXTURES folder."},
+        };
+        for (const Place &place : exact) {
+            if (holds_pack(place.folder)) {
+                layout = place.layout;
+                if (lower(name) != lower(game_id)) made_for = name_of(place.folder);
+                return place.folder;
+            }
         }
     }
     // A pack under another name whose textures.ini says it covers this game.
@@ -208,6 +227,12 @@ TexturePackLocation texture_pack_location(const fs::path &textures_root, const s
     }
     if (!in_place.empty())
         return {fs::path(std::u8string(in_place.begin(), in_place.end())), TexturePackLocation::Source::InPlace};
+    // A pack copied in by hand may keep the name of the release it was made
+    // for; the game's own folder still comes first.
+    if (!holds_pack(textures_root / game_id))
+        for (const std::string &name : pack_names(game_id))
+            if (const fs::path folder = child(textures_root, name); holds_pack(folder))
+                return {folder, TexturePackLocation::Source::Installed};
     return {textures_root / game_id, TexturePackLocation::Source::Installed};
 }
 
@@ -232,7 +257,7 @@ TexturePackCheck check_texture_pack(const fs::path &chosen, const std::string &g
     // covers this game too.
     const std::string folder_name = name_of(check.folder);
     const std::vector<std::string> games = texture_pack_games(check.folder / "textures.ini");
-    if (lower(folder_name) != lower(game_id) && !lists(games, game_id)) {
+    if (!fits(folder_name, game_id) && !lists(games, game_id)) {
         if (looks_like_game_id(folder_name)) {
             check.problem = "This pack is for " + folder_name + ", and its textures.ini does not list " + game_id +
                             " under [games], so its textures would not match this release.";
@@ -244,6 +269,7 @@ TexturePackCheck check_texture_pack(const fs::path &chosen, const std::string &g
             return check;
         }
     } else if (lower(folder_name) != lower(game_id) && looks_like_game_id(folder_name)) {
+        // Named for another release that fits this one, or listing this one.
         check.made_for = folder_name;
     }
 
@@ -308,6 +334,23 @@ fs::path texture_pack_backup_directory(const fs::path &textures_root, std::chron
     return unused_path(textures_root / ".backup", timestamp_for_path(time));
 }
 
+fs::path new_texture_pack_staging(const fs::path &textures_root) {
+    // Copies that never finished (the game was closed or crashed during one)
+    // are this code's own folders; nothing else is named like them.
+    std::error_code ec;
+    for (fs::directory_iterator it(textures_root, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+        if (name_of(it->path()).rfind(kStagingPrefix, 0) != 0 || !is_folder(it->path())) continue;
+        std::error_code remove_error;
+        fs::remove_all(it->path(), remove_error);
+        std::cout << "[texpack] removed an unfinished copy, " << utf8(it->path()) << "\n";
+    }
+    return unused_path(textures_root, kStagingPrefix + timestamp_for_path(std::chrono::system_clock::now()));
+}
+
+bool texture_pack_file_skipped(const std::string &name) { return skipped(name); }
+
+std::vector<std::string> texture_pack_folder_names(const std::string &game_id) { return pack_names(game_id); }
+
 TexturePackCopy::~TexturePackCopy() {
     cancel();
     join();
@@ -325,14 +368,7 @@ void TexturePackCopy::start(const TexturePackCheck &check, const fs::path &textu
     }
     // Copies that never finished (the game was closed or crashed during one)
     // are this code's own folders; nothing else is named like them.
-    std::error_code ec;
-    for (fs::directory_iterator it(textures_root, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
-        if (name_of(it->path()).rfind(kStagingPrefix, 0) != 0 || !is_folder(it->path())) continue;
-        std::error_code remove_error;
-        fs::remove_all(it->path(), remove_error);
-        std::cout << "[texpack] removed an unfinished copy, " << utf8(it->path()) << "\n";
-    }
-    staging_ = unused_path(textures_root, kStagingPrefix + timestamp_for_path(std::chrono::system_clock::now()));
+    staging_ = new_texture_pack_staging(textures_root);
     state_ = State::Copying;
     thread_ = std::thread([this, source = check.folder] { run(source); });
 }

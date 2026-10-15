@@ -55,7 +55,7 @@ bool chip(const char *id, const std::string &text, bool active = false) {
                   std::round((focused ? 2.0f : 1.5f) * scale));
     const ImVec2 text_size = ImGui::CalcTextSize(text.c_str());
     draw->AddText({min.x + (size.x - text_size.x) * 0.5f, min.y + (size.y - text_size.y) * 0.5f},
-                  active ? colors::kPanel : colors::kText, text.c_str());
+                  active ? colors::kOnAccent : colors::kText, text.c_str());
     ImGui::SameLine(0.0f, std::round(8.0f * scale));
     return pressed;
 }
@@ -77,6 +77,7 @@ struct FileBrowser::SystemDialog {
     std::mutex mutex;
     std::optional<fs::path> path;
     std::string error;
+    bool cancelled{};
 };
 
 fs::path FileBrowser::home() {
@@ -95,6 +96,40 @@ FileBrowser::FileBrowser(const fs::path &folder, Options options)
     : options_(std::move(options)), dialog_(std::make_shared<SystemDialog>()) {
     find_places();
     open(!folder.empty() && is_folder(folder) ? folder : home());
+    if (options_.system_first && system_dialog_available()) {
+        waiting_for_dialog_ = true;
+        open_system_dialog();
+    }
+}
+
+bool FileBrowser::system_dialog_available() {
+    // Under gamescope the portal dialog never shows; do not offer it there.
+    // On Android it gives content:// documents, which nothing that uses the
+    // browser can read by name.
+#if defined(PORTABLEKIT_ANDROID_APP)
+    return false;
+#else
+    return std::getenv("GAMESCOPE_WAYLAND_DISPLAY") == nullptr;
+#endif
+}
+
+void FileBrowser::open_system_dialog() {
+    static const SDL_DialogFileFilter kFilters[] = {{"Disc images (*.iso)", "iso"}, {"All files", "*"}};
+    const bool folders = !options_.choose_folder.empty();
+    auto *state = new std::shared_ptr<SystemDialog>(dialog_);
+    const auto callback = [](void *userdata, const char *const *files, int) {
+        auto *shared = static_cast<std::shared_ptr<SystemDialog> *>(userdata);
+        {
+            std::lock_guard lock((*shared)->mutex);
+            if (files == nullptr) (*shared)->error = SDL_GetError();
+            else if (files[0] != nullptr) (*shared)->path = install::path_from_utf8(files[0]);
+            else (*shared)->cancelled = true;
+        }
+        delete shared;
+    };
+    const std::string start = install::path_to_utf8(folder_);
+    if (folders) SDL_ShowOpenFolderDialog(callback, state, Layer::get().renderer().window(), start.c_str(), false);
+    else SDL_ShowOpenFileDialog(callback, state, Layer::get().renderer().window(), kFilters, 2, start.c_str(), false);
 }
 
 FileBrowser::~FileBrowser() = default;
@@ -214,7 +249,32 @@ FileBrowser::Result FileBrowser::frame(bool back) {
         if (!dialog_->error.empty()) {
             error_ = "The system file dialog could not be opened (" + dialog_->error + ").";
             dialog_->error.clear();
+            waiting_for_dialog_ = false;
         }
+        if (dialog_->cancelled) {
+            dialog_->cancelled = false;
+            if (waiting_for_dialog_) return Result::Cancelled;
+        }
+    }
+
+    // system_first: the system's dialog is open; this only waits for it.
+    if (waiting_for_dialog_) {
+        if (back) return Result::Cancelled;
+        ImGui::Dummy({0.0f, std::round(font * 0.4f)});
+        ImGui::Indent(std::round(16.0f * Layer::get().scale()));
+        paragraph(!options_.choose_folder.empty() ? "Choose the folder in the window that opened."
+                                                  : "Choose the file in the window that opened.",
+                  colors::kText);
+        ImGui::Unindent(std::round(16.0f * Layer::get().scale()));
+        ImGui::Dummy({0.0f, std::round(font * 0.4f)});
+        if (button_row("Open the window again", {false, {}, "If the window is hidden or was closed."}))
+            open_system_dialog();
+        if (button_row("Browse here instead", {false, {}, "Choose with the list in this window."})) {
+            waiting_for_dialog_ = false;
+            focus_first_ = true;
+        }
+        if (button_row("Cancel", {false, {}, "Choose nothing."})) return Result::Cancelled;
+        return Result::Browsing;
     }
 
     // Back and Backspace go up a folder; at the top they leave the browser.
@@ -240,31 +300,7 @@ FileBrowser::Result FileBrowser::frame(bool back) {
         show_all_ = !show_all_;
         open(folder_);
     }
-    // Under gamescope the portal dialog never shows; do not offer it there.
-    // On Android it gives content:// documents, which nothing that uses the
-    // browser can read by name.
-#if defined(PORTABLEKIT_ANDROID_APP)
-    const bool system_dialog = false;
-#else
-    const bool system_dialog = std::getenv("GAMESCOPE_WAYLAND_DISPLAY") == nullptr;
-#endif
-    if (system_dialog && chip("##system", "System dialog\u2026")) {
-        static const SDL_DialogFileFilter kFilters[] = {{"Disc images (*.iso)", "iso"}, {"All files", "*"}};
-        const bool folders = !options_.choose_folder.empty();
-        auto *state = new std::shared_ptr<SystemDialog>(dialog_);
-        const auto callback = [](void *userdata, const char *const *files, int) {
-            auto *shared = static_cast<std::shared_ptr<SystemDialog> *>(userdata);
-            {
-                std::lock_guard lock((*shared)->mutex);
-                if (files == nullptr) (*shared)->error = SDL_GetError();
-                else if (files[0] != nullptr) (*shared)->path = install::path_from_utf8(files[0]);
-            }
-            delete shared;
-        };
-        const std::string start = install::path_to_utf8(folder_);
-        if (folders) SDL_ShowOpenFolderDialog(callback, state, Layer::get().renderer().window(), start.c_str(), false);
-        else SDL_ShowOpenFileDialog(callback, state, Layer::get().renderer().window(), kFilters, 2, start.c_str(), false);
-    }
+    if (system_dialog_available() && chip("##system", "System dialog\u2026")) open_system_dialog();
     ImGui::NewLine();
 
     // Where we are.

@@ -7,6 +7,8 @@
 #include <unistd.h>
 
 #include <array>
+#include <cctype>
+#include <utility>
 #include <cerrno>
 #include <fstream>
 #include <vector>
@@ -153,6 +155,130 @@ bool copy_tree(const fs::path &local, const std::string &folder_uri, std::string
 }
 
 } // namespace
+
+namespace {
+
+std::string lower(std::string text) {
+    for (char &c : text) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return text;
+}
+
+const Entry *child_named(const std::vector<Entry> &entries, const std::string &name, bool directory) {
+    const std::string wanted = lower(name);
+    for (const Entry &entry : entries)
+        if (entry.directory == directory && lower(entry.name) == wanted) return &entry;
+    return nullptr;
+}
+
+bool holds_ini(const std::string &uri) {
+    const auto entries = list_folder(uri);
+    return entries && child_named(*entries, "textures.ini", false) != nullptr;
+}
+
+// The folder under `uri` reached through `path`, whatever its case; empty
+// when it is not there.
+std::string descend(std::string uri, const std::vector<std::string> &path) {
+    for (const std::string &part : path) {
+        const auto entries = list_folder(uri);
+        if (!entries) return {};
+        const Entry *entry = child_named(*entries, part, true);
+        if (entry == nullptr) return {};
+        uri = entry->uri;
+    }
+    return uri;
+}
+
+// The first folder within `depth` levels holding textures.ini, breadth first.
+bool search(const std::string &uri, int depth, std::string &found_uri, std::string &found_name) {
+    const auto entries = list_folder(uri);
+    if (!entries) return false;
+    std::vector<const Entry *> folders;
+    for (const Entry &entry : *entries)
+        if (entry.directory && entry.name[0] != '.') folders.push_back(&entry);
+    for (const Entry *entry : folders)
+        if (holds_ini(entry->uri)) {
+            found_uri = entry->uri;
+            found_name = entry->name;
+            return true;
+        }
+    if (depth <= 1) return false;
+    for (const Entry *entry : folders)
+        if (search(entry->uri, depth - 1, found_uri, found_name)) return true;
+    return false;
+}
+
+void list_pack(const std::string &uri, const std::string &prefix, bool (*skipped)(const std::string &),
+               std::vector<PackFile> &files, std::string &error) {
+    const auto entries = list_folder(uri);
+    if (!entries) {
+        error = "cannot read " + (prefix.empty() ? std::string("the pack's folder") : prefix);
+        return;
+    }
+    for (const Entry &entry : *entries) {
+        if (skipped(entry.name)) continue;
+        const std::string relative = prefix.empty() ? entry.name : prefix + "/" + entry.name;
+        if (entry.directory) {
+            list_pack(entry.uri, relative, skipped, files, error);
+            if (!error.empty()) return;
+        } else {
+            files.push_back({entry.uri, relative, entry.size});
+        }
+    }
+}
+
+} // namespace
+
+std::optional<FoundPack> find_texture_pack(const std::string &tree, const std::vector<std::string> &names,
+                                           bool (*skipped)(const std::string &), std::string &error) {
+    FoundPack pack;
+    pack.where = describe_tree(tree);
+    const std::string root = tree_root(tree);
+    if (!list_folder(root)) {
+        error = std::string("Android would not let ") + portablekit::game().project_name + " read that folder.";
+        return std::nullopt;
+    }
+    std::string uri;
+    if (holds_ini(root)) {
+        uri = root;
+        pack.name = pack.where.substr(pack.where.rfind('/') + 1);
+        pack.layout = "The folder holds textures.ini.";
+    }
+    for (std::size_t i = 0; uri.empty() && i < names.size(); ++i) {
+        const std::string &name = names[i];
+        const std::pair<std::vector<std::string>, const char *> places[] = {
+            {{"textures", name}, "Found in its textures folder."},
+            {{name}, "Found in the folder."},
+            {{"PSP", "TEXTURES", name}, "Found in PPSSPP's PSP/TEXTURES folder."},
+        };
+        for (const auto &[path, layout] : places) {
+            const std::string folder = descend(root, path);
+            if (folder.empty() || !holds_ini(folder)) continue;
+            uri = folder;
+            pack.name = name;
+            pack.layout = layout;
+            break;
+        }
+    }
+    if (uri.empty()) {
+        std::string found_name;
+        if (search(root, 3, uri, found_name)) {
+            pack.name = found_name;
+            pack.layout = "Found as " + found_name + ".";
+        }
+    }
+    if (uri.empty()) {
+        error = "No texture pack (a folder holding textures.ini) was found in " + pack.where + ".";
+        return std::nullopt;
+    }
+    if (pack.name.empty()) pack.name = "pack";
+    list_pack(uri, {}, skipped, pack.files, error);
+    if (!error.empty()) return std::nullopt;
+    return pack;
+}
+
+bool copy_document(const std::string &uri, const fs::path &target, std::string &error) {
+    return copy_document_to_file(uri, target, error);
+}
 
 std::optional<PickedImport> pick_saves_to_import(const fs::path &staging) {
     const std::optional<std::string> tree = pick_folder();

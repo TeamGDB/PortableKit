@@ -19,10 +19,14 @@
 #include "audio/atrac_decoder.hpp"
 #include "movie/avc_decoder.hpp"
 #include "movie/psmf_demuxer.hpp"
+#include "movie/replacement_movie.hpp"
+#include "install/user_data.hpp"
+#include "settings/settings.hpp"
 
 #include "psprecomp/common.hpp"
 
 #include <algorithm>
+#include <filesystem>
 #include <cstdlib>
 #include <iostream>
 #include <map>
@@ -102,6 +106,18 @@ struct MpegState {
     // (the GE's colour formats: 0 5650, 1 5551, 2 4444, 3 8888).
     std::uint32_t default_frame_width{};
     std::uint32_t pixel_mode{3u};
+    // A mod's replacement for this movie (mods/movies/NAME.264 in the data
+    // folder), shown picture for picture in place of the game's; the RGBA
+    // rows of its current picture.
+    std::unique_ptr<movie::ReplacementMovie> replacement;
+    std::string replacement_for;  // the movie file it was looked up for
+    std::uint64_t replacement_start{};  // the game's picture count when it was
+    std::vector<std::uint8_t> replacement_rgba;
+    movie::Picture replacement_picture;
+    // The player pressed START to skip the movie: from then on the ring is
+    // emptied as the game fills it and the stream calls report no data, so
+    // the game's own player runs to the end of the file and finishes.
+    bool skipping{};
 };
 
 struct MpegModule {
@@ -119,6 +135,54 @@ MpegModule &module() {
 MpegState *find_mpeg(std::uint32_t address) {
     const auto found = module().instances.find(address);
     return found != module().instances.end() ? found->second.get() : nullptr;
+}
+
+// ---------------------------------------------------------------------------
+// Skipping a movie
+
+constexpr std::uint32_t kStartButton = 0x0008u;
+// Pictures a movie shows before START skips it, half a second at 30 a
+// second: the press that started the movie must not end it.
+constexpr std::uint64_t kSkipAfterPictures = 15u;
+
+// GameProfile::start_skips_movies and the player's setting (the Mods page);
+// <prefix>_NO_MOVIE_SKIP turns it off.
+bool movie_skip_allowed() {
+    static const bool allowed =
+        portablekit::game().start_skips_movies && portablekit::env("NO_MOVIE_SKIP") == nullptr;
+    return allowed && settings::current().movie_skip;
+}
+
+// Starts skipping `state`'s movie when START has gone down since the last
+// look. Called once a movie frame, from the stream calls.
+void check_skip(MpegState &state) {
+    static bool start_was_down = true;
+    if (state.skipping || !movie_skip_allowed()) return;
+    const bool down = (host_pad_buttons() & kStartButton) != 0u;
+    const bool pressed = down && !start_was_down;
+    start_was_down = down;
+    if (!pressed || state.pictures < kSkipAfterPictures) return;
+    state.skipping = true;
+    std::cout << "[mpeg] START pressed: skipping the movie after " << state.pictures << " pictures" << std::endl;
+}
+
+bool ring_skipping(std::uint32_t ringbuffer) {
+    for (const auto &[address, state] : module().instances)
+        if (state->skipping && state->ringbuffer == ringbuffer) return true;
+    return false;
+}
+
+// Throws away what is in a skipped movie's ring, as if demultiplexed.
+void drain_skipped(psprecomp::GuestMemory &memory, MpegState &state) {
+    state.demuxer.reset();
+    state.video_unit.reset();
+    state.audio_unit.reset();
+    const std::uint32_t buffer = state.ringbuffer;
+    if (buffer == 0u) return;
+    const std::uint32_t filled = memory.load32(buffer + ring::kFilled);
+    state.packets_demuxed += filled;
+    memory.store32(buffer + ring::kRead, memory.load32(buffer + ring::kWritten));
+    memory.store32(buffer + ring::kFilled, 0u);
 }
 
 void finish_traced(AllegrexContext &ctx, const char *name, std::uint32_t result, const std::string &details = {},
@@ -220,7 +284,9 @@ void ringbuffer_put(AllegrexContext &ctx, std::uint32_t buffer, std::uint32_t re
                             const std::uint32_t packets = memory.load32(buffer + ring::kPackets);
                             const std::uint32_t written = memory.load32(buffer + ring::kWritten);
                             memory.store32(buffer + ring::kWritten, (written + count) % packets);
-                            memory.store32(buffer + ring::kFilled, memory.load32(buffer + ring::kFilled) + count);
+                            // A skipped movie's packets are dropped as they come.
+                            if (ring_skipping(buffer)) memory.store32(buffer + ring::kRead, (written + count) % packets);
+                            else memory.store32(buffer + ring::kFilled, memory.load32(buffer + ring::kFilled) + count);
                             // A short read is the end of the file: do not ask again.
                             if (count == chunk && requested > chunk) {
                                 ringbuffer_put(ctx, buffer, requested - chunk, total + count);
@@ -392,7 +458,9 @@ void register_library(HleRegistrar &hle) {
             return;
         }
         auto &memory = rt.memory();
-        if (!demux_until(memory, *state, [state] { return state->demuxer.video_ready(); })) {
+        check_skip(*state);
+        if (state->skipping) drain_skipped(memory, *state);
+        if (state->skipping || !demux_until(memory, *state, [state] { return state->demuxer.video_ready(); })) {
             finish_traced(ctx, "sceMpegGetAvcAu", mpeg_error::kNoData);
             return;
         }
@@ -411,7 +479,8 @@ void register_library(HleRegistrar &hle) {
             return;
         }
         auto &memory = rt.memory();
-        if (!demux_until(memory, *state, [state] { return state->demuxer.audio_ready(); })) {
+        if (state->skipping) drain_skipped(memory, *state);
+        if (state->skipping || !demux_until(memory, *state, [state] { return state->demuxer.audio_ready(); })) {
             finish_traced(ctx, "sceMpegGetAtracAu", mpeg_error::kNoData);
             return;
         }
@@ -459,6 +528,57 @@ void picture_row_to_rgba(const movie::Picture &picture, std::uint32_t row, std::
         pixel[2] = static_cast<std::uint8_t>(std::clamp((luma + 116130 * cb) >> 16, 0, 255));
         pixel[3] = 0xFFu;
     }
+}
+
+// The replacement for the movie the game opened last, if a mod has one and
+// replacement movies are on: mods/movies/NAME.264 in the data folder, NAME
+// the movie file's name without its extension.
+std::unique_ptr<movie::ReplacementMovie> find_replacement() {
+    if (!settings::current().movie_mods) return nullptr;
+    const std::string file = last_movie_file();
+    if (file.empty()) return nullptr;
+    const std::size_t slash = file.find_last_of("/\\:");
+    std::string name = file.substr(slash == std::string::npos ? 0u : slash + 1u);
+    name = name.substr(0, name.find_last_of('.'));
+    std::filesystem::path path;
+    try {
+        path = install::user_data_directory() / "mods" / "movies" / (name + ".264");
+    } catch (const std::exception &) {
+        return nullptr;
+    }
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec)) return nullptr;
+    auto replacement = std::make_unique<movie::ReplacementMovie>();
+    if (!replacement->open(path)) {
+        std::cerr << "[mod] cannot play " << path.string() << "\n";
+        return nullptr;
+    }
+    std::cerr << "[mod] " << name << ": playing " << path.string() << " in its place\n";
+    return replacement;
+}
+
+// Picture `index` of the replacement, shown in the framebuffer at `address`
+// in place of the game's. False when the replacement has no such picture
+// (it is shorter), and the game's own is shown.
+bool show_replacement(MpegState &state, std::uint32_t address, std::uint64_t index) {
+    // Looked up when the game's movie starts, and again when it opens
+    // another: a game may create its player before it opens the movie file,
+    // or keep one player for several movies.
+    const std::string file = last_movie_file();
+    if (state.replacement_for != file || index == 0u) {
+        state.replacement_for = file;
+        state.replacement_start = index;
+        state.replacement = find_replacement();
+    }
+    if (!state.replacement || !state.replacement->picture(index - state.replacement_start, state.replacement_picture))
+        return false;
+    const movie::Picture &picture = state.replacement_picture;
+    const std::size_t row_bytes = static_cast<std::size_t>(picture.width) * 4u;
+    state.replacement_rgba.resize(row_bytes * picture.height);
+    for (std::uint32_t row = 0; row < picture.height; ++row)
+        picture_row_to_rgba(picture, row, picture.width, state.replacement_rgba.data() + row * row_bytes);
+    show_large_picture_in_vram(address, state.replacement_rgba.data(), picture.width, picture.height);
+    return true;
 }
 
 // A decoded picture straight into the game's buffer, as sceMpegAvcDecode
@@ -523,8 +643,9 @@ void register_decoding(HleRegistrar &hle) {
             ++state->pictures;
             const std::uint32_t destination = memory.load32(arg(ctx, 3));
             store_pixels(memory, destination, width, state->pixel_mode, state->picture);
-            show_cpu_picture_in_vram(rt, destination, state->picture.width, state->picture.height, width,
-                                     state->pixel_mode);
+            if (!show_replacement(*state, destination, state->pictures - 1u))
+                show_cpu_picture_in_vram(rt, destination, state->picture.width, state->picture.height, width,
+                                         state->pixel_mode);
         }
         if (arg(ctx, 4) != 0u) memory.store32(arg(ctx, 4), produced ? 1u : 0u);
         finish_traced(ctx, "sceMpegAvcDecode", 0u,

@@ -6,6 +6,7 @@
 // Android app (PORTABLEKIT_ANDROID_APP); every call runs on the calling thread and
 // the picker blocks it until the player has chosen.
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -35,6 +36,7 @@ struct Entry {
     bool directory{};
     std::string name;
     std::string uri;
+    std::uint64_t size{};  // bytes, for a file whose provider reports it
 };
 // The children of a folder document; nothing if it cannot be read.
 [[nodiscard]] std::optional<std::vector<Entry>> list_folder(const std::string &folder_uri);

@@ -6,6 +6,7 @@
 #include "crypto/pgd.hpp"
 #include "install/user_data.hpp"
 #include "kernel/fast_loading.hpp"
+#include "kernel/file_mods.hpp"
 #include "kernel/load_trace.hpp"
 #include "kernel/iso_image.hpp"
 
@@ -82,6 +83,11 @@ struct OpenFile {
     // where the image is touched.
     bool sector_units{};
     std::unique_ptr<std::fstream> host;
+    // A mod's file read in place of a disc file (kernel/file_mods.hpp): a
+    // host file that answers as the disc's would. It cannot be written, its
+    // reads are disc reads, and disc_offset is still where the disc's file
+    // starts, for the game that asks.
+    bool replaces_disc{};
     // What the game reads instead of the file's bytes, if anything
     // (hle_extension::set_file_filter): size and position then count its
     // bytes, and the file's own size is kept here.
@@ -222,8 +228,71 @@ bool trace_io() {
     return enabled;
 }
 
+std::uint64_t disc_file_size(const std::string &path, std::uint64_t size);
+
+// The disc file a path opens, by its name: the path itself, or for a sector
+// file (sce_lbn) the file that starts at that sector and is exactly that long,
+// which is how games that open their files by sector open them. The length
+// may also be the replacement's: a game that sizes its files from the
+// directory listing (sceIoDopen, which gives a replaced file's size) asks
+// for that many bytes. God of War: Ghost of Sparta does.
+std::optional<std::string> disc_file_name(const std::string &path) {
+    if (!io().disc) return std::nullopt;
+    if (const auto lbn = parse_lbn_path(path)) {
+        const auto named = io().disc->path_at(static_cast<std::uint32_t>(lbn->first));
+        if (!named) return std::nullopt;
+        const auto entry = io().disc->find(*named);
+        if (!entry || entry->directory) return std::nullopt;
+        if (entry->size != lbn->second && disc_file_size(*named, entry->size) != lbn->second) return std::nullopt;
+        return named;
+    }
+    return path;
+}
+
+// The size of the disc file at `path` as the game should see it: the mod's
+// file's when one replaces it.
+std::uint64_t disc_file_size(const std::string &path, std::uint64_t size) {
+    if (const auto mod = file_mods::find(path)) {
+        std::error_code ec;
+        const auto mod_size = std::filesystem::file_size(*mod, ec);
+        if (!ec) return mod_size;
+    }
+    return size;
+}
+
+// Turns an opened disc file into the mod's file that replaces it, if there is
+// one. False only when there is one and it cannot be opened.
+bool open_file_mod(const std::string &path, OpenFile &file) {
+    const auto name = disc_file_name(path);
+    if (!name) return true;
+    const auto mod = file_mods::find(*name);
+    if (!mod) return true;
+    auto stream = std::make_unique<std::fstream>(*mod, std::ios::binary | std::ios::in);
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(*mod, ec);
+    if (!*stream || ec) {
+        std::cerr << "[mods] cannot open " << install::path_to_utf8(*mod) << " for " << *name << "\n";
+        return false;
+    }
+    const auto entry = io().disc->find(*name);
+    log_once("file-mod:" + *name, "[mods] " + *name + " read from mods/files (" + std::to_string(size) +
+                                      " bytes, the disc's " + std::to_string(entry ? entry->size : 0u) + ")");
+    file.kind = OpenFile::Kind::Host;
+    file.host = std::move(stream);
+    file.size = size;
+    file.replaces_disc = true;
+    return true;
+}
+
 std::int64_t open_file(const std::string &full_path, std::uint32_t flags) {
     const SplitPath split = split_path(full_path);
+    // A file opened by sector is remembered by its name, for the movie player.
+    if (split.device == Device::Disc && io().disc) {
+        if (const auto lbn = parse_lbn_path(split.path))
+            if (const auto named = io().disc->path_at(static_cast<std::uint32_t>(lbn->first)))
+                remember_movie_file(*named);
+    }
+    remember_movie_file(full_path);
     OpenFile file;
     file.path = full_path;
     if (split.device == Device::Disc) {
@@ -251,6 +320,8 @@ std::int64_t open_file(const std::string &full_path, std::uint32_t flags) {
         } else {
             return static_cast<std::int32_t>(io_error::kFileNotFound);
         }
+        if (file.kind == OpenFile::Kind::Disc && !file.sector_units && !open_file_mod(split.path, file))
+            return static_cast<std::int32_t>(io_error::kFileNotFound);
     } else if (split.device == Device::MemoryStick) {
         const auto path = host_path(split.path);
         std::error_code ec;
@@ -356,7 +427,7 @@ static std::uint32_t read_filtered(Runtime &rt, std::uint32_t fd, OpenFile &file
     const std::size_t count = buffer.empty() ? 0u : file.filter->read(file.position, buffer.data(), buffer.size());
     buffer.resize(std::min(count, buffer.size()));
     rt.memory().copy_in(address, buffer);
-    if (file.kind == OpenFile::Kind::Disc) {
+    if (file.kind == OpenFile::Kind::Disc || file.replaces_disc) {
         load_trace::note_disc_read(buffer.size());
         fast_loading::note_disc_read();
     } else {
@@ -428,7 +499,7 @@ std::uint32_t read_file_op(Runtime &rt, std::uint32_t fd, std::uint32_t address,
     }
     rt.memory().copy_in(address, buffer);
     // A disc read is what tells a load from play (kernel/fast_loading.hpp).
-    if (file.kind == OpenFile::Kind::Disc) {
+    if (file.kind == OpenFile::Kind::Disc || file.replaces_disc) {
         load_trace::note_disc_read(buffer.size());
         fast_loading::note_disc_read();
     } else {
@@ -450,7 +521,7 @@ std::uint32_t write_file_op(Runtime &rt, std::uint32_t fd, std::uint32_t address
         return size;
     }
     auto found = io().files.find(fd);
-    if (found == io().files.end() || found->second.kind != OpenFile::Kind::Host) {
+    if (found == io().files.end() || found->second.kind != OpenFile::Kind::Host || found->second.replaces_disc) {
         return io_error::kBadFileDescriptor;
     }
     std::vector<char> data(size);
@@ -575,13 +646,14 @@ std::uint32_t ioctl_op(Runtime &rt, AllegrexContext &ctx) {
         file.position = 0u;
         return 0u;
     }
-    if (file.kind == OpenFile::Kind::Disc && command == 0x01010005u && input != 0u && input_size >= 12u) {
+    const bool disc_file = file.kind == OpenFile::Kind::Disc || file.replaces_disc;
+    if (disc_file && command == 0x01010005u && input != 0u && input_size >= 12u) {
         const auto offset = static_cast<std::int64_t>(static_cast<std::uint64_t>(memory.load32(input)) |
                                                       (static_cast<std::uint64_t>(memory.load32(input + 4u)) << 32u));
         const std::int64_t position = lseek_op(fd, offset, memory.load32(input + 8u));
         return position < 0 ? static_cast<std::uint32_t>(position) : 0u;
     }
-    if (file.kind == OpenFile::Kind::Disc && !file.sector_units && output != 0u && output_size >= 4u) {
+    if (disc_file && !file.sector_units && output != 0u && output_size >= 4u) {
         if (command == 0x01020006u) {
             const auto sector = static_cast<std::uint32_t>(file.disc_offset / IsoImage::kSectorSize);
             memory.store32(output, sector);
@@ -798,7 +870,8 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
         std::uint32_t result = io_error::kFileNotFound;
         if (split.device == Device::Disc && io().disc) {
             if (const auto entry = io().disc->find(split.path)) {
-                write_stat(rt.memory(), arg(ctx, 1), entry->directory, entry->size, entry->lba);
+                write_stat(rt.memory(), arg(ctx, 1), entry->directory,
+                           entry->directory ? entry->size : disc_file_size(split.path, entry->size), entry->lba);
                 result = 0u;
             }
         } else if (split.device == Device::MemoryStick) {
@@ -845,7 +918,10 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
         if (split.device == Device::Disc) {
             for (const std::string &name : io().disc->list(split.path)) {
                 const auto entry = io().disc->find(root ? name : split.path + "/" + name);
-                if (entry) file.entries.push_back({name, entry->directory, entry->size, entry->lba});
+                if (!entry) continue;
+                const std::uint64_t size =
+                    entry->directory ? entry->size : disc_file_size(root ? name : split.path + "/" + name, entry->size);
+                file.entries.push_back({name, entry->directory, size, entry->lba});
             }
         } else {
             std::error_code ec;

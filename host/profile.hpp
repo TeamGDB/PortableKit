@@ -92,6 +92,49 @@ struct GlyphCacheLayout {
     std::uint32_t row_gap;
 };
 
+// A launcher before the game starts (ui/launcher.hpp): a side bar with the
+// game's logo and the pages of the menu, a home page with a banner and quick
+// settings, and a Play button. Its colours are also the interface's: the menu
+// and the setup take them too.
+//
+// Art is the player's: images in the launcher folder (<data>/launcher/, or
+// Resources/launcher/ in an app) when they are there, else read from their
+// disc image. The port carries none.
+struct LauncherTheme {
+    // The title, in the side bar when there is no logo: "GOD OF WAR" over
+    // "GHOST OF SPARTA".
+    const char *title = nullptr;
+    const char *subtitle = nullptr;
+    // TrueType fonts for the title and the headings; empty: a serif face of
+    // the system's, else the interface's.
+    std::span<const std::uint8_t> title_font = {};
+    std::span<const std::uint8_t> heading_font = {};
+    // Colours, 0xRRGGBB.
+    std::uint32_t background = 0x161414u;     // the pages
+    std::uint32_t sidebar = 0x0F0E0Eu;        // the side bar and the bottom bar
+    std::uint32_t panel = 0x1C1919u;          // the in-game menu's panel
+    std::uint32_t accent = 0xA3161Au;         // the Play button, the selected page
+    std::uint32_t accent_bright = 0xD8343Au;  // headings, highlights
+    std::uint32_t text = 0xE8E4DFu;
+    std::uint32_t text_dim = 0x9C9590u;
+    // The banner on the home page: a file in the launcher folder, else an
+    // image on the disc. `backdrop_focus_y` is the part of its height kept in
+    // view when it is cropped to the banner's shape: 0 the top, 1 the bottom.
+    const char *backdrop_file = "background.jpg";
+    const char *backdrop_on_disc = "PSP_GAME/PIC1.PNG";
+    float backdrop_focus_y = 0.5f;
+    // The logo at the top of the side bar, likewise. `logo_on_black`: the
+    // image is the logo on black, which is made transparent and cropped away.
+    const char *logo_file = "logo.jpg";
+    const char *logo_on_disc = "PSP_GAME/ICON0.PNG";
+    bool logo_on_black = false;
+    // Where the port lives, shown at the foot of the home page; null: not shown.
+    const char *project_url = nullptr;
+    const char *issues_url = nullptr;
+    // A line of credits for the home page; null: none.
+    const char *credits = nullptr;
+};
+
 // A driver for the game's own camera. Every member may be null; the framework
 // reads camera/camera_driver.hpp's defaults for those.
 struct CameraDriver {
@@ -212,6 +255,9 @@ struct GameProfile {
     // agree on it, so it is the original release's code even when the port's
     // disc id is a different one.
     const char *adhoc_product_code;
+    // Whether the game plays with other players at all. False: the menu has
+    // no Network page and nothing about multiplayer.
+    bool adhoc_play = true;
 
     // --- Controls ----------------------------------------------------------
     // What the triggers may press instead of L and R, for the way this game is
@@ -263,6 +309,21 @@ struct GameProfile {
     // (Purun). Frame interpolation presents between frames of this length,
     // and the Frame rate setting offers only rates above the game's own.
     std::uint32_t frame_vblanks = 2;
+    // A game that paces its frame loop on nothing but the GE's work (which
+    // takes no emulated time here) flips as fast as the host can draw, many
+    // times a vblank, and then waits all at once when the busy clock catches
+    // up. True makes a second flip within one vblank period wait for the next
+    // vblank, so the game flips at most once a vblank, as it can on a PSP.
+    // <prefix>_FLIP_UNLIMITED turns it off.
+    bool flips_wait_for_vblank = false;
+    // Whether the shown frame is copied back into guest VRAM every flip, for a
+    // game that reads its own picture with the CPU (a pause screen built from
+    // the last frame). False saves that copy for a game known not to.
+    bool frame_writeback = true;
+    // START skips a movie the game plays through sceMpeg, by ending its stream
+    // as if the file had run out; the game's own player then moves on. For a
+    // game whose movies cannot be skipped otherwise.
+    bool start_skips_movies = false;
 
     // --- Loading -------------------------------------------------------------
     // Fast loading (kernel/fast_loading.hpp) lets emulated time run ahead
@@ -281,10 +342,27 @@ struct GameProfile {
     std::uint32_t system_language = 0u;
     std::uint32_t confirm_button = 0u;
 
+    // --- Texture packs -------------------------------------------------------
+    // Disc ids of other releases whose texture packs fit this one: releases
+    // that carry the same textures, so a pack made for one keys the same.
+    // Their packs import and load as this release's own. Empty: only packs
+    // made for disc_id, or whose textures.ini lists it, are taken.
+    std::span<const char *const> texture_pack_releases = {};
+
+    // --- Audio ---------------------------------------------------------------
+    // The volume, in percent, a new player starts with, for a game mixed much
+    // louder than its neighbours. Their own setting replaces it.
+    std::uint32_t default_volume = 100u;
+
     // --- Text ----------------------------------------------------------------
     // Where the game caches the glyphs it has drawn. Null: a font changed while
     // the game runs applies to text the game has not drawn yet.
     const GlyphCacheLayout *glyph_cache = nullptr;
+
+    // --- Launcher ----------------------------------------------------------
+    // Shown before the game starts, unless the player chose to skip it or
+    // started with --play. Null: the game starts at once, as it always has.
+    const LauncherTheme *launcher = nullptr;
 };
 
 // Defined by the port, exactly once. Everything under host/ reads the game
@@ -308,6 +386,10 @@ using PatchImageHook = void (*)(psprecomp::Runtime &, const psprecomp::Elf32Imag
 [[nodiscard]] ExtraHleHook active_register_extra_hle();
 [[nodiscard]] PatchImageHook active_patch_loaded_image();
 [[nodiscard]] std::span<const std::uint32_t> active_overlay_slots();
+
+// Whether a texture pack made for `disc_id` fits this game: its own disc id
+// or one of texture_pack_releases, whatever the case.
+[[nodiscard]] bool texture_pack_fits(std::string_view disc_id);
 
 // getenv("<env_prefix>_" + name), so host code names the variable without the
 // game's prefix: env("TRACE_GE") reads <prefix>_TRACE_GE in Yakumo.

@@ -6,6 +6,8 @@
 #include <jni.h>
 
 #include <cstdio>
+#include <cstdlib>
+#include <utility>
 
 namespace portablekit::android {
 namespace {
@@ -125,10 +127,16 @@ std::optional<std::vector<Entry>> list_folder(const std::string &folder_uri) {
     const jsize count = call.env->GetArrayLength(array);
     for (jsize i = 0; i < count; ++i) {
         const std::optional<std::string> line = call.text(call.env->GetObjectArrayElement(array, i));
-        if (!line || line->size() < 4u) continue;
-        const std::size_t name_end = line->find('/', 2u);
+        // "d/<size>/<name>/<uri>" or "f/...": a display name has no slash.
+        if (!line || line->size() < 6u) continue;
+        const std::size_t size_end = line->find('/', 2u);
+        if (size_end == std::string::npos) continue;
+        const std::size_t name_end = line->find('/', size_end + 1u);
         if (name_end == std::string::npos) continue;
-        entries.push_back({(*line)[0] == 'd', line->substr(2u, name_end - 2u), line->substr(name_end + 1u)});
+        Entry entry{(*line)[0] == 'd', line->substr(size_end + 1u, name_end - size_end - 1u),
+                    line->substr(name_end + 1u)};
+        entry.size = std::strtoull(line->c_str() + 2, nullptr, 10);
+        entries.push_back(std::move(entry));
     }
     call.env->DeleteLocalRef(array);
     return entries;

@@ -11,6 +11,7 @@
 
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <iostream>
@@ -38,6 +39,22 @@ void success(Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, 0u); }
 bool trace_system_params() {
     static const bool enabled = portablekit::env("TRACE_KERNEL") != nullptr;
     return enabled;
+}
+
+// The console's language as the game is told it: the profile's, or
+// <prefix>_SYSTEM_LANGUAGE (0 Japanese, 1 English, 2 French, 3 Spanish,
+// 4 German, 5 Italian, 6 Dutch, 7 Portuguese, 8 Russian, 9 Korean,
+// 10 and 11 Chinese), which a game with several languages on its disc plays in.
+std::uint32_t system_language() {
+    static const std::uint32_t language = [] {
+        if (const char *text = portablekit::env("SYSTEM_LANGUAGE"); text != nullptr && *text != '\0') {
+            char *end = nullptr;
+            const unsigned long value = std::strtoul(text, &end, 10);
+            if (end != text && *end == '\0' && value <= 11u) return static_cast<std::uint32_t>(value);
+        }
+        return portablekit::game().system_language;
+    }();
+    return language;
 }
 
 void register_utils(HleRegistrar &hle) {
@@ -258,7 +275,7 @@ void register_platform(HleRegistrar &hle) {
     });
     // (int *language, int *button): the console's, as GetSystemParamInt says.
     hle.add("sceImpose", "sceImposeGetLanguageMode", [](Runtime &rt, AllegrexContext &ctx) {
-        if (arg(ctx, 0) != 0u) rt.memory().store32(arg(ctx, 0), portablekit::game().system_language);
+        if (arg(ctx, 0) != 0u) rt.memory().store32(arg(ctx, 0), system_language());
         if (arg(ctx, 1) != 0u) rt.memory().store32(arg(ctx, 1), portablekit::game().confirm_button);
         kernel().finish(ctx, 0u);
     });
@@ -291,7 +308,7 @@ void register_platform(HleRegistrar &hle) {
         case 2u: value = 1u; break;  // ad hoc channel: automatic
         case 4u: value = 0u; break;  // date format YYYYMMDD
         case 5u: value = 0u; break;  // 24-hour clock
-        case 8u: value = portablekit::game().system_language; break;
+        case 8u: value = system_language(); break;
         case 9u: value = portablekit::game().confirm_button; break;
         default: break;
         }

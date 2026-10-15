@@ -87,6 +87,19 @@ inline constexpr std::uint64_t kTexturePackSpaceMargin = 64ull * 1024u * 1024u;
 [[nodiscard]] std::filesystem::path texture_pack_backup_directory(const std::filesystem::path &textures_root,
                                                                   std::chrono::system_clock::time_point time);
 
+// A new staging folder's path in `textures_root`,
+// textures/.incomplete-<date>_<time>, once staging folders left by a copy that
+// never finished are removed. Not created.
+[[nodiscard]] std::filesystem::path new_texture_pack_staging(const std::filesystem::path &textures_root);
+
+// Whether a copy leaves a file or folder of this name out: hidden ones and
+// the file managers' own.
+[[nodiscard]] bool texture_pack_file_skipped(const std::string &name);
+
+// The folder names a pack for `game_id` is looked for under: the id, then the
+// releases whose packs fit it (GameProfile::texture_pack_releases).
+[[nodiscard]] std::vector<std::string> texture_pack_folder_names(const std::string &game_id);
+
 // Copies a checked pack into a staging folder beside the installed one,
 // textures/.incomplete-<date>_<time>, on a thread of its own. The installed
 // pack is not touched until install_staged_texture_pack().

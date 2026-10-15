@@ -80,6 +80,9 @@ void log_once(const std::string &key, const std::string &message);
 
 // A movie is being decoded: the game has a sceMpeg instance (hle_mpeg.cpp).
 [[nodiscard]] bool mpeg_active();
+// The pad's buttons as the player holds them now, in the PSP's bit layout,
+// whether or not the game reads them (hle_media.cpp). 0 without a renderer.
+[[nodiscard]] std::uint32_t host_pad_buttons();
 // The game has ad hoc networking initialised (hle_adhoc.cpp).
 [[nodiscard]] bool adhoc_networking_on();
 
@@ -94,6 +97,17 @@ void register_psmfplayer(HleRegistrar &hle);
 void register_psmf(HleRegistrar &hle);
 // A picture the CPU wrote into a VRAM framebuffer, handed to the renderer
 // (hle_media.cpp).
+// The movie (.pmf) file the game opened last, for the movie player to know
+// which movie it plays: the guest hands sceMpeg only the movie's bytes.
+void remember_movie_file(const std::string &path);
+[[nodiscard]] std::string last_movie_file();
+
+// A picture larger than the PSP's screen, 8-bit RGBA rows, shown in place of
+// the one the CPU wrote into the VRAM framebuffer at `address` (a
+// replacement movie's): scaled to the internal resolution on the GPU.
+void show_large_picture_in_vram(std::uint32_t address, const std::uint8_t *rgba, std::uint32_t width,
+                                std::uint32_t height);
+
 void show_cpu_picture_in_vram(Runtime &rt, std::uint32_t address, std::uint32_t width, std::uint32_t height,
                               std::uint32_t stride, std::uint32_t pixel_mode);
 void register_net_offline(HleRegistrar &hle);

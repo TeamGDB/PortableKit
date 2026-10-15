@@ -30,7 +30,11 @@ public:
 
     [[nodiscard]] static bool available() noexcept;
 
-    bool open();
+    // threads 1: one picture out for each unit in, in the calling thread, as
+    // the guest's decode calls expect. More: frame threads and the normal
+    // reordering a stream with B-frames needs (a replacement movie), with
+    // pictures coming out some units later.
+    bool open(unsigned threads = 1u);
     void close();
     [[nodiscard]] bool is_open() const noexcept;
 

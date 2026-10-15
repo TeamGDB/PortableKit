@@ -152,6 +152,10 @@ bool Layer::attach(gpu::VulkanRenderer &renderer) {
     // Any connected pad drives the interface, not only the one the game reads.
     ImGui_ImplSDL3_SetGamepadMode(ImGui_ImplSDL3_GamepadMode_AutoAll);
     load_fonts();
+    // A game with a launcher gives the whole interface its colours.
+    if (const LauncherTheme *theme = portablekit::game().launcher)
+        set_palette({theme->background, theme->panel, theme->accent, theme->accent_bright, theme->text,
+                     theme->text_dim});
     std::string error;
     if (!renderer.initialize_ui(error)) {
         std::cout << "[ui] cannot draw the interface (" << error << "); no menu\n";

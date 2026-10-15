@@ -105,6 +105,7 @@ struct Names {
 const Names<PresentMode> kPresentModes{
     {{PresentMode::Fifo, "vsync"}, {PresentMode::Mailbox, "mailbox"}, {PresentMode::Immediate, "immediate"}}};
 const Names<Aspect> kAspects{{{Aspect::Original, "original"}, {Aspect::Stretch, "stretch"}, {Aspect::Fill, "fill"}}};
+const Names<Antialiasing> kAntialiasing{{{Antialiasing::Off, "off"}, {Antialiasing::Fxaa, "fxaa"}}};
 const Names<PerfDisplay> kPerfDisplays{{{PerfDisplay::Off, "off"},
                                         {PerfDisplay::Overlay, "overlay"},
                                         {PerfDisplay::OverlayAndLog, "overlay+log"},
@@ -189,6 +190,12 @@ const std::vector<Field> &fields() {
         {"video.aspect", nullptr, [](Settings &s, const std::string &t) { return kAspects.parse(t, s.aspect); },
          [](const Settings &s) { return kAspects.format(s.aspect); }, nullptr},
         BOOL_FIELD("video.sharp_screen", sharp_screen),
+        {"video.antialiasing", "ANTIALIASING",
+         [](Settings &s, const std::string &t) { return kAntialiasing.parse(t, s.antialiasing); },
+         [](const Settings &s) { return kAntialiasing.format(s.antialiasing); },
+         [](Settings &s, const char *t) {
+             if (!kAntialiasing.parse(t, s.antialiasing)) s.antialiasing = Antialiasing::Off;
+         }},
         BOOL_FIELD("video.sharp_textures", sharp_textures),
         {"video.texture_pack", "TEXTURE_PACK",
          [](Settings &s, const std::string &t) { return parse_bool(t, s.texture_pack); },
@@ -201,6 +208,22 @@ const std::vector<Field> &fields() {
              return true;
          },
          [](const Settings &s) { return s.texture_pack_folder; }, nullptr},
+        {"video.half_rate", "HALF_RATE",
+         [](Settings &s, const std::string &t) { return parse_bool(t, s.half_rate); },
+         [](const Settings &s) { return std::string(s.half_rate ? "1" : "0"); },
+         [](Settings &s, const char *t) { s.half_rate = variable_flag(t); }},
+        {"video.movie_skip", "MOVIE_SKIP",
+         [](Settings &s, const std::string &t) { return parse_bool(t, s.movie_skip); },
+         [](const Settings &s) { return std::string(s.movie_skip ? "1" : "0"); },
+         [](Settings &s, const char *t) { s.movie_skip = variable_flag(t); }},
+        {"video.movie_mods", "MOVIE_MODS",
+         [](Settings &s, const std::string &t) { return parse_bool(t, s.movie_mods); },
+         [](const Settings &s) { return std::string(s.movie_mods ? "1" : "0"); },
+         [](Settings &s, const char *t) { s.movie_mods = variable_flag(t); }},
+        {"mods.files", "FILE_MODS",
+         [](Settings &s, const std::string &t) { return parse_bool(t, s.file_mods); },
+         [](const Settings &s) { return std::string(s.file_mods ? "1" : "0"); },
+         [](Settings &s, const char *t) { s.file_mods = variable_flag(t); }},
         {"video.unthrottled", "UNTHROTTLED",
          [](Settings &s, const std::string &t) { return parse_bool(t, s.unthrottled); },
          [](const Settings &s) { return std::string(s.unthrottled ? "1" : "0"); },
@@ -219,6 +242,10 @@ const std::vector<Field> &fields() {
          [](Settings &s, const std::string &t) { return parse_bool(t, s.frame_rate_auto); },
          [](const Settings &s) { return std::string(s.frame_rate_auto ? "1" : "0"); },
          [](Settings &s, const char *t) { s.frame_rate_auto = variable_flag(t); }},
+        {"video.frame_skip", "FRAME_SKIP",
+         [](Settings &s, const std::string &t) { return parse_bool(t, s.frame_skip); },
+         [](const Settings &s) { return std::string(s.frame_skip ? "1" : "0"); },
+         [](Settings &s, const char *t) { s.frame_skip = variable_flag(t); }},
         {"video.performance", "PERF",
          [](Settings &s, const std::string &t) { return kPerfDisplays.parse(t, s.perf); },
          [](const Settings &s) { return kPerfDisplays.format(s.perf); },
@@ -419,6 +446,14 @@ const std::vector<Field> &fields() {
          }},
         BOOL_FIELD("ui.menu_hint_seen", menu_hint_seen),
         BOOL_FIELD("saves.backup_timestamp", backup_timestamp),
+        BOOL_FIELD("launcher.skip", launcher_skip),
+        BOOL_FIELD("launcher.backup", launcher_backup),
+        {"ui.language", nullptr,
+         [](Settings &s, const std::string &t) {
+             s.language = t;
+             return true;
+         },
+         [](const Settings &s) { return s.language; }, nullptr},
         {"ui.last_folder", nullptr,
          [](Settings &s, const std::string &t) {
              s.last_folder = t;
@@ -525,6 +560,7 @@ Settings defaults_for(Platform platform) {
     // Confirm where a console of the game's region has it: cross, the south
     // button, outside Japan; circle, the east button, in Japan.
     values.confirm_south = game().confirm_button == 1u;
+    values.volume = std::min(game().default_volume, 100u);
     // The game's keyboard first; a phone then turns the mouse off either way.
     if (const auto keyboard = game().keyboard_defaults) keyboard(values.bindings, values.mouse);
     if (platform == Platform::Android) {

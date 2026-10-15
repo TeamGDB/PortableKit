@@ -58,7 +58,7 @@ AvcDecoder::~AvcDecoder() = default;
 
 bool AvcDecoder::available() noexcept { return avcodec_find_decoder(AV_CODEC_ID_H264) != nullptr; }
 
-bool AvcDecoder::open() {
+bool AvcDecoder::open(unsigned threads) {
     Impl &impl = *impl_;
     impl.close();
     const AVCodec *decoder = avcodec_find_decoder(AV_CODEC_ID_H264);
@@ -70,10 +70,15 @@ bool AvcDecoder::open() {
         impl.close();
         return false;
     }
-    // One picture in, one picture out, in the calling thread: the guest
-    // expects each decode call to finish its picture.
-    impl.context->thread_count = 1;
-    impl.context->flags |= AV_CODEC_FLAG_LOW_DELAY;
+    if (threads <= 1u) {
+        // One picture in, one picture out, in the calling thread: the guest
+        // expects each decode call to finish its picture.
+        impl.context->thread_count = 1;
+        impl.context->flags |= AV_CODEC_FLAG_LOW_DELAY;
+    } else {
+        impl.context->thread_count = static_cast<int>(threads);
+        impl.context->thread_type = FF_THREAD_FRAME;
+    }
     if (avcodec_open2(impl.context, decoder, nullptr) < 0) {
         impl.close();
         return false;
@@ -119,7 +124,7 @@ AvcDecoder::AvcDecoder() : impl_(std::make_unique<Impl>()) {}
 AvcDecoder::~AvcDecoder() = default;
 
 bool AvcDecoder::available() noexcept { return false; }
-bool AvcDecoder::open() { return false; }
+bool AvcDecoder::open(unsigned) { return false; }
 void AvcDecoder::close() {}
 bool AvcDecoder::is_open() const noexcept { return false; }
 bool AvcDecoder::decode(std::span<const std::uint8_t>, Picture &) { return false; }

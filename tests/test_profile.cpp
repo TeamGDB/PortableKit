@@ -33,6 +33,9 @@ constexpr ProfileVariant kVariants[] = {
      .executable_sha256 = "3333333333333333333333333333333333333333333333333333333333333333"},
 };
 
+// A release whose texture packs fit the test game's.
+constexpr const char *kTexturePackReleases[] = {"TEST00002"};
+
 } // namespace
 
 const GameProfile &game() {
@@ -59,6 +62,7 @@ const GameProfile &game() {
         .save_game_name = "TEST00001",
         .save_folders = kSaveFolders,
         .adhoc_product_code = "TEST00001",
+        .texture_pack_releases = kTexturePackReleases,
     };
     return profile;
 }

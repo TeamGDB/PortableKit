@@ -157,14 +157,16 @@ public class GameActivity extends SDLActivity {
         ContentResolver resolver = mSingleton.getContentResolver();
         String[] columns = {DocumentsContract.Document.COLUMN_DOCUMENT_ID,
                             DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-                            DocumentsContract.Document.COLUMN_MIME_TYPE};
+                            DocumentsContract.Document.COLUMN_MIME_TYPE,
+                            DocumentsContract.Document.COLUMN_SIZE};
         try (Cursor cursor = resolver.query(children, columns, null, null, null)) {
             while (cursor != null && cursor.moveToNext()) {
                 String id = cursor.getString(0);
                 String name = cursor.getString(1);
                 boolean directory = DocumentsContract.Document.MIME_TYPE_DIR.equals(cursor.getString(2));
+                long size = cursor.isNull(3) ? 0 : cursor.getLong(3);
                 Uri child = DocumentsContract.buildDocumentUriUsingTree(folder, id);
-                entries.add((directory ? "d/" : "f/") + name + "/" + child);
+                entries.add((directory ? "d/" : "f/") + size + "/" + name + "/" + child);
             }
         } catch (Exception e) {
             return null;

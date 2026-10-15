@@ -28,6 +28,11 @@ public:
         std::string choose_folder;
         // Folders that are chosen when opened instead of being entered, such as a save folder.
         std::function<bool(const std::filesystem::path &)> choose_on_open;
+        // Opens the system's file dialog at once, where there is one: its
+        // answer is the browser's, and cancelling it cancels the browser.
+        // The browser's own list is drawn only when the player asks for it
+        // or the dialog cannot open (gamescope, Android).
+        bool system_first{};
     };
 
     // Starts in `folder`, or the home folder when it does not exist.
@@ -64,6 +69,10 @@ private:
     // latter is taken by value: callers pass folder_ itself.
     void open(const std::filesystem::path &folder, std::filesystem::path focus = {});
     void find_places();
+    // Opens the system's file or folder dialog; its answer arrives in dialog_.
+    void open_system_dialog();
+    // Whether the system dialog can be offered here.
+    [[nodiscard]] static bool system_dialog_available();
     // Whether a file is listed without "Showing all files".
     [[nodiscard]] bool listed(const std::filesystem::path &file) const;
 
@@ -79,6 +88,8 @@ private:
     std::optional<std::filesystem::path> focus_;
     bool focus_first_{};
     std::shared_ptr<SystemDialog> dialog_;
+    // system_first: the dialog is open and the list not shown.
+    bool waiting_for_dialog_{};
 };
 
 // "1.3 GB", "532 MB", "12 KB".

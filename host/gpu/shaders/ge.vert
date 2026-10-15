@@ -155,7 +155,9 @@ void decode_raw_vertex() {
 }
 #endif
 
-layout(location = 0) out vec2 frag_texcoord;
+// u, v and q: the GE's projection mapping divides by q per pixel; every
+// other draw has q = 1.
+layout(location = 0) out vec3 frag_texcoord;
 layout(location = 1) out vec4 frag_color;
 layout(location = 2) out vec3 frag_specular;
 layout(location = 3) out float frag_fog;
@@ -197,7 +199,34 @@ layout(set = 1, binding = 1) uniform Object {
     vec4 material_ambient;  // rgba
     vec4 material_diffuse;  // rgb; w: 1 keeps specular apart
     vec4 material_specular; // rgb; w: reverse normals
+    mat4 texture_matrix;    // TMAP mode 1
+    vec4 texgen;            // x: TMAP mode, y: projection source, z/w: the lights shade mapping uses for u/v
 } object;
+
+// Texture coordinates the GE makes instead of taking the vertex's (TMAP modes
+// 1 and 2), in [0, 1] texture space; the UV scale and offset do not apply.
+// Mode 1 multiplies the projection source (the model-space position, the
+// UV, or the normal) by the texture matrix and divides by the third
+// component; mode 2 maps the world-space normal against two lights' directions.
+vec3 generate_texcoord() {
+    int mode = int(object.texgen.x + 0.5);
+    vec3 normal = dot(in_normal, in_normal) > 0.0 ? in_normal : vec3(0.0, 0.0, 1.0);
+    if (mode == 1) {
+        int source = int(object.texgen.y + 0.5);
+        vec3 from = source == 0 ? in_position.xyz
+                  : source == 1 ? vec3(in_texcoord, 0.0)
+                  : source == 2 ? normalize(normal)
+                                : in_normal;
+        return (object.texture_matrix * vec4(from, 1.0)).xyz;
+    }
+    vec3 world_normal = mat3(object.world) * normal;
+    world_normal = dot(world_normal, world_normal) > 0.0 ? normalize(world_normal) : vec3(0.0, 0.0, 1.0);
+    vec3 light_u = lighting.light_position[int(object.texgen.z + 0.5)].xyz;
+    vec3 light_v = lighting.light_position[int(object.texgen.w + 0.5)].xyz;
+    light_u = dot(light_u, light_u) > 0.0 ? normalize(light_u) : vec3(0.0, 0.0, 1.0);
+    light_v = dot(light_v, light_v) > 0.0 ? normalize(light_v) : vec3(0.0, 0.0, 1.0);
+    return vec3((1.0 + dot(light_u, world_normal)) * 0.5, (1.0 + dot(light_v, world_normal)) * 0.5, 1.0);
+}
 
 // The GE's per-vertex lighting, evaluated in world space: emissive, plus the
 // global ambient light times the material ambient, plus for each enabled light
@@ -269,7 +298,7 @@ void main() {
 #ifdef GE_RAW_VERTICES
     decode_raw_vertex();
 #endif
-    frag_texcoord = in_texcoord * push.uv_transform.xy + push.uv_transform.zw;
+    frag_texcoord = vec3(in_texcoord * push.uv_transform.xy + push.uv_transform.zw, 1.0);
     frag_color = in_color;
     frag_specular = vec3(0.0);
     frag_fog = 1.0;
@@ -284,6 +313,7 @@ void main() {
     } else {
         int enables = int(push.viewport.w + 0.5);
         if ((enables & 2) != 0) light_vertex(frag_color, frag_specular);
+        if ((enables & 4) != 0) frag_texcoord = generate_texcoord();
         // Fog runs linearly from 1 (clear) to 0 (fogged) with view-space z,
         // which is negative in front of the camera: (z + end) * scale.
         if ((enables & 1) != 0)

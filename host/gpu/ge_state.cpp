@@ -4,6 +4,8 @@
 #include "perf/frame_stats.hpp"
 #include "psprecomp/common.hpp"
 
+#include "triangle_indices.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cstdlib>
@@ -43,6 +45,7 @@ enum Command : std::uint32_t {
     kAlphaBlendEnable = 0x21,
     kAlphaTestEnable = 0x22,
     kDepthTestEnable = 0x23,
+    kStencilTestEnable = 0x24,
     kBoneMatrixNumber = 0x2A,
     kBoneMatrixData = 0x2B,
     kWorldMatrixNumber = 0x3A,
@@ -105,6 +108,8 @@ enum Command : std::uint32_t {
     kClutAddress = 0xB0,
     kClutAddressUpper = 0xB1,
     kTextureSize0 = 0xB8,
+    kTextureMapMode = 0xC0,
+    kTextureShadeLights = 0xC1,
     kTextureMode = 0xC2,
     kTextureFormat = 0xC3,
     kLoadClut = 0xC4,
@@ -124,11 +129,19 @@ enum Command : std::uint32_t {
     kMinZ = 0xD6,
     kMaxZ = 0xD7,
     kAlphaTest = 0xDB,
+    // Read off God of War: Ghost of Sparta, which marks surfaces with
+    // replace under mask 0x3C and draws shadows where they equal 0x20 or 0x08:
+    // 0xDC 0x3C2001 is always, reference 0x20, mask 0x3C; 0xDC 0x202002 equal,
+    // reference 0x20, mask 0x20; 0xDD 0x020002 replace on stencil fail and on
+    // pass, keep on depth fail.
+    kStencilTest = 0xDC,
+    kStencilOp = 0xDD,
     kDepthTest = 0xDE,
     kBlendMode = 0xDF,
     kBlendFixedA = 0xE0,
     kBlendFixedB = 0xE1,
     kDepthWriteDisable = 0xE7,
+    kAlphaMask = 0xE9,  // bits set are not written: the stencil's write mask
     // Block transfer registers, read off a trace of the quest reward screen,
     // which copies the 16-bit framebuffer at 0x04000000 (512 pixels a row) to
     // 0x093E7EF0 in main memory and then textures from there as 512x512 5650
@@ -632,6 +645,18 @@ void GeState::handle_command(const GuestMemory &memory, std::uint32_t command, s
     case kDepthTestEnable: depth_.test_enabled = (data & 1u) != 0u; break;
     case kDepthWriteDisable: depth_.write_enabled = (data & 1u) == 0u; break;
     case kDepthTest: depth_.function = data & 7u; break;
+    case kStencilTestEnable: stencil_.enabled = (data & 1u) != 0u; break;
+    case kStencilTest:
+        stencil_.function = data & 7u;
+        stencil_.reference = (data >> 8u) & 0xFFu;
+        stencil_.mask = (data >> 16u) & 0xFFu;
+        break;
+    case kStencilOp:
+        stencil_.fail = data & 7u;
+        stencil_.depth_fail = (data >> 8u) & 7u;
+        stencil_.pass = (data >> 16u) & 7u;
+        break;
+    case kAlphaMask: stencil_.write_mask = ~data & 0xFFu; break;
     case kMinZ: depth_.range_near = static_cast<std::uint16_t>(data); break;
     case kMaxZ: depth_.range_far = static_cast<std::uint16_t>(data); break;
 
@@ -695,6 +720,14 @@ void GeState::handle_command(const GuestMemory &memory, std::uint32_t command, s
     case kTextureWrap:
         texture_.wrap_s = data & 1u;
         texture_.wrap_t = (data >> 8u) & 1u;
+        break;
+    case kTextureMapMode:
+        texture_.map_mode = data & 3u;
+        texture_.projection_source = (data >> 8u) & 3u;
+        break;
+    case kTextureShadeLights:
+        texture_.shade_light_u = data & 3u;
+        texture_.shade_light_v = (data >> 8u) & 3u;
         break;
     case kTextureFunction:
         texture_.function = data & 7u;
@@ -846,6 +879,8 @@ void GeState::handle_command(const GuestMemory &memory, std::uint32_t command, s
                       << ") -> 0x" << std::hex << transfer.destination << std::dec << " (" << transfer.destination_x
                       << "," << transfer.destination_y << " row " << transfer.destination_stride << ") "
                       << transfer.width << "x" << transfer.height << " x" << transfer.bytes_per_pixel << " bytes\n";
+        // The prims before it are drawn first.
+        flush_batch();
         if (transfer_sink_) transfer_sink_(transfer);
         break;
     }
@@ -941,27 +976,43 @@ struct IgnoredCommand {
     std::uint64_t count{};
     std::uint32_t first_value{};
 };
-std::map<std::uint32_t, IgnoredCommand> &ignored_commands() {
-    static std::map<std::uint32_t, IgnoredCommand> commands;
+// Indexed by the command (8 bits) or 0x0E00 | a signal's behaviour: a busy
+// frame ignores hundreds of commands, and a map lookup for each showed in
+// profiles.
+std::array<IgnoredCommand, 0x1000> &ignored_commands() {
+    static std::array<IgnoredCommand, 0x1000> commands{};
     return commands;
 }
 } // namespace
 
 void GeState::trace_unhandled(std::uint32_t command, std::uint32_t data) {
-    IgnoredCommand &entry = ignored_commands()[command];
+    IgnoredCommand &entry = ignored_commands()[command & 0xFFFu];
     if (entry.count == 0u) entry.first_value = data;
     ++entry.count;
     static const bool trace = portablekit::env("TRACE_FB_TEXTURES") != nullptr;
-    if (!trace || entry.count > 4u) return;
+    if (!trace) return;
+    // Each value a command is given, the first sixteen: a state the game turns
+    // on once a scene (stencil, a logic op) comes long after its first values.
+    static std::array<std::vector<std::uint32_t>, 0x1000> values;
+    std::vector<std::uint32_t> &seen = values[command & 0xFFFu];
+    if (seen.size() >= 16u || std::find(seen.begin(), seen.end(), data) != seen.end()) return;
+    seen.push_back(data);
     std::cout << "[fbtex] unhandled GE command 0x" << std::hex << command << " data=0x" << data << std::dec << "\n";
 }
 
 void GeState::report_ignored_commands() {
-    if (ignored_commands().empty()) return;
-    std::cout << "GE commands ignored: " << ignored_commands().size() << " distinct\n";
-    for (const auto &[command, entry] : ignored_commands())
+    const auto &commands = ignored_commands();
+    const auto distinct = std::count_if(commands.begin(), commands.end(), [](const IgnoredCommand &entry) {
+        return entry.count != 0u;
+    });
+    if (distinct == 0) return;
+    std::cout << "GE commands ignored: " << distinct << " distinct\n";
+    for (std::uint32_t command = 0; command < commands.size(); ++command) {
+        const IgnoredCommand &entry = commands[command];
+        if (entry.count == 0u) continue;
         std::cout << "  0x" << std::hex << command << std::dec << " x" << entry.count << " first=0x" << std::hex
                   << entry.first_value << std::dec << "\n";
+    }
 }
 
 void GeState::fill_draw_state(DrawCall &call) const {
@@ -971,6 +1022,7 @@ void GeState::fill_draw_state(DrawCall &call) const {
     call.blend = blend_;
     call.depth = depth_;
     call.alpha_test = alpha_test_;
+    call.stencil = stencil_;
     call.viewport = viewport_;
     call.culling_enabled = culling_enabled_;
     call.cull_clockwise = cull_clockwise_;
@@ -997,6 +1049,19 @@ void GeState::draw_primitive(const GuestMemory &memory, std::uint32_t data) {
     if (count == 0u || vertex_address_ == 0u) return;
 
     const std::uint32_t index_type = (vertex_type_ >> 11u) & 3u;
+    // A skipped frame draws nothing into buffers it redraws every frame: the
+    // pointers move on as the draw would have moved them, with nothing decoded.
+    if (skip_draw_ && skip_draw_(target_.color_address)) {
+        if (index_type != 0u && index_address_ != 0u) {
+            const std::uint32_t index_size = index_type == 1u ? 1u : index_type == 2u ? 2u : 4u;
+            if (memory.contains(index_address_, count * index_size)) index_address_ += count * index_size;
+        } else {
+            const std::uint32_t stride = decode_vertices(memory, vertex_address_, vertex_type_, 0u, call_.vertices);
+            if (stride != 0u && memory.contains(vertex_address_, static_cast<std::size_t>(stride) * count))
+                vertex_address_ += stride * count;
+        }
+        return;
+    }
     // One DrawCall is reused for every draw, so its vertex and index vectors
     // keep their capacity instead of being allocated and freed per draw.
     DrawCall &call = call_;
@@ -1116,7 +1181,56 @@ void GeState::draw_primitive(const GuestMemory &memory, std::uint32_t data) {
 
     ++draw_count_;
     vertex_count_ += call.raw_vertices != nullptr ? call.raw_count : call.vertices.size();
-    if (draw_sink_) draw_sink_(call);
+    send_draw(call);
+}
+
+void GeState::send_draw(DrawCall &call) {
+    if (!draw_sink_) return;
+    static const bool off = portablekit::env("NO_DRAW_BATCH") != nullptr;
+    const bool triangles = call.primitive == PrimitiveType::Triangles ||
+                           call.primitive == PrimitiveType::TriangleStrip ||
+                           call.primitive == PrimitiveType::TriangleFan;
+    const bool sprites = call.primitive == PrimitiveType::Sprites && call.indices.empty();
+    const bool batchable = !off && call.raw_vertices == nullptr && !call.vertices.empty() && (triangles || sprites);
+    if (batch_open_) {
+        if (batchable && state_serial_ == batch_serial_ && sprites == batch_sprites_ &&
+            batch_.vertices.size() + call.vertices.size() <= 0xFFFFu) {
+            if (sprites) {
+                batch_.vertices.insert(batch_.vertices.end(), call.vertices.begin(), call.vertices.end());
+                return;
+            }
+            if (!batch_indexed_) {
+                const std::size_t count = batch_.indices.empty() ? batch_.vertices.size() : batch_.indices.size();
+                triangle_indices(batch_.primitive, count, batch_.indices, batch_.vertices.size(), batch_scratch_);
+                batch_.indices.swap(batch_scratch_);
+                batch_.primitive = PrimitiveType::Triangles;
+                batch_indexed_ = true;
+            }
+            const std::size_t count = call.indices.empty() ? call.vertices.size() : call.indices.size();
+            const auto base = static_cast<std::uint16_t>(batch_.vertices.size());
+            append_triangle_indices(call.primitive, count, call.indices, call.vertices.size(), base, batch_.indices);
+            batch_.vertices.insert(batch_.vertices.end(), call.vertices.begin(), call.vertices.end());
+            return;
+        }
+        flush_batch();
+    }
+    if (!batchable) {
+        draw_sink_(call);
+        return;
+    }
+    // The prim opens a batch: its call becomes the batch, and the batch's old
+    // buffers go back to be decoded into.
+    std::swap(batch_, call);
+    batch_open_ = true;
+    batch_indexed_ = false;
+    batch_sprites_ = sprites;
+    batch_serial_ = state_serial_;
+}
+
+void GeState::flush_batch() {
+    if (!batch_open_) return;
+    batch_open_ = false;
+    if (draw_sink_) draw_sink_(batch_);
 }
 
 namespace {
@@ -1359,7 +1473,8 @@ std::uint32_t GeState::execute(const GuestMemory &memory, std::uint32_t pc, std:
 
     // <prefix>_TRACE_GE_LIST=N[:M]: every command word of display list runs
     // N to N+M-1 (default one), counted from the first, to read what a
-    // screen is built from when it draws nothing sensible.
+    // screen is built from when it draws nothing sensible. Each run prints
+    // its first 20000 words; <prefix>_TRACE_GE_LIST_WORDS changes that.
     static const auto list_trace = []() -> std::pair<std::uint64_t, std::uint64_t> {
         const char *text = portablekit::env("TRACE_GE_LIST");
         if (text == nullptr) return {~0ull, 0ull};
@@ -1368,16 +1483,44 @@ std::uint32_t GeState::execute(const GuestMemory &memory, std::uint32_t pc, std:
         const std::uint64_t count = end != nullptr && *end == ':' ? std::strtoull(end + 1, nullptr, 0) : 1ull;
         return {first, count};
     }();
+    static const std::uint64_t list_trace_words = [] {
+        const char *text = portablekit::env("TRACE_GE_LIST_WORDS");
+        return text != nullptr ? std::strtoull(text, nullptr, 0) : 20000ull;
+    }();
     static std::uint64_t runs = 0;
     const std::uint64_t run = runs++;
     const bool dump = run >= list_trace.first && run - list_trace.first < list_trace.second;
     if (dump) std::cerr << "[ge-list] run " << run << " from " << psprecomp::hex32(pc) << "\n";
 
+    // The list's words are read through a host pointer to a window of it, so
+    // a command costs no range check and no call while the list runs on in
+    // one region; a jump or call outside the window looks it up again.
+    // <prefix>_NO_LIST_WINDOW reads every word through GuestMemory instead.
+    static const bool no_window = portablekit::env("NO_LIST_WINDOW") != nullptr;
+    constexpr std::uint32_t kWindowBytes = 1024u;
+    const std::uint8_t *window = nullptr;
+    std::uint32_t window_base = 0u;
+    std::uint32_t window_bytes = 0u;
+
     for (std::uint32_t steps = 0; steps < 2'000'000u; ++steps) {
-        if (stall != 0u && pc == stall) return pc;
-        if (!memory.contains(pc, 4u)) return pc;
-        const std::uint32_t word = memory.load32(pc);
-        if (dump && steps < 20000u)
+        if (stall != 0u && pc == stall) {
+            flush_batch();
+            return pc;
+        }
+        std::uint32_t word;
+        if (pc - window_base < window_bytes) {
+            std::memcpy(&word, window + (pc - window_base), sizeof(word));
+        } else {
+            if (!memory.contains(pc, 4u)) {
+                flush_batch();
+                return pc;
+            }
+            window = no_window ? nullptr : memory.raw_pointer(pc, kWindowBytes);
+            window_base = pc;
+            window_bytes = window != nullptr ? kWindowBytes : 0u;
+            word = memory.load32(pc);
+        }
+        if (dump && steps < list_trace_words)
             std::cerr << "[ge-list] " << psprecomp::hex32(pc) << " " << psprecomp::hex32(word) << "\n";
         const std::uint32_t command = word >> 24u;
         const std::uint32_t data = word & 0x00FFFFFFu;
@@ -1411,6 +1554,7 @@ std::uint32_t GeState::execute(const GuestMemory &memory, std::uint32_t pc, std:
             continue;
         case kEnd:
             finished = true;
+            flush_batch();
             return pc;
         case kFinish:
             if (signal_sink_) signal_sink_(0x10000u | (data & 0xFFFFu), pc);
@@ -1460,13 +1604,22 @@ std::uint32_t GeState::execute(const GuestMemory &memory, std::uint32_t pc, std:
             continue;
         case kBezier:
         case kSpline:
+            flush_batch();
             draw_patch(memory, command, data);
             continue;
         default:
+            // Pointers and the bone matrices (applied as the vertices are
+            // decoded) leave a batch open; anything else may change how the
+            // next prim draws.
+            if (command != kVertexAddress && command != kIndexAddress && command != kBase &&
+                command != kOffsetAddress && command != kBoneMatrixNumber && command != kBoneMatrixData &&
+                command != 0x00u)
+                ++state_serial_;
             handle_command(memory, command, data);
             continue;
         }
     }
+    flush_batch();
     return pc;
 }
 

@@ -29,6 +29,9 @@ enum class PresentMode { Fifo, Mailbox, Immediate };
 // game the window's shape: its view widens or narrows to match (the vertical
 // field of view stays), and the 2D interface keeps the PSP's proportions.
 enum class Aspect { Original, Stretch, Fill };
+// Smoothing of the edges in the finished picture. Fxaa is a pass over the
+// picture at the internal resolution, before it is scaled to the window.
+enum class Antialiasing { Off, Fxaa };
 enum class PerfDisplay { Off, Overlay, OverlayAndLog, Log };
 enum class RightStick { Camera, DPad, Off };
 // The gamepad button that presses a tilting game's both tilt buttons at once
@@ -50,6 +53,7 @@ struct Settings {
     PresentMode present_mode{PresentMode::Fifo};
     Aspect aspect{Aspect::Original};
     bool sharp_screen{};               // nearest instead of linear scaling to the window
+    Antialiasing antialiasing{Antialiasing::Off};
     bool sharp_textures{};             // nearest instead of linear texture sampling
     bool texture_pack{true};           // draw an installed HD texture pack's images instead of the game's
     std::string texture_pack_folder;   // a pack used where it is instead of textures/<disc id>; empty: none
@@ -57,6 +61,11 @@ struct Settings {
     bool fast_loading{true};           // ...but only while the game loads (kernel/fast_loading.hpp)
     FrameRate frame_rate{FrameRate::Fps30};
     bool frame_rate_auto{true};        // lower the frame rate rather than slow the game
+    bool frame_skip{true};             // skip drawing frames rather than slow the game
+    bool half_rate{};                  // a 60 fps game drawn every other frame: 30 on screen, full speed
+    bool movie_skip{true};             // START skips a movie (games whose profile allows it)
+    bool movie_mods{true};             // play mods/movies/NAME.264 in place of the game's movie NAME
+    bool file_mods{true};              // read mods/files/PATH in place of the disc's file PATH
     PerfDisplay perf{PerfDisplay::Off};
 
     // Text
@@ -132,6 +141,9 @@ struct Settings {
     bool menu_pause_multiplayer{};     // ...also during ad hoc play, where a paused game stops answering its peers
     bool menu_hint_seen{};             // the "Esc / L3+R3 opens the menu" hint was shown
     std::string last_folder;           // where the setup's file browser was last used
+    bool launcher_skip{};              // start the game at once instead of showing the launcher
+    bool launcher_backup{true};        // back the saves up each time the launcher starts the game
+    std::string language;              // the interface's language: "en", "pt"; empty: the system's
 
     // Saves
     bool backup_timestamp{true};       // a backup made from the menu goes to a new folder named by its time

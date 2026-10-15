@@ -12,4 +12,12 @@ What a game's Android app is made of besides the native code. A game builds `lib
 
 SDL's own Java classes come from the SDL3 source the build uses, not from this directory.
 
+The `<PREFIX>_*` switches that turn on traces and fallbacks have no shell to be set from on a phone. A debuggable build (`DEBUGGABLE=1`) reads them from `env.txt` in the app's internal storage at start, one `NAME=value` a line:
+
+```bash
+adb shell "run-as <app id> sh -c 'echo MHP3RD_TRACE_RENDER=1 > files/env.txt'"
+```
+
+The log, `files/<app name>.log`, says which ones it read. For CPU profiles, `simpleperf record --app <app id>` works on such a build after `adb shell setprop security.perf_harden 0`; `bin/libmain.so` in the build directory has the symbols the APK's stripped copy lacks.
+
 Yakumo's Android release (TeamGDB/Yakumo) is where this came from; its release script shows the whole path from a build directory to a signed APK.

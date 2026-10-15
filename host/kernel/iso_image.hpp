@@ -34,6 +34,9 @@ public:
     // Reads up to output.size() bytes at an absolute image offset.
     std::size_t read(std::uint64_t offset, std::span<std::uint8_t> output);
     [[nodiscard]] std::vector<std::string> list(std::string directory) const;
+    // The path of the file that starts at sector `lba`, for a game that opens
+    // files by sector ("sce_lbn...").
+    [[nodiscard]] std::optional<std::string> path_at(std::uint32_t lba) const;
 
 private:
     void scan_directory(std::uint32_t lba, std::uint32_t size, const std::string &prefix, int depth);

@@ -1,6 +1,6 @@
 #version 450
 
-layout(location = 0) in vec2 frag_texcoord;
+layout(location = 0) in vec3 frag_texcoord;  // u, v, q
 layout(location = 1) in vec4 frag_color;
 layout(location = 2) in vec3 frag_specular;
 layout(location = 3) in float frag_fog;
@@ -32,7 +32,9 @@ layout(set = 1, binding = 0) uniform Environment {
 void main() {
     vec4 color = frag_color;
     if (push.texture_params.x > 0.5) {
-        vec2 uv = clamp(frag_texcoord, frag_uv_rect.xy, frag_uv_rect.zw);
+        // Projection mapping divides by q here, per pixel; q is 1 otherwise.
+        float q = abs(frag_texcoord.z) > 1e-7 ? frag_texcoord.z : 1e-7;
+        vec2 uv = clamp(frag_texcoord.xy / q, frag_uv_rect.xy, frag_uv_rect.zw);
         // The GE's clamp wrap mode, per axis (texture_params.x bits 1 and 2):
         // the sampler repeats, so the coordinate stays between the centres of
         // the edge texels, which is what clamping to the edge samples.

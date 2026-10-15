@@ -21,6 +21,10 @@
 # assets, and the app unpacks the font on its first start. Without it the
 # game's text is blank unless the device has a font stb_truetype reads.
 #
+# EXTRA_ASSETS may name a directory whose contents go into the APK's assets as
+# they are, such as launcher/ with the launcher's images; the app unpacks the
+# ones it knows on its first start.
+#
 # ANDROID_HOME must name the SDK (build-tools and a platform are needed).
 # DEBUGGABLE=1 marks the app debuggable, so `adb shell run-as` reaches its
 # files (its log, its data) on a test device; leave it out for players.
@@ -83,6 +87,7 @@ if [[ -n "${FONT_DIR:-}" ]]; then
     cp "$FONT_DIR/NotoSansCJKjp-Regular.otf" "$work/assets/fonts/"
     cp "$FONT_DIR/NotoSansCJK-LICENSE.txt" "$work/assets/licenses/NotoSansCJK-OFL.txt"
 fi
+if [[ -n "${EXTRA_ASSETS:-}" ]]; then cp -R "$EXTRA_ASSETS"/. "$work/assets/"; fi
 assets=(-A "$work/assets")
 "$build_tools/aapt2" compile --dir "$here/res" -o "$work/res.zip"
 "$build_tools/aapt2" compile --dir "$game_res" -o "$work/game-res.zip"

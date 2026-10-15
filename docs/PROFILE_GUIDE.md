@@ -71,6 +71,12 @@ Two more are for a port that goes further than the PSP did, and both are null un
 
 `interpolation_thresholds` is for frame interpolation, which blends the game's frames and must not blend across a camera cut. The angles and fractions it uses to tell a cut from motion hold for any game; its distances are in the game's own world units, and the defaults were measured on Monster Hunter Portable 3rd. A game whose world is on a very different scale gives its own; one that does not, gets those defaults.
 
+`adhoc_play` is false for a game with no multiplayer: the menu then has no Network page and no row about multiplayer. It is true by default, so a profile that says nothing keeps them.
+
+`launcher`, a `LauncherTheme`, puts a launcher before the game: a side bar with the game's logo and the menu's pages, a home page with a banner and quick settings, and a Play button. Its colours become the whole interface's, the in-game menu and the setup included. Its art is never the repository's: images the player puts in the data folder's `launcher/` (or an app's `Resources/launcher/`), else `PSP_GAME/PIC1.PNG` and `PSP_GAME/ICON0.PNG` read from their disc image. Null: the game starts at once, as before. The player can turn it off, `--play` skips it once and `--launcher` shows it once. Sparta's `host/sparta_profile.cpp` is the example.
+
+The interface speaks English and Brazilian Portuguese (`host/ui/i18n.hpp`): the widgets look up what they draw in a table, and the player picks the language under System. A profile's own text, such as a launcher's credits, is translated when the table has it and shown as written when it does not.
+
 A driver writes into the game's memory, so check the code it relies on before it writes anything — Yakumo compares every instruction and constant it depends on at start-up, from `patch_loaded_image`, and stays out, saying why, if one differs.
 
 ## Generated code stays out of the repository

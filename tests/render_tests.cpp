@@ -99,6 +99,33 @@ void test_large_mesh() {
     expect(out.size() == (count - 2u) * 3u, "large strip triangle count");
 }
 
+void test_append_with_base() {
+    // Appending after a batch's earlier indices, with the batch's vertex count
+    // added: the same list as on its own, shifted. Unindexed prims with fewer
+    // vertices decoded than they consume are clamped as indexed ones are.
+    std::mt19937 random(7u);
+    for (const PrimitiveType primitive :
+         {PrimitiveType::Triangles, PrimitiveType::TriangleStrip, PrimitiveType::TriangleFan}) {
+        for (std::size_t count = 0; count < 30u; ++count) {
+            for (int indexed = 0; indexed < 2; ++indexed) {
+                std::size_t vertex_count = indexed != 0 ? 1u + random() % 16u : 1u + random() % (count + 2u);
+                std::vector<std::uint16_t> indices;
+                if (indexed != 0)
+                    for (std::size_t i = 0; i < count; ++i)
+                        indices.push_back(static_cast<std::uint16_t>(random() % (vertex_count + 4u)));
+                const auto base = static_cast<std::uint16_t>(random() % 1000u);
+                std::vector<std::uint16_t> out{9u, 8u, 7u};
+                expect(portablekit::gpu::append_triangle_indices(primitive, count, indices, vertex_count, base, out),
+                       "append supports triangle primitives");
+                std::vector<std::uint16_t> expected{9u, 8u, 7u};
+                for (const std::uint16_t index : reference(primitive, count, indices, vertex_count))
+                    expected.push_back(static_cast<std::uint16_t>(index + base));
+                expect(out == expected, "appended list is the expansion plus the base");
+            }
+        }
+    }
+}
+
 void test_other_primitives() {
     std::vector<std::uint16_t> out{1u, 2u, 3u};
     for (const PrimitiveType primitive :
@@ -113,6 +140,7 @@ void test_other_primitives() {
 int main() {
     test_matches_expansion();
     test_large_mesh();
+    test_append_with_base();
     test_other_primitives();
     std::cout << (failures ? "FAIL" : "PASS") << ": render helpers (" << failures << " failures)\n";
     return failures ? 1 : 0;

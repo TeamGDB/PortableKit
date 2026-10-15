@@ -37,8 +37,10 @@ Layout make_layout(float width, float height, Insets insets, float size, bool dp
     // A face button about 9 mm across on a phone held sideways: the short side
     // is what the thumbs span, whatever the screen's shape.
     const float unit = std::min(height, width * 9.0f / 16.0f) * std::clamp(size, 0.5f, 2.0f);
-    const float face = unit * 0.075f;
-    const float spread = face * 1.45f;
+    // Neighbouring buttons sit apart by more than half a button, so a thumb
+    // aimed at one does not land on the next.
+    const float face = unit * 0.068f;
+    const float spread = face * 1.9f;
     const Point diamond{right - spread - face * 1.6f, bottom - spread - face * 1.5f};
     auto &c = layout.controls;
     c[static_cast<std::size_t>(Control::Triangle)] = {{diamond.x, diamond.y - spread}, face};

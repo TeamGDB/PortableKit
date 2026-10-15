@@ -75,6 +75,13 @@ struct TextureState {
     float scale_v{1.0f};
     float offset_u{};
     float offset_v{};
+    // Where transformed vertices get their texture coordinates (TMAP, 0xC0):
+    // 0 their own UV, 1 the texture matrix applied to the projection source,
+    // 2 environment (shade) mapping, from the lights TEXSHADELS (0xC1) names.
+    std::uint32_t map_mode{};
+    std::uint32_t projection_source{};  // 0 position, 1 UV, 2 normalized normal, 3 normal
+    std::uint32_t shade_light_u{};
+    std::uint32_t shade_light_v{};
 };
 
 struct RenderTarget {
@@ -107,6 +114,23 @@ struct AlphaTestState {
     std::uint32_t function{};
     std::uint32_t reference{};
     std::uint32_t mask{0xFFu};
+};
+
+// The stencil test. The PSP keeps the stencil in the framebuffer's alpha;
+// the renderer keeps it in a stencil buffer beside the depth buffer.
+// Functions as the GE numbers them (0 never, 1 always, 2 equal, 3 not equal,
+// 4 less, 5 less or equal, 6 greater, 7 greater or equal: the reference
+// compared with the buffer's value), operations too (0 keep, 1 zero,
+// 2 replace, 3 invert, 4 increment, 5 decrement).
+struct StencilState {
+    bool enabled{};
+    std::uint32_t function{1u};
+    std::uint32_t reference{};
+    std::uint32_t mask{0xFFu};
+    std::uint32_t fail{};        // when the stencil test fails
+    std::uint32_t depth_fail{};  // when it passes and the depth test fails
+    std::uint32_t pass{};        // when both pass
+    std::uint32_t write_mask{0xFFu};  // bits that may change: the GE's alpha mask register inverted
 };
 
 struct ViewportState {
@@ -166,6 +190,7 @@ struct DrawCall {
     BlendState blend;
     DepthState depth;
     AlphaTestState alpha_test;
+    StencilState stencil;
     ViewportState viewport;
     bool culling_enabled{};
     bool cull_clockwise{};
@@ -242,6 +267,10 @@ public:
     using TransferSink = std::function<void(const BlockTransfer &)>;
 
     void set_draw_sink(DrawSink sink) { draw_sink_ = std::move(sink); }
+    // Frame skipping: asked with a draw's colour buffer before its vertices
+    // are decoded; true drops the draw (the pointers still advance past it).
+    using SkipDraw = std::function<bool(std::uint32_t color_address)>;
+    void set_skip_draw(SkipDraw skip) { skip_draw_ = std::move(skip); }
     void set_signal_sink(SignalSink sink) { signal_sink_ = std::move(sink); }
     // Block transfers are carried out by the sink, which can write guest memory.
     void set_transfer_sink(TransferSink sink) { transfer_sink_ = std::move(sink); }
@@ -291,6 +320,7 @@ private:
     BlendState blend_{};
     DepthState depth_{};
     AlphaTestState alpha_test_{};
+    StencilState stencil_{};
     ViewportState viewport_{};
     bool culling_enabled_{};
     bool cull_clockwise_{};
@@ -323,7 +353,24 @@ private:
 
     std::vector<std::uint32_t> call_stack_;
     DrawCall call_;  // reused by draw_primitive for every draw
+    // Prims drawn in a row with nothing changed between them but the vertex
+    // and index pointers go to the sink as one draw: a game drawing a mesh as
+    // hundreds of small prims (God of War: Ghost of Sparta makes some 6500
+    // a frame, nine vertices each) cost the renderer's whole per-draw work
+    // each time. Triangles, strips and fans join as one indexed triangle list,
+    // in the order the renderer expands them in; unindexed sprites join as
+    // they are. <prefix>_NO_DRAW_BATCH sends every prim on its own.
+    DrawCall batch_;
+    bool batch_open_{};
+    bool batch_indexed_{};  // made into an indexed triangle list
+    bool batch_sprites_{};
+    std::uint64_t batch_serial_{};
+    std::uint64_t state_serial_{};  // moves with every command that changes how a prim draws
+    std::vector<std::uint16_t> batch_scratch_;
+    void send_draw(DrawCall &call);
+    void flush_batch();
     DrawSink draw_sink_;
+    SkipDraw skip_draw_;
     SignalSink signal_sink_;
     TransferSink transfer_sink_;
     std::uint64_t draw_count_{};

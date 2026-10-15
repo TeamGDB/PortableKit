@@ -52,6 +52,9 @@ public:
     // Requests from the player, each reported once.
     bool take_menu_toggle();  // L3+R3; Esc while the game runs
     bool take_back();         // Esc while a screen runs
+    // The same requests from a tap or a click on a button hint.
+    void press_menu_toggle() { menu_toggle_ = true; }
+    void press_back() { back_ = true; }
     std::optional<std::filesystem::path> take_dropped_file();
     [[nodiscard]] bool window_closed() const noexcept { return window_closed_; }
 

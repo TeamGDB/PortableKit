@@ -6,8 +6,11 @@
 #include "ui/ui.hpp"
 
 #include "ui/font_menu.hpp"
+#include "ui/i18n.hpp"
+#include "ui/launcher.hpp"
 #include "ui/input_script.hpp"
 #include "ui/layer.hpp"
+#include "ui/save_chooser.hpp"
 #include "ui/save_screen.hpp"
 #include "ui/texture_pack_screen.hpp"
 #include "ui/text_input.hpp"
@@ -25,6 +28,7 @@
 #include "input/motion.hpp"
 #include "install/installer.hpp"
 #include "install/user_data.hpp"
+#include "kernel/file_mods.hpp"
 #include "perf/frame_stats.hpp"
 #include "save_data/save_transfer.hpp"
 #include "settings/settings.hpp"
@@ -81,7 +85,7 @@ RowOptions options_for(const char *key, std::string description) {
     options.description = std::move(description);
     if (const std::string variable = settings::overridden_by(key); !variable.empty()) {
         options.disabled = true;
-        options.note = "Set by " + variable;
+        options.note = trf("Set by {}", {variable});
     }
     return options;
 }
@@ -90,44 +94,49 @@ float font_gap() { return Layer::get().font_size() * 0.5f; }
 
 int cycle(int value, int delta, int count) { return ((value + delta) % count + count) % count; }
 
-// Percent-encodes a path for a file:// URL.
-std::string file_url(const std::string &path) {
-    std::string url = "file://";
-    for (const unsigned char c : path) {
-        if (std::isalnum(c) != 0 || c == '/' || c == '-' || c == '_' || c == '.' || c == '~') {
-            url += static_cast<char>(c);
-        } else {
-            char escaped[4];
-            std::snprintf(escaped, sizeof(escaped), "%%%02X", c);
-            url += escaped;
-        }
-    }
-    return url;
-}
-
 float gain(const settings::Settings &s) { return s.mute ? 0.0f : static_cast<float>(s.volume) / 100.0f; }
 
 class Menu {
 public:
     explicit Menu(bool paused) : paused_(paused) {}
+    // The menu's pages opened from the launcher, before the game runs, at
+    // `tab`: nothing to resume and nothing to quit.
+    Menu(bool paused, bool launcher, int tab) : paused_(paused), launcher_(launcher), tab_(tab) {}
     // One frame; false once the menu closes.
     bool frame();
+    // The launcher's use: page `tab` drawn into the current window, with
+    // `back` pressed this frame. LauncherPage says what came of it.
+    LauncherPage page(int tab, bool back);
+    // The launcher's quick settings: the rows of the video page that matter
+    // before the game starts.
+    void quick();
     [[nodiscard]] bool quit() const noexcept { return quit_; }
 
 private:
     enum class Confirm { None, Quit, Setup };
 
     void video();
+    void resolution_row();
+    void display_row();
     void audio();
     void controls();
     void tilt_controls();
     void network();
     void system();
     bool confirm_dialog();
+    void mods();
 
     gpu::VulkanRenderer &renderer() { return Layer::get().renderer(); }
 
+    // The pages, and the ones this game shows: no Network page for a game
+    // without multiplayer. tab_ indexes the shown ones.
+    // The numbers are the launcher's too (launcher_page): Mods came last.
+    enum Tab { kVideo, kAudio, kControls, kNetwork, kSystem, kMods };
+    static const std::vector<int> &shown_tabs();
+    [[nodiscard]] int tab_id() const { return shown_tabs()[static_cast<std::size_t>(tab_)]; }
+
     bool paused_{};  // the game is paused behind the menu, rather than running
+    bool launcher_{};  // opened from the launcher; the game has not started
     int tab_{};
     bool first_frame_{true};
     bool close_{};
@@ -138,6 +147,13 @@ private:
     bool confirm_opened_{};  // the confirmation was on screen last frame
     std::optional<input::Action> binding_;  // waiting for a key for this control
 };
+
+const std::vector<int> &Menu::shown_tabs() {
+    static const std::vector<int> tabs = portablekit::game().adhoc_play
+                                             ? std::vector<int>{kVideo, kAudio, kControls, kNetwork, kMods, kSystem}
+                                             : std::vector<int>{kVideo, kAudio, kControls, kMods, kSystem};
+    return tabs;
+}
 
 bool Menu::frame() {
     Layer &layer = Layer::get();
@@ -156,36 +172,41 @@ bool Menu::frame() {
     const bool start = ImGui::IsKeyPressed(ImGuiKey_GamepadStart, false);
     // Back closes the font list, or the save import and export, before it
     // closes the menu.
-    const bool font_list_was_open = (tab_ == 0 && (font_list_open() || texture_pack_screen_open())) ||
-                                    (tab_ == 4 && save_screen_open());
+    const bool font_list_was_open = (tab_id() == kVideo && font_list_open()) || (tab_id() == kMods && texture_pack_screen_open()) ||
+                                    (tab_id() == kSystem && save_screen_open());
     back_ = back || pad_back;
 
-    begin_panel("##menu", portablekit::game().project_name, paused_ ? "Paused" : "Running", true);
-    static const char *const kTabs[] = {"Video", "Audio", "Controls", "Network", "System"};
-    const bool switched = tab_bar(kTabs, 5, tab_) || first_frame_;
+    begin_panel("##menu", portablekit::game().project_name, launcher_ ? "Settings" : paused_ ? "Paused" : "Running",
+                true);
+    static const char *const kTabs[] = {"Video", "Audio", "Controls", "Network", "System", "Mods"};
+    std::vector<const char *> labels;
+    for (const int tab : shown_tabs()) labels.push_back(kTabs[tab]);
+    const bool switched = tab_bar(labels.data(), static_cast<int>(labels.size()), tab_) || first_frame_;
     first_frame_ = false;
     begin_content();
     if (switched) {
         focus_next_row();
         ImGui::SetScrollY(0.0f);
     }
-    switch (tab_) {
-    case 0: video(); break;
-    case 1: audio(); break;
-    case 2: controls(); break;
-    case 3: network(); break;
+    switch (tab_id()) {
+    case kVideo: video(); break;
+    case kAudio: audio(); break;
+    case kControls: controls(); break;
+    case kNetwork: network(); break;
+    case kMods: mods(); break;
     default: system(); break;
     }
     begin_footer();
-    if (tab_ == 4)
+    const char *const close_hint = launcher_ ? "Close" : "Resume";
+    if (tab_id() == kSystem)
         hints({{Control::Confirm, "Select"}, {Control::Back, "Back"}, {Control::Tabs, "Section"},
-               {Control::Menu, "Resume"}});
+               {Control::Menu, close_hint}});
     else
         hints({{Control::Confirm, "Select"},
                {Control::Change, "Change"},
                {Control::Back, "Back"},
                {Control::Tabs, "Section"},
-               {Control::Menu, "Resume"}});
+               {Control::Menu, close_hint}});
     end_panel();
 
     if (confirm_ != Confirm::None) {
@@ -199,11 +220,8 @@ bool Menu::frame() {
     return !close_;
 }
 
-void Menu::video() {
-    if (font_list(back_)) return;
-    if (texture_pack_screen(back_)) return;
+void Menu::resolution_row() {
     settings::Settings &s = settings::current();
-    section("Picture");
     {
         RowOptions o = options_for("video.internal_scale",
                                    "Auto draws the game at the window's own size and follows it (at most 1632 "
@@ -223,8 +241,10 @@ void Menu::video() {
             settings::save();
         }
     }
-#if !defined(__ANDROID__)
-    // A phone is always full screen: no window to size.
+}
+
+void Menu::display_row() {
+    settings::Settings &s = settings::current();
     {
         const int delta =
             choice_row("Display", s.fullscreen ? "Fullscreen" : "Window",
@@ -235,6 +255,146 @@ void Menu::video() {
             settings::save();
         }
     }
+}
+
+void Menu::quick() {
+    resolution_row();
+#if !defined(__ANDROID__)
+    display_row();
+#endif
+}
+
+LauncherPage Menu::page(int tab, bool back) {
+    LauncherPage result;
+    texture_pack_import_tick();
+    const std::vector<int> &tabs = shown_tabs();
+    const auto shown = std::find(tabs.begin(), tabs.end(), tab);
+    tab_ = shown == tabs.end() ? 0 : static_cast<int>(shown - tabs.begin());
+    // Back closes what is open inside the page first: the font list, the
+    // texture packs, the save import and export, a confirmation, a field
+    // being edited.
+    const bool inner_open = (tab_id() == kVideo && font_list_open()) || (tab_id() == kMods && texture_pack_screen_open()) ||
+                            (tab_id() == kSystem && save_screen_open());
+    result.back_used = inner_open || was_editing_ || confirm_ != Confirm::None || texture_pack_import_busy();
+    back_ = back;
+    switch (tab_id()) {
+    case kVideo: video(); break;
+    case kAudio: audio(); break;
+    case kControls: controls(); break;
+    case kNetwork: network(); break;
+    case kMods: mods(); break;
+    default: system(); break;
+    }
+    if (confirm_ != Confirm::None && back && confirm_opened_) confirm_ = Confirm::None;
+    result.set_up = !confirm_dialog();
+    was_editing_ = ImGui::IsAnyItemActive();
+    return result;
+}
+
+// Mods: in the mods folder of the data folder, replaced game files
+// (mods/files), remastered movies (mods/movies) and HD texture packs
+// (mods/textures); and START skipping movies.
+void Menu::mods() {
+    if (texture_pack_screen(back_)) return;
+    settings::Settings &s = settings::current();
+    std::filesystem::path folder;
+    try {
+        folder = install::user_data_directory() / "mods" / "movies";
+    } catch (const std::exception &) {
+    }
+    std::size_t movies = 0;
+    std::error_code ec;
+    if (!folder.empty())
+        for (const auto &entry : std::filesystem::directory_iterator(folder, ec))
+            if (entry.path().extension() == ".264") ++movies;
+    if (portablekit::game().start_skips_movies) {
+        section("Movies");
+        if (toggle_row("Skip movies with START", s.movie_skip,
+                       options_for("video.movie_skip", "START during a movie ends it and goes on with the game."))) {
+            s.movie_skip = !s.movie_skip;
+            settings::save();
+        }
+    }
+    section("Remastered movies");
+    RowOptions o = options_for("video.movie_mods",
+                               "Plays the remastered movies a mod puts in the mods/movies folder of the game's "
+                               "data (NAME.264, NAME the game's movie) in place of the game's own, with the "
+                               "game's sound.");
+    if (movies == 0u && !o.disabled) {
+        o.disabled = true;
+        o.note = "No remastered movies found";
+    } else if (!o.disabled) {
+        o.note = trf("{} found", {std::to_string(movies)});
+    }
+    if (choice_row("Remastered movies", s.movie_mods ? "On" : "Off", o)) {
+        s.movie_mods = !s.movie_mods;
+        settings::save();
+    }
+#if !defined(PORTABLEKIT_ANDROID_APP)
+    if (!folder.empty() &&
+        button_row("Open the movies folder", {false, {}, "Where remastered movies go: NAME.264, for the game's "
+                                                         "movie NAME. Kit Movie Tools puts them there."}))
+        open_folder(folder);
+#endif
+    section("Game files");
+    {
+        RowOptions o = options_for("mods.files",
+                                   "Reads the files a mod puts in the mods/files folder of the game's data in place "
+                                   "of the disc's files at the same path (mods/files/PSP_GAME/USRDIR/…): "
+                                   "translations, models, sounds. Takes effect the next time the game loads them.");
+        const std::size_t files = file_mods::count();
+        if (files == 0u && !o.disabled) {
+            o.disabled = true;
+            o.note = "No replaced files found";
+        } else if (!o.disabled) {
+            o.note = trf("{} found", {std::to_string(files)});
+        }
+        if (choice_row("Replaced files", s.file_mods ? "On" : "Off", o)) {
+            s.file_mods = !s.file_mods;
+            settings::save();
+        }
+#if !defined(PORTABLEKIT_ANDROID_APP)
+        const std::filesystem::path files_folder = file_mods::folder();
+        if (!files_folder.empty() &&
+            button_row("Open the files folder",
+                       {false, {}, "Where a mod's files go, in the disc's folders: PSP_GAME/USRDIR/…"}))
+            open_folder(files_folder);
+#endif
+    }
+    section("Texture packs");
+    {
+        RowOptions o = options_for("video.texture_pack",
+                                   trf("Draws an HD texture pack in PPSSPP's format from mods/textures/{} in the "
+                                       "data folder instead of the game's textures.",
+                                       {portablekit::game().disc_id}));
+        // The footer shows the note under the description: what is loaded,
+        // or where the pack was looked for.
+        if (o.note.empty()) {
+            const std::string status = renderer().texture_pack_status();
+            o.note = status == "Not installed" ? trf("No pack in {}", {renderer().texture_pack_folder()}) : status;
+            // A pack used in place that has moved: its path is on the "Pack
+            // used from" row below; the footer has room for its name only.
+            if (status.rfind("Folder missing: ", 0) == 0)
+                o.note = "Pack folder missing: " +
+                         install::path_to_utf8(install::path_from_utf8(status.substr(16)).filename());
+        }
+        if (choice_row("Texture pack", s.texture_pack ? "On" : "Off", o)) {
+            s.texture_pack = !s.texture_pack;
+            renderer().set_texture_pack(s.texture_pack);
+            settings::save();
+        }
+    }
+    texture_pack_rows();
+}
+
+void Menu::video() {
+    if (font_list(back_)) return;
+    settings::Settings &s = settings::current();
+    section("Picture");
+    resolution_row();
+#if !defined(__ANDROID__)
+    // A phone is always full screen: no window to size.
+    display_row();
     {
         RowOptions o = options_for("video.window_scale", "The window's size, in multiples of the PSP's screen.");
         if (s.fullscreen) {
@@ -274,6 +434,20 @@ void Menu::video() {
         renderer().set_sharp_screen(s.sharp_screen);
         settings::save();
     }
+    {
+        static const char *const kAntialiasing[] = {"Off", "FXAA"};
+        const int current = static_cast<int>(s.antialiasing);
+        if (const int delta = choice_row(
+                "Antialiasing", kAntialiasing[current],
+                options_for("video.antialiasing", "Smooths the jagged edges of the picture. FXAA is a light pass "
+                                                  "over the finished picture that suits phones too; it softens "
+                                                  "text a little. Higher internal resolutions smooth edges as "
+                                                  "well, at a higher cost."))) {
+            s.antialiasing = static_cast<settings::Antialiasing>(cycle(current, delta, 2));
+            renderer().set_antialiasing(s.antialiasing);
+            settings::save();
+        }
+    }
     if (choice_row("Texture filter", s.sharp_textures ? "Sharp" : "Smooth",
                    options_for("video.sharp_textures", "How the game's textures are sampled: smooth (bilinear) or "
                                                        "sharp (nearest texel)."))) {
@@ -281,28 +455,6 @@ void Menu::video() {
         renderer().set_sharp_textures(s.sharp_textures);
         settings::save();
     }
-    {
-        RowOptions o = options_for("video.texture_pack",
-                                   std::string("Draws an HD texture pack in PPSSPP's format from textures/") +
-                                       portablekit::game().disc_id + " in the data folder instead of the game's textures.");
-        // The footer shows the note under the description: what is loaded,
-        // or where the pack was looked for.
-        if (o.note.empty()) {
-            const std::string status = renderer().texture_pack_status();
-            o.note = status == "Not installed" ? "No pack in " + renderer().texture_pack_folder() : status;
-            // A pack used in place that has moved: its path is on the "Pack
-            // used from" row below; the footer has room for its name only.
-            if (status.rfind("Folder missing: ", 0) == 0)
-                o.note = "Pack folder missing: " +
-                         install::path_to_utf8(install::path_from_utf8(status.substr(16)).filename());
-        }
-        if (choice_row("Texture pack", s.texture_pack ? "On" : "Off", o)) {
-            s.texture_pack = !s.texture_pack;
-            renderer().set_texture_pack(s.texture_pack);
-            settings::save();
-        }
-    }
-    texture_pack_rows();
     section("Timing");
     {
         struct Mode {
@@ -341,6 +493,10 @@ void Menu::video() {
         if (s.unthrottled && !o.disabled) {
             o.disabled = true;
             o.note = "Game speed is Unlimited";
+        }
+        if (s.half_rate && !o.disabled) {
+            o.disabled = true;
+            o.note = "Limit to 30 fps is on";
         }
         const int current = static_cast<int>(s.frame_rate);
         std::string value = kRates[current];
@@ -381,6 +537,31 @@ void Menu::video() {
             settings::save();
         }
     }
+    // Only for a game that draws 60 frames a second: one made for 30 is
+    // there already.
+    if (gpu::pacing::game_rate() > 50.0) {
+        if (choice_row("Limit to 30 fps", s.half_rate ? "On" : "Off",
+                       options_for("video.half_rate",
+                                   "Draws every other frame: the game keeps its full speed and the picture shows 30 "
+                                   "frames a second, with half the drawing work. For devices that cannot hold 60."))) {
+            s.half_rate = !s.half_rate;
+            settings::save();
+        }
+    }
+    {
+        RowOptions o = options_for("video.frame_skip",
+                                   "Auto: when the game falls behind real time, the next frame is not drawn, so the "
+                                   "game keeps its speed and only the picture shows fewer frames (never fewer than "
+                                   "half). Off: every frame is drawn, and a slow scene runs slower.");
+        if (s.half_rate && !o.disabled) {
+            o.disabled = true;
+            o.note = "Limit to 30 fps is on";
+        }
+        if (choice_row("Frame skip", s.frame_skip ? "Auto" : "Off", o)) {
+            s.frame_skip = !s.frame_skip;
+            settings::save();
+        }
+    }
     if (choice_row("Game speed", s.unthrottled ? "Unlimited" : "Normal",
                    options_for("video.unthrottled", "Normal holds the game to real time. Unlimited lets it run as "
                                                     "fast as frames can be drawn, which also speeds up the game."))) {
@@ -415,7 +596,7 @@ void Menu::video() {
     }
     font_rows();
     ImGui::Dummy({0.0f, font_gap()});
-    if (button_row("Restore video defaults", {false, {}, std::string("Every setting on this page back to how ") + portablekit::game().project_name + " ships."})) {
+    if (button_row("Restore video defaults", {false, {}, trf("Every setting on this page back to how {} ships.", {portablekit::game().project_name})})) {
         const settings::Settings &d = settings::defaults();
         const auto restore = [&](const char *key, auto &value, const auto &fallback) {
             if (settings::overridden_by(key).empty()) value = fallback;
@@ -425,12 +606,14 @@ void Menu::video() {
         restore("video.window_scale", s.window_scale, d.window_scale);
         restore("video.aspect", s.aspect, d.aspect);
         restore("video.sharp_screen", s.sharp_screen, d.sharp_screen);
+        restore("video.antialiasing", s.antialiasing, d.antialiasing);
         restore("video.sharp_textures", s.sharp_textures, d.sharp_textures);
         restore("video.texture_pack", s.texture_pack, d.texture_pack);
         restore("video.present_mode", s.present_mode, d.present_mode);
         restore("video.frame_rate", s.frame_rate, d.frame_rate);
         restore("video.frame_rate_auto", s.frame_rate_auto, d.frame_rate_auto);
         restore("video.unthrottled", s.unthrottled, d.unthrottled);
+        restore("video.half_rate", s.half_rate, d.half_rate);
         restore("video.fast_loading", s.fast_loading, d.fast_loading);
         restore("video.performance", s.perf, d.perf);
         renderer().set_internal_scale(s.internal_scale);
@@ -438,6 +621,7 @@ void Menu::video() {
         renderer().set_window_scale(s.window_scale);
         renderer().set_aspect(s.aspect);
         renderer().set_sharp_screen(s.sharp_screen);
+        renderer().set_antialiasing(s.antialiasing);
         renderer().set_sharp_textures(s.sharp_textures);
         renderer().set_texture_pack(s.texture_pack);
         renderer().set_present_mode(s.present_mode);
@@ -929,8 +1113,8 @@ void Menu::controls() {
 
     ImGui::Dummy({0.0f, font_gap()});
     if (button_row("Restore control defaults",
-                   {false, {}, std::string("Every gamepad, keyboard, mouse, touch and name setting back to how ") +
-                                   portablekit::game().project_name + " ships."})) {
+                   {false, {}, trf("Every gamepad, keyboard, mouse, touch and name setting back to how {} ships.",
+                                   {portablekit::game().project_name})})) {
         const settings::Settings &d = settings::defaults();
         const auto restore = [&](const char *key, auto &value, const auto &fallback) {
             if (settings::overridden_by(key).empty()) value = fallback;
@@ -1314,7 +1498,9 @@ void Menu::network() {
 
 void Menu::system() {
     if (save_screen(back_)) {
-        if (take_restart_request()) {
+        // Before the game has started there is nothing to restart: it
+        // loads the imported save when it starts.
+        if (take_restart_request() && !launcher_) {
             install::request_restart_on_exit();
             quit_ = true;
             close_ = true;
@@ -1328,7 +1514,7 @@ void Menu::system() {
         data_dir = e.what();
     }
     section("Game");
-    if (button_row("Resume", {false, {}, "Back to the game."})) close_ = true;
+    if (!launcher_ && button_row("Resume", {false, {}, "Back to the game."})) close_ = true;
     settings::Settings &s = settings::current();
     if (toggle_row("Pause the game when the menu opens", s.menu_pause,
                    options_for("ui.menu_pause", "On: the game stops while this menu is open. Off: it keeps running "
@@ -1337,7 +1523,8 @@ void Menu::system() {
         s.menu_pause = !s.menu_pause;
         settings::save();
     }
-    if (toggle_row("Pause during multiplayer", s.menu_pause_multiplayer,
+    if (portablekit::game().adhoc_play &&
+        toggle_row("Pause during multiplayer", s.menu_pause_multiplayer,
                    options_for("ui.menu_pause_multiplayer",
                                "In ad hoc play the game keeps running behind the menu unless this is on: a paused "
                                "game stops answering the other players and can drop a quest. Applies the next time "
@@ -1345,6 +1532,18 @@ void Menu::system() {
         s.menu_pause_multiplayer = !s.menu_pause_multiplayer;
         settings::save();
     }
+    if (portablekit::game().launcher != nullptr &&
+        toggle_row("Show the launcher at start", !s.launcher_skip,
+                   options_for("launcher.skip", "On: the launcher, with its Play button and settings, comes up "
+                                                "before the game. Off: the game starts at once. Applies the next "
+                                                "time the game starts."))) {
+        s.launcher_skip = !s.launcher_skip;
+        settings::save();
+    }
+    if (choice_row("Language", language_name(),
+                   options_for("ui.language", "The language of this menu and the launcher. The game's own text is "
+                                              "not changed.")))
+        next_language();
 #if defined(PORTABLEKIT_ANDROID_APP)
     // An Android app's data folder is out of the file manager's reach; its
     // log goes where the player picks instead, to send with a report.
@@ -1374,15 +1573,15 @@ void Menu::system() {
     }
     if (!saved_log_path().empty()) info_row("Log", saved_log_path());
 #else
-    if (button_row("Open the data folder", {false, {}, std::string("Show ") + portablekit::game().project_name + "'s data folder in the file manager."})) {
-        if (!SDL_OpenURL(file_url(data_dir).c_str()))
-            std::cout << "[menu] cannot open " << data_dir << ": " << SDL_GetError() << "\n";
+    if (button_row("Open the data folder", {false, {}, trf("Show {}'s data folder in the file manager.", {portablekit::game().project_name})})) {
+        open_folder(install::path_from_utf8(data_dir));
     }
 #endif
     if (button_row("Set up game data again…",
                    {false, {}, "Choose the disc image again, for example after moving it. The game closes first."}))
         confirm_ = Confirm::Setup;
-    if (button_row("Quit game", {false, {}, std::string("Close ") + portablekit::game().project_name + ". Progress since your last save is lost."},
+    if (!launcher_ &&
+        button_row("Quit game", {false, {}, trf("Close {}. Progress since your last save is lost.", {portablekit::game().project_name})},
                    colors::kDanger))
         confirm_ = Confirm::Quit;
 
@@ -1419,8 +1618,9 @@ bool Menu::confirm_dialog() {
         const bool quit = confirm_ == Confirm::Quit;
         heading(quit ? "Quit the game?" : "Set up game data again?");
         paragraph(quit ? "Progress since your last save is lost."
-                       : std::string(portablekit::game().project_name) + " closes the game and opens the setup, where you choose the disc image again. "
-                         "Progress since your last save is lost.",
+                       : trf("{} closes the game and opens the setup, where you choose the disc image again. "
+                             "Progress since your last save is lost.",
+                             {portablekit::game().project_name}),
                   colors::kTextDim);
         ImGui::Dummy({0.0f, font * 0.6f});
         const float gap = font * 0.6f;
@@ -1559,6 +1759,13 @@ void draw_over_game() {
         layer.end_frame();
         return;
     }
+    // The game's save list, likewise.
+    if (save_chooser_open() && !menu) {
+        layer.begin_frame();
+        save_chooser_frame();
+        layer.end_frame();
+        return;
+    }
     const double hint_left = menu || settings::current().menu_hint_seen ? -1.0 : hint_seconds_left();
     const bool overlay = network_overlay();
     const bool touch = !menu && layer.renderer().touch_controls_visible();
@@ -1601,11 +1808,22 @@ bool take_quit_request() { return std::exchange(quit_requested(), false); }
 
 bool menu_requested() {
     Layer &layer = Layer::get();
-    if (!layer.attached() || text_input_open()) return false;
+    if (!layer.attached() || text_input_open() || save_chooser_open()) return false;
     // The on-screen menu button, then Esc or L3+R3.
     const bool touched = layer.renderer().take_touch_menu();
     return layer.take_menu_toggle() || touched;
 }
+
+namespace {
+Menu &launcher_menu() {
+    static Menu menu(true, true, 0);
+    return menu;
+}
+} // namespace
+
+LauncherPage launcher_page(int tab, bool back) { return launcher_menu().page(tab, back); }
+
+void launcher_quick_settings() { launcher_menu().quick(); }
 
 bool run_menu() {
     Layer &layer = Layer::get();

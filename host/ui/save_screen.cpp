@@ -99,9 +99,13 @@ fs::path backups_directory() {
 
 // Percent-encodes a path for a file:// URL.
 std::string file_url(const std::string &path) {
-    std::string url = "file://";
+    // A Windows path (C:\Users\...) becomes file:///C:/Users/...: its
+    // separators turned to slashes and its drive letter's colon kept.
+    std::string url = path.empty() || path[0] == '/' ? "file://" : "file:///";
     for (const unsigned char c : path) {
-        if (std::isalnum(c) != 0 || c == '/' || c == '-' || c == '_' || c == '.' || c == '~') {
+        if (c == '\\') {
+            url += '/';
+        } else if (std::isalnum(c) != 0 || c == '/' || c == '-' || c == '_' || c == '.' || c == '~' || c == ':') {
             url += static_cast<char>(c);
         } else {
             char escaped[4];
@@ -244,6 +248,7 @@ void open_browser(Stage stage) {
     } else {
         options.choose_folder = "Back up to this folder";
     }
+    options.system_first = true;
     s.browser = std::make_unique<FileBrowser>(s.last_folder.empty() ? FileBrowser::home() : s.last_folder,
                                               std::move(options));
     go(stage);

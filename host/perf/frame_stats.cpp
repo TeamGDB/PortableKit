@@ -119,6 +119,7 @@ struct State {
     std::uint64_t pass_sum{};
     std::uint64_t cleared_pass_sum{};
     std::uint64_t copy_sum{};
+    std::uint64_t skipped_sum{};
     std::uint64_t vertex_peak{};
     std::uint64_t index_peak{};
     StallTallies stall_sum{};
@@ -172,6 +173,8 @@ void print(const Summary &s) {
     if (s.passes > 0.0 && length > 0 && static_cast<std::size_t>(length) < sizeof(line))
         length += std::snprintf(line + length, sizeof(line) - length, " | passes %.1f (%.1f cleared) copies %.1f",
                                 s.passes, s.cleared_passes, s.copies);
+    if (s.skipped > 0.0 && length > 0 && static_cast<std::size_t>(length) < sizeof(line))
+        length += std::snprintf(line + length, sizeof(line) - length, " | skipped %.0f/s", s.skipped);
     if (s.overlay_ms > 0.0 && length > 0 && static_cast<std::size_t>(length) < sizeof(line))
         length += std::snprintf(line + length, sizeof(line) - length, " | overlay %.2f ms", s.overlay_ms);
     if (alternate().paths != 0u && length > 0 && static_cast<std::size_t>(length) < sizeof(line))
@@ -260,7 +263,7 @@ void restart_measurement() {
     s.render_sum = s.wait_sum = s.pacing_sum = s.overlay_sum = Clock::duration{};
     s.list_sum = 0u;
     s.draw_sum = s.recorded_draw_sum = 0u;
-    s.pass_sum = s.copy_sum = s.cleared_pass_sum = 0u;
+    s.pass_sum = s.copy_sum = s.cleared_pass_sum = s.skipped_sum = 0u;
     s.stall_sum = StallTallies{};
     s.gpu_sum_ms = s.gpu_max_ms = 0.0;
     s.vertex_peak = s.index_peak = 0u;
@@ -364,6 +367,7 @@ void count_draw() { ++state().draws; }
 void count_recorded_draws(std::uint32_t count) { state().recorded_draws += count; }
 void count_render_pass() { ++state().pass_sum; }
 void count_target_copy() { ++state().copy_sum; }
+void count_skipped_frame() { ++state().skipped_sum; }
 void count_cleared_pass() { ++state().cleared_pass_sum; }
 
 void note_frame_space(std::uint64_t vertex_bytes, std::uint64_t index_bytes) {
@@ -478,6 +482,7 @@ void end_frame(std::uint64_t virtual_us, bool presented) {
     out.passes = static_cast<double>(s.pass_sum) / frames;
     out.cleared_passes = static_cast<double>(s.cleared_pass_sum) / frames;
     out.copies = static_cast<double>(s.copy_sum) / frames;
+    out.skipped = static_cast<double>(s.skipped_sum) * 1000.0 / window_ms;
     out.frame_avg_ms = s.presents != 0u ? s.present_sum_ms / presents : 0.0;
     out.frame_max_ms = s.present_max_ms;
     const double gpu_wait_ms = to_ms(s.wait_sum) / frames;
@@ -525,7 +530,7 @@ void end_frame(std::uint64_t virtual_us, bool presented) {
     s.render_sum = s.wait_sum = s.pacing_sum = s.overlay_sum = Clock::duration{};
     s.list_sum = 0u;
     s.draw_sum = s.recorded_draw_sum = 0u;
-    s.pass_sum = s.copy_sum = s.cleared_pass_sum = 0u;
+    s.pass_sum = s.copy_sum = s.cleared_pass_sum = s.skipped_sum = 0u;
     s.stall_sum = StallTallies{};
     s.gpu_sum_ms = s.gpu_max_ms = 0.0;
     s.vertex_peak = s.index_peak = 0u;

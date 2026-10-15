@@ -8,7 +8,8 @@
 // reports QUIT, then calls ShutdownStart and waits for NONE. A dialog that
 // reports itself running and never reaches QUIT stalls the guest for good, so
 // the host does its work in InitStart and each poll moves the status one step
-// on: every path, errors included, reaches QUIT within a few polls.
+// on: every path, errors included, reaches QUIT within a few polls. A dialog
+// that waits for the player (the save list) holds VISIBLE until answered.
 #include <cstdint>
 
 namespace portablekit {
@@ -35,13 +36,19 @@ public:
     [[nodiscard]] bool active() const noexcept { return status_ != dialog_status::kNone; }
     [[nodiscard]] std::uint32_t status() const noexcept { return status_; }
 
-    void start() noexcept { status_ = dialog_status::kInit; }
+    void start() noexcept {
+        status_ = dialog_status::kInit;
+        held_ = false;
+    }
+    // While held, VISIBLE stays VISIBLE: the player has not answered yet.
+    void hold(bool held) noexcept { held_ = held; }
+    [[nodiscard]] bool held() const noexcept { return held_; }
 
     // Returns the status to report for this poll, then advances it.
     std::uint32_t poll() noexcept {
         const std::uint32_t reported = status_;
         if (status_ == dialog_status::kInit) status_ = dialog_status::kVisible;
-        else if (status_ == dialog_status::kVisible) status_ = dialog_status::kQuit;
+        else if (status_ == dialog_status::kVisible && !held_) status_ = dialog_status::kQuit;
         else if (status_ == dialog_status::kFinished) status_ = dialog_status::kNone;
         return reported;
     }
@@ -52,11 +59,13 @@ public:
     bool shutdown() noexcept {
         const bool quit = status_ == dialog_status::kQuit;
         if (status_ != dialog_status::kNone) status_ = dialog_status::kFinished;
+        held_ = false;
         return quit;
     }
 
 private:
     std::uint32_t status_{dialog_status::kNone};
+    bool held_{};
 };
 
 } // namespace portablekit

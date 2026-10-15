@@ -165,6 +165,14 @@ public:
     void set_frame_rate(settings::FrameRate rate);
     // On, the frame rate steps down by itself rather than slow the game.
     void set_frame_rate_auto(bool automatic);
+    // Frame skipping (settings frame_skip): whether a flip may be skipped now
+    // (not with frame interpolation, which paces presents itself, nor while a
+    // load runs fast), whether a draw into `address` may be dropped in a
+    // skipped frame (a buffer the game shows, or one drawn in the last two
+    // frames: either is redrawn every frame or two), and the flip of a skipped frame, which shows nothing new.
+    [[nodiscard]] bool can_skip_frames() const;
+    [[nodiscard]] bool redrawn_every_frame(std::uint32_t address) const;
+    void skip_flip();
     // The refresh rate of the window's display as SDL reports it, 0 when unknown.
     [[nodiscard]] float display_refresh() const noexcept;
     // The rate frames are presented at now: the setting's, or a slower one
@@ -199,6 +207,9 @@ public:
     [[nodiscard]] static bool supports_fill() noexcept;
     [[nodiscard]] static settings::Aspect usable_aspect(settings::Aspect aspect) noexcept;
     void set_sharp_screen(bool sharp);
+    // Smooths the edges of the finished picture (settings::Antialiasing);
+    // from the next frame shown.
+    void set_antialiasing(settings::Antialiasing antialiasing);
     void set_sharp_textures(bool sharp);
     // Draws an installed HD texture pack's images instead of the game's own
     // textures (texture_pack.hpp). Takes effect from the next frame; off
@@ -263,6 +274,11 @@ public:
     void begin_ui_frame();
     // Draw data from ImGui::Render, drawn over the next presented image.
     void set_ui_draw_data(ImDrawData *draw_data);
+    // An RGBA image (8 bits a channel, rows top first) the interface can draw
+    // with ImGui::Image, kept until the renderer is destroyed. Zero when the
+    // interface is not up. Call between interface frames.
+    [[nodiscard]] std::uint64_t create_ui_image(std::uint32_t width, std::uint32_t height,
+                                                const std::uint32_t *pixels);
     // Presents a frame outside the game's own flips: the last game frame when
     // there is one and `show_game` is set, a plain background otherwise, with
     // the interface over it. Used while the game is paused or not started.

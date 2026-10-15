@@ -161,6 +161,33 @@ void test_games(const fs::path &root) {
     check(c.ok() && c.keys == 5u, "the ini [games] names for this release adds its keys");
 }
 
+// Packs named for a release the profile says has the same textures
+// (GameProfile::texture_pack_releases), with no [games] that lists the game:
+// a PPSSPP pack for another region of the same game.
+void test_releases(const fs::path &root) {
+    const std::string game = portablekit::game().disc_id;
+    const fs::path direct = root / "releases" / "TEST00002";
+    make_pack(direct);
+    TexturePackCheck c = check_texture_pack(direct, game);
+    check(c.ok() && c.made_for == "TEST00002", "a pack for a release with the same textures is taken");
+    make_pack(root / "releases2" / "PSP" / "TEXTURES" / "test00002");
+    c = check_texture_pack(root / "releases2", game);
+    check(c.ok() && c.made_for == "test00002", "and found in PSP/TEXTURES under that release's name");
+    make_pack(root / "releases3" / "TEST00003");
+    c = check_texture_pack(root / "releases3" / "TEST00003", game);
+    check(!c.ok(), "a pack for a release not listed is still refused");
+    // Copied in by hand under the other release's name.
+    const fs::path textures = root / "releases4" / "textures";
+    make_pack(textures / "TEST00002");
+    TexturePackLocation l = texture_pack_location(textures, game, "");
+    check(l.folder == textures / "TEST00002", "a pack in textures/<other release> is read when the game's is missing");
+    make_pack(textures / game);
+    l = texture_pack_location(textures, game, "");
+    check(l.folder == textures / game, "but the game's own folder comes first");
+    check(portablekit::texture_pack_fits("test00002") && !portablekit::texture_pack_fits("TEST00003"),
+          "texture_pack_fits ignores case and knows only the listed releases");
+}
+
 void test_hashes(const fs::path &root) {
     std::string quick = kIni;
     quick.replace(quick.find("xxh64"), 5, "quick");
@@ -367,6 +394,7 @@ int main(int argc, char **argv) {
     const Scratch scratch;
     test_layouts(scratch.root);
     test_games(scratch.root);
+    test_releases(scratch.root);
     test_hashes(scratch.root);
     test_copy(scratch.root);
     test_location(scratch.root);

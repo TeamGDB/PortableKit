@@ -328,7 +328,9 @@ std::unique_ptr<TexturePack> TexturePack::parse(const std::filesystem::path &dir
             const std::size_t equals = line.find('=');
             if (equals == std::string::npos) continue;
             pack->games_.push_back(trim(line.substr(0, equals)));
-            if (pack->games_.back() != game_id) continue;
+            if (pack->games_.back() != game_id &&
+                !(game_id == portablekit::game().disc_id && portablekit::texture_pack_fits(pack->games_.back())))
+                continue;
             const std::string name = trim(line.substr(equals + 1u));
             if (name.empty() || name == "true" || name == "textures.ini") continue;
             if (name.find("..") != std::string::npos) {

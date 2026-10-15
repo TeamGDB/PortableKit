@@ -1,6 +1,7 @@
 #include "ui/texture_pack_screen.hpp"
 
 #include "ui/file_browser.hpp"
+#include "ui/i18n.hpp"
 #include "ui/layer.hpp"
 #include "ui/save_screen.hpp"
 #include "ui/widgets.hpp"
@@ -10,13 +11,20 @@
 #include "profile.hpp"
 #include "install/user_data.hpp"
 #include "settings/settings.hpp"
+#if defined(PORTABLEKIT_ANDROID_APP)
+#include "platform/android_documents.hpp"
+#include "platform/android_jni.hpp"
+#endif
 
 #include "imgui.h"
 
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <atomic>
 #include <future>
+#include <mutex>
+#include <thread>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -53,6 +61,141 @@ struct Outcome {
     std::size_t keys{};
 };
 
+#if defined(PORTABLEKIT_ANDROID_APP)
+// Android: a pack comes from the system's document picker as a tree of
+// content:// documents, so it is copied first and checked in the copy, then
+// put in place like any other. The copy goes to
+// textures/.incomplete-<time>/<the pack folder's name>, so the check sees the
+// name the pack was made under.
+class DocumentPackCopy {
+public:
+    using State = TexturePackCopy::State;
+    ~DocumentPackCopy() {
+        cancel();
+        join();
+    }
+    void start(std::string tree, fs::path textures_root) {
+        join();
+        cancel_ = false;
+        {
+            std::lock_guard lock(mutex_);
+            progress_ = {};
+            error_.clear();
+            made_for_.clear();
+            keys_ = 0u;
+        }
+        root_ = gpu::new_texture_pack_staging(textures_root);
+        staging_.clear();
+        state_ = State::Copying;
+        thread_ = std::thread([this, tree = std::move(tree), textures_root = std::move(textures_root)] {
+            run(tree, textures_root);
+        });
+    }
+    void cancel() noexcept { cancel_ = true; }
+    void join() {
+        if (thread_.joinable()) thread_.join();
+    }
+    [[nodiscard]] State state() const noexcept { return state_.load(); }
+    [[nodiscard]] TexturePackCopy::Progress progress() const {
+        std::lock_guard lock(mutex_);
+        return progress_;
+    }
+    [[nodiscard]] std::string error() const {
+        std::lock_guard lock(mutex_);
+        return error_;
+    }
+    // Once Done: the checked copy, and the folder holding it.
+    [[nodiscard]] const fs::path &staging() const noexcept { return staging_; }
+    [[nodiscard]] const fs::path &root() const noexcept { return root_; }
+    [[nodiscard]] std::size_t keys() const noexcept { return keys_; }
+    [[nodiscard]] std::string made_for() const {
+        std::lock_guard lock(mutex_);
+        return made_for_;
+    }
+
+private:
+    void fail(const std::string &error) {
+        std::cout << "[texpack] import failed: " << error << std::endl;
+        gpu::discard_staged_texture_pack(root_);
+        std::lock_guard lock(mutex_);
+        error_ = error;
+        state_ = State::Failed;
+    }
+
+    void run(const std::string &tree, const fs::path &textures_root) {
+        std::string error;
+        const std::string game_id = portablekit::game().disc_id;
+        {
+            std::lock_guard lock(mutex_);
+            progress_.current = "Looking for the pack…";
+        }
+        const std::optional<android::FoundPack> found = android::find_texture_pack(
+            tree, gpu::texture_pack_folder_names(game_id), &gpu::texture_pack_file_skipped, error);
+        if (!found) return fail(error);
+        std::uint64_t total = 0u;
+        for (const android::PackFile &file : found->files) total += file.size;
+        std::cout << "[texpack] import from " << found->where << ": " << found->name << ", " << found->files.size()
+                  << " files, " << (total >> 20u) << " MB" << std::endl;
+        if (const auto free = gpu::texture_pack_free_space(textures_root);
+            free && *free < total + gpu::kTexturePackSpaceMargin)
+            return fail("Not enough free space: the pack needs " + human_size(total + gpu::kTexturePackSpaceMargin) +
+                        " and " + human_size(*free) + " is free.");
+        {
+            std::lock_guard lock(mutex_);
+            progress_.total_bytes = total;
+            progress_.total_files = found->files.size();
+        }
+        const fs::path staging = root_ / fs::path(std::u8string(found->name.begin(), found->name.end()));
+        std::uint64_t done = 0u;
+        for (std::size_t i = 0; i < found->files.size(); ++i) {
+            if (cancel_) {
+                gpu::discard_staged_texture_pack(root_);
+                std::cout << "[texpack] copy cancelled" << std::endl;
+                state_ = State::Cancelled;
+                return;
+            }
+            const android::PackFile &file = found->files[i];
+            {
+                std::lock_guard lock(mutex_);
+                progress_.current = file.relative;
+            }
+            const fs::path target = staging / fs::path(std::u8string(file.relative.begin(), file.relative.end()));
+            std::error_code ec;
+            fs::create_directories(target.parent_path(), ec);
+            if (ec) return fail("cannot create " + install::path_to_utf8(target.parent_path()) + ": " + ec.message());
+            if (!android::copy_document(file.uri, target, error)) return fail(error);
+            done += file.size;
+            std::lock_guard lock(mutex_);
+            progress_.bytes = done;
+            progress_.files = i + 1u;
+        }
+        // Checked in the copy, as the desktop checks the folder chosen.
+        const TexturePackCheck check = gpu::check_texture_pack(staging, game_id);
+        if (!check.ok()) return fail(check.problem.empty() ? "the copied pack does not load" : check.problem);
+        staging_ = check.folder;
+        keys_ = check.keys;
+        {
+            std::lock_guard lock(mutex_);
+            made_for_ = check.made_for;
+        }
+        std::cout << "[texpack] copied " << found->files.size() << " files (" << (done >> 20u) << " MB) to "
+                  << install::path_to_utf8(staging_) << ", " << keys_ << " keys" << std::endl;
+        state_ = State::Done;
+    }
+
+    std::thread thread_;
+    std::atomic<State> state_{State::Idle};
+    std::atomic<bool> cancel_{false};
+    mutable std::mutex mutex_;
+    TexturePackCopy::Progress progress_;
+    std::string error_;
+    std::string made_for_;
+    fs::path root_;
+    fs::path staging_;
+    std::size_t keys_{};
+};
+#endif
+
 struct State {
     Stage stage{Stage::Closed};
     std::unique_ptr<FileBrowser> browser;
@@ -62,6 +205,10 @@ struct State {
     bool cancel_requested{};
     Review review;
     TexturePackCopy copy;
+#if defined(PORTABLEKIT_ANDROID_APP)
+    DocumentPackCopy document_copy;
+    bool from_document{};  // the copy running is document_copy
+#endif
     bool installing{};  // the copy is done; waiting for the renderer to let go of the old pack
     Outcome outcome;
     bool focus{};
@@ -72,6 +219,42 @@ struct State {
 State &state() {
     static State s;
     return s;
+}
+
+// The copy running, whichever kind it is.
+TexturePackCopy::State copy_state() {
+#if defined(PORTABLEKIT_ANDROID_APP)
+    if (state().from_document) return state().document_copy.state();
+#endif
+    return state().copy.state();
+}
+
+TexturePackCopy::Progress copy_progress() {
+#if defined(PORTABLEKIT_ANDROID_APP)
+    if (state().from_document) return state().document_copy.progress();
+#endif
+    return state().copy.progress();
+}
+
+void copy_cancel() {
+#if defined(PORTABLEKIT_ANDROID_APP)
+    if (state().from_document) return state().document_copy.cancel();
+#endif
+    state().copy.cancel();
+}
+
+void copy_join() {
+#if defined(PORTABLEKIT_ANDROID_APP)
+    if (state().from_document) return state().document_copy.join();
+#endif
+    state().copy.join();
+}
+
+std::string copy_error() {
+#if defined(PORTABLEKIT_ANDROID_APP)
+    if (state().from_document) return state().document_copy.error();
+#endif
+    return state().copy.error();
 }
 
 float px(float value) { return std::round(value * Layer::get().scale()); }
@@ -116,7 +299,14 @@ std::string count(std::size_t n, const char *one, const char *many) {
     return std::to_string(n) + " " + (n == 1u ? one : many);
 }
 
+void start_document_copy();
+
 void open_browser() {
+#if defined(PORTABLEKIT_ANDROID_APP)
+    // The system's picker reaches Downloads, SD cards and other apps'
+    // folders, which the game cannot list by itself.
+    start_document_copy();
+#else
     State &s = state();
     FileBrowser::Options options;
     options.extensions = {};
@@ -129,6 +319,7 @@ void open_browser() {
         std::error_code ec;
         return fs::is_regular_file(folder / "textures.ini", ec);
     };
+    options.system_first = true;
     fs::path start = s.last_folder;
     if (start.empty()) {
         start = FileBrowser::home() / "Downloads";
@@ -137,6 +328,7 @@ void open_browser() {
     }
     s.browser = std::make_unique<FileBrowser>(start, std::move(options));
     go(Stage::Choose);
+#endif
 }
 
 void start_check(const fs::path &chosen) {
@@ -174,16 +366,8 @@ void log_review(const Review &r) {
 
 bool browse(bool back) {
     State &s = state();
-#if defined(PORTABLEKIT_ANDROID_APP)
-    indented("Import: open the pack's folder, the one that holds textures.ini, or choose a folder that holds it, "
-             "such as PPSSPP's PSP/TEXTURES.");
-    indented("On Android this lists only folders the game can read by itself, which leaves out Downloads and SD "
-             "cards. Importing through Android's file picker is not supported yet.",
-             colors::kTextDim);
-#else
     indented("Import: open the pack's folder, the one that holds textures.ini, or choose a folder that holds it, "
              "such as PPSSPP's PSP/TEXTURES. You can also drop the folder on the window.");
-#endif
     // A folder dropped on the window is chosen at once.
     if (auto dropped = Layer::get().take_dropped_file()) {
         s.last_folder = s.browser->folder();
@@ -230,9 +414,9 @@ std::string describe_current(const Review &r) {
         if (r.current.source == TexturePackLocation::Source::Installed) return "None";
         return "Folder missing: " + utf8(r.current.folder);
     }
-    std::string text = r.current_pack.problem.empty() ? count(r.current_pack.keys, "texture", "textures")
-                                                      : "Does not load";
-    text += ", " + human_size(r.current_pack.bytes);
+    if (!r.current_pack.problem.empty()) return trf("Does not load, {}", {human_size(r.current_pack.bytes)});
+    const std::string text =
+        trf("{} textures, {}", {std::to_string(r.current_pack.keys), human_size(r.current_pack.bytes)});
     return text;
 }
 
@@ -267,8 +451,30 @@ void use_in_place() {
     finish(std::move(outcome));
 }
 
+void start_document_copy() {
+#if defined(PORTABLEKIT_ANDROID_APP)
+    State &s = state();
+    const std::optional<std::string> tree = android::pick_folder();
+    if (!tree) {
+        close();
+        return;
+    }
+    std::error_code ec;
+    fs::create_directories(textures_root(), ec);
+    s.from_document = true;
+    s.installing = false;
+    s.cancel_requested = false;
+    s.copy_started = std::chrono::steady_clock::now();
+    s.document_copy.start(*tree, textures_root());
+    go(Stage::Copying);
+#endif
+}
+
 void start_copy() {
     State &s = state();
+#if defined(PORTABLEKIT_ANDROID_APP)
+    s.from_document = false;
+#endif
     std::error_code ec;
     fs::create_directories(textures_root(), ec);
     s.installing = false;
@@ -278,6 +484,8 @@ void start_copy() {
     go(Stage::Copying);
 }
 
+// What was found in the chosen folder, in a few lines, and what can be done
+// with it: the actions come first, the pack in use now after them.
 void review_screen(bool back) {
     State &s = state();
     if (back) {
@@ -286,87 +494,81 @@ void review_screen(bool back) {
     }
     const Review &r = s.review;
     const TexturePackCheck &c = r.check;
-    section("Import texture pack");
-    indented("From " + utf8(c.chosen));
-    if (!c.found()) {
-        indented(c.problem, colors::kDanger);
-    } else {
-        indented(c.layout + (c.made_for.empty() ? ""
-                                                : " It is installed as " + std::string(portablekit::game().disc_id) +
-                                                      ", the folder name this release reads."));
-        section("Pack to import");
-        info_row("Folder", utf8(c.folder));
-        if (c.keys > 0u) {
-            info_row("Textures", count(c.keys, "key", "keys") + ", hash " +
-                                     (c.hash == gpu::TexturePackHash::Xxh64 ? "xxh64" : "xxh32") +
-                                     (c.ignore_address ? ", addresses ignored" : ""));
-            info_row("Images", count(c.images, "file", "files") + ", " + human_size(c.bytes) + " in all " +
-                                   count(c.files, "file", "files"));
-            if (c.missing > 0u) {
-                std::string names;
-                for (const std::string &name : c.missing_names) names += (names.empty() ? "" : ", ") + name;
-                if (c.missing > c.missing_names.size()) names += ", …";
-                info_row("Missing images", std::to_string(c.missing) + " (" + names + ")");
-                indented("textures.ini names images that are not in the folder; those textures keep the game's own "
-                         "look.");
-            }
-        }
-        if (!c.ok()) indented("Cannot be imported: " + c.problem, colors::kDanger);
-        section("In use now");
-        info_row(r.current.source == TexturePackLocation::Source::Installed ? "Installed pack" : "Pack folder",
-                 describe_current(r));
-        if (r.current.source != TexturePackLocation::Source::Installed)
-            info_row("Used from", utf8(r.current.folder));
-        if (r.current.source == TexturePackLocation::Source::Variable)
-            indented(portablekit::env_name("TEXTURE_PACK") + " names this folder, so it stays in use until the variable is unset.",
+    const std::string id = portablekit::game().disc_id;
+    ImGui::Indent(px(16.0f));
+    ImGui::Dummy({0.0f, px(4.0f)});
+    heading(!c.found() ? "No texture pack in this folder" : c.ok() ? "Ready to install" : "This pack cannot be used");
+    ImGui::Dummy({0.0f, px(2.0f)});
+    paragraph(utf8(c.found() ? c.folder : c.chosen), colors::kTextDim);
+    ImGui::Unindent(px(16.0f));
+    ImGui::Dummy({0.0f, px(6.0f)});
+    if (!c.found() || !c.ok()) indented(c.problem, colors::kDanger);
+    if (c.found()) {
+        // One line: how big, and the release it was made for.
+        std::string summary = trf("{} textures, {}", {std::to_string(c.keys), human_size(c.bytes)});
+        if (!c.made_for.empty()) summary += "  ·  " + trf("made for {}, works on {}", {c.made_for, id});
+        indented(summary, colors::kText);
+        if (c.missing > 0u)
+            indented(trf("{} images missing: those textures keep the game's own look.", {std::to_string(c.missing)}),
                      colors::kDanger);
     }
 
-    ImGui::Dummy({0.0f, px(12.0f)});
     if (c.ok()) {
+        section("Install");
         const std::uint64_t needed = c.bytes + gpu::kTexturePackSpaceMargin;
         const bool room = !r.free_space || *r.free_space >= needed;
         std::error_code ec;
         const bool installed_exists = fs::exists(installed_folder(), ec);
         const bool is_installed = r.is_current && r.current.source == TexturePackLocation::Source::Installed;
         // Kept to two lines: the footer has no room for a path.
-        std::string copy_note = "Copies " + human_size(c.bytes) + " to textures/" + portablekit::game().disc_id +
-                                " in the data folder";
-        copy_note += r.free_space ? " (" + human_size(*r.free_space) + " free)." : std::string(".");
-        if (installed_exists) copy_note += " The pack there now moves to textures/.backup; nothing is deleted.";
+        std::string copy_note =
+            r.free_space ? trf("Copies {} to mods/textures/{} in the data folder ({} free).",
+                               {human_size(c.bytes), id, human_size(*r.free_space)})
+                         : trf("Copies {} to mods/textures/{} in the data folder.", {human_size(c.bytes), id});
+        if (installed_exists) copy_note += " " + std::string(tr("The pack there now is kept as a backup."));
         if (!room)
-            copy_note = "Not enough free space: the copy needs " + human_size(needed) + " and " +
-                        human_size(*r.free_space) + " is free. Use it where it is instead.";
+            copy_note = trf("Not enough free space: the copy needs {} and {} is free. Use it where it is instead.",
+                            {human_size(needed), human_size(*r.free_space)});
         if (is_installed) copy_note = "This is the installed pack already.";
-        const std::string label = installed_exists ? std::string("Copy and replace")
-                                                    : "Copy into " + std::string(portablekit::game().project_name) + "'s data folder";
-        // The focus starts on the first thing the player can do; the rows
-        // above are a scroll away.
+        const char *label = installed_exists ? "Copy and replace" : "Copy into the data folder";
+        // The focus starts on the first thing the player can do.
         if (room && !is_installed) focus_first();
-        if (button_row(label.c_str(), {!room || is_installed, {}, copy_note},
-                       installed_exists ? colors::kAccentBright : colors::kText))
-            start_copy();
+        if (button_row(label, {!room || is_installed, {}, copy_note}, colors::kAccentBright)) start_copy();
         const bool in_use = r.is_current && r.current.source != TexturePackLocation::Source::Variable;
         const std::string place_note =
-            in_use ? "This pack is the one in use already."
-                   : "Reads the pack from its folder and copies nothing, saving " + human_size(c.bytes) +
-                         ". The folder must stay where it is." +
-                         (installed_exists ? " The installed pack is kept, unused." : "");
+            in_use ? std::string("This pack is the one in use already.")
+                   : trf("Reads the pack from its folder and copies nothing, saving {}. The folder must stay where "
+                         "it is.",
+                         {human_size(c.bytes)});
         focus_first();
         if (button_row("Use it where it is", {in_use, {}, place_note})) use_in_place();
     }
+    ImGui::Dummy({0.0f, px(6.0f)});
     focus_first();
     if (button_row("Choose another folder", {false, {}, "Back to the folders."})) open_browser();
     if (button_row("Cancel", {false, {}, "Import nothing."})) close();
+
+    // The pack in use now, if any: what an install replaces.
+    if (r.current_pack.exists || r.current.source != TexturePackLocation::Source::Installed) {
+        section("In use now");
+        info_row(r.current.source == TexturePackLocation::Source::Installed ? "Installed pack" : "Pack folder",
+                 describe_current(r));
+        if (r.current.source != TexturePackLocation::Source::Installed)
+            info_row("Used from", utf8(r.current.folder));
+        if (r.current.source == TexturePackLocation::Source::Variable)
+            indented(portablekit::env_name("TEXTURE_PACK") +
+                         " names this folder, so it stays in use until the variable is unset.",
+                     colors::kDanger);
+    }
 }
 
 void copying_screen(bool back) {
     State &s = state();
     if (back) {
-        s.copy.cancel();
+        copy_cancel();
         s.cancel_requested = true;
     }
-    const TexturePackCopy::Progress p = s.copy.progress();
+    const TexturePackCopy::Progress p = copy_progress();
     section(s.installing ? "Putting the pack in place" : "Copying texture pack");
     ImGui::Dummy({0.0f, px(6.0f)});
     const float fraction =
@@ -378,8 +580,11 @@ void copying_screen(bool back) {
     ImGui::Indent(px(16.0f));
     progress_bar(fraction, text);
     ImGui::Unindent(px(16.0f));
-    indented(std::to_string(p.files) + " of " + std::to_string(p.total_files) + " files" +
-             (p.current.empty() ? "" : ": " + p.current));
+    if (p.total_files == 0u && !p.current.empty())
+        indented(tr(p.current));  // an Android import still looking through the picked folder
+    else
+        indented(std::to_string(p.files) + " of " + std::to_string(p.total_files) + " files" +
+                 (p.current.empty() ? "" : ": " + p.current));
     const double seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - s.copy_started).count();
     if (fraction > 0.02f && seconds > 2.0) {
@@ -395,7 +600,7 @@ void copying_screen(bool back) {
                    {s.installing || s.cancel_requested, {},
                     "Stops the copy and removes what it has copied so far. Nothing else changes."},
                    colors::kDanger)) {
-        s.copy.cancel();
+        copy_cancel();
         s.cancel_requested = true;
     }
 }
@@ -423,8 +628,10 @@ void result_screen(bool back) {
         indented("Nothing changed: the pack in use before is still in place.");
     }
     ImGui::Dummy({0.0f, px(12.0f)});
+#if !defined(PORTABLEKIT_ANDROID_APP)
     if (button_row("Open the textures folder", {false, {}, "Show the folder the pack is in."}))
         open_folder(o.ok && o.in_place ? o.folder : textures_root());
+#endif
     focus_first();
     if (button_row("Done", {false, {}, "Back to the menu."})) close();
 }
@@ -434,26 +641,26 @@ void result_screen(bool back) {
 void tick() {
     State &s = state();
     if (s.stage != Stage::Copying) return;
-    switch (s.copy.state()) {
+    switch (copy_state()) {
     case TexturePackCopy::State::Copying:
     case TexturePackCopy::State::Idle: return;
     case TexturePackCopy::State::Cancelled: {
-        s.copy.join();
+        copy_join();
         Outcome outcome;
         outcome.cancelled = true;
         finish(std::move(outcome));
         return;
     }
     case TexturePackCopy::State::Failed: {
-        s.copy.join();
+        copy_join();
         Outcome outcome;
-        outcome.error = s.copy.error();
+        outcome.error = copy_error();
         finish(std::move(outcome));
         return;
     }
     case TexturePackCopy::State::Done: break;
     }
-    s.copy.join();
+    copy_join();
     // The renderer closes the pack at its next frame; the folder moves after.
     if (!s.installing) {
         s.installing = true;
@@ -463,19 +670,32 @@ void tick() {
     Outcome outcome;
     std::string error;
     const fs::path backup_dir = gpu::texture_pack_backup_directory(textures_root(), std::chrono::system_clock::now());
-    if (gpu::install_staged_texture_pack(s.copy.staging(), textures_root(), portablekit::game().disc_id, backup_dir,
+    fs::path staging = s.copy.staging();
+    fs::path staging_root = staging;  // what a failure removes
+    std::size_t keys = s.review.check.keys;
+#if defined(PORTABLEKIT_ANDROID_APP)
+    if (s.from_document) {
+        staging = s.document_copy.staging();
+        staging_root = s.document_copy.root();
+        keys = s.document_copy.keys();
+    }
+#endif
+    if (gpu::install_staged_texture_pack(staging, textures_root(), portablekit::game().disc_id, backup_dir,
                                          outcome.backup, error)) {
+        // A document copy sat one folder down; that folder is empty now.
+        std::error_code ec;
+        if (staging_root != staging) fs::remove(staging_root, ec);
         settings::Settings &settings = settings::current();
         settings.texture_pack_folder.clear();
         enable_pack(settings);
         settings::save();
         outcome.ok = true;
         outcome.folder = installed_folder();
-        outcome.keys = s.review.check.keys;
+        outcome.keys = keys;
         std::cout << "[texpack] installed " << utf8(outcome.folder)
                   << (outcome.backup.empty() ? "" : "; the replaced pack is in " + utf8(outcome.backup)) << std::endl;
     } else {
-        gpu::discard_staged_texture_pack(s.copy.staging());
+        gpu::discard_staged_texture_pack(staging_root);
         outcome.error = error;
         std::cout << "[texpack] import failed: " << error << std::endl;
     }
@@ -494,16 +714,24 @@ void texture_pack_rows() {
         s.focus_row = false;
     }
     settings::Settings &settings = settings::current();
-    if (button_row("Import texture pack…",
-                   {false, {},
-                    std::string("Install an HD texture pack from a folder: the one that holds textures.ini, or one "
-                                "that holds it in textures/") +
-                        portablekit::game().disc_id +
-                        " or PSP/TEXTURES. It is checked first; the pack it replaces is kept."}))
-        open_browser();
+#if defined(PORTABLEKIT_ANDROID_APP)
+    const std::string import_note =
+        trf("Pick the pack's folder (the one that holds textures.ini, or one that holds it in PSP/TEXTURES/{}) in "
+            "Android's file picker. It is copied into the game's data folder and checked; the pack it replaces is "
+            "kept.",
+            {portablekit::game().disc_id});
+#else
+    const std::string import_note =
+        trf("Install an HD texture pack from a folder: the one that holds textures.ini, or one that holds it in "
+            "textures/{} or PSP/TEXTURES. It is checked first; the pack it replaces is kept.",
+            {portablekit::game().disc_id});
+#endif
+    if (button_row("Import texture pack…", {false, {}, import_note})) open_browser();
+#if !defined(PORTABLEKIT_ANDROID_APP)
     if (button_row("Open the textures folder",
-                   {false, {}, "Show the textures folder in the data folder, where imported packs go."}))
+                   {false, {}, "Show mods/textures in the data folder, where imported packs go."}))
         open_folder(textures_root());
+#endif
     if (!settings.texture_pack_folder.empty()) info_row("Pack used from", settings.texture_pack_folder);
     if (!settings.texture_pack_folder.empty() &&
         button_row("Stop using the pack folder",

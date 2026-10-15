@@ -23,6 +23,10 @@ namespace portablekit {
 // Contents/Resources/fonts in a macOS app bundle.
 [[nodiscard]] std::filesystem::path bundled_font_directory();
 
+// Where the images the launcher shows may ship (LauncherTheme): launcher/ next
+// to the executable, or Contents/Resources/launcher in a macOS app bundle.
+[[nodiscard]] std::filesystem::path bundled_launcher_directory();
+
 // Font files a release ships in fonts/ next to the executable, as fallbacks
 // after the system's own fonts.
 [[nodiscard]] std::vector<std::filesystem::path> bundled_fonts();

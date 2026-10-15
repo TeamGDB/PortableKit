@@ -4,17 +4,21 @@
 // Load, save, delete, sizes and the list modes are answered from those
 // folders; each game uses its own few. <prefix>_TRACE_SAVEDATA prints every
 // request, which is how to find out which a game asks for.
-// No save-data UI is drawn: modes that would show a list act as if the player
-// confirmed the first entry. Every mode, the failures included, reports QUIT
-// after a few polls; see utility_dialog.hpp.
+// The list modes (LISTLOAD, LISTSAVE, LISTDELETE) show the saves to choose
+// from over the game (ui/save_chooser.hpp) and stay VISIBLE until the player
+// answers; without an interface they act as if the player confirmed the first
+// entry. Every other mode, the failures included, reports QUIT after a few
+// polls; see utility_dialog.hpp.
 #include "../profile.hpp"
 #include "hle_common.hpp"
 #include "utility_dialog.hpp"
 
 #include "crypto_keys.hpp"
+#include "save_data/param_sfo.hpp"
 #include "save_data/savedata_crypto.hpp"
 #include "save_data/savedata_store.hpp"
 #include "save_data/save_transfer.hpp"
+#include "ui/save_chooser.hpp"
 
 #include "psprecomp/common.hpp"
 
@@ -22,6 +26,7 @@
 #include <chrono>
 #include <ctime>
 #include <filesystem>
+#include <fstream>
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -102,6 +107,7 @@ const char *mode_name(std::uint32_t mode) {
 // Result codes written to the parameter block's result field.
 namespace result {
 constexpr std::uint32_t kOk = 0u;
+constexpr std::uint32_t kCancelled = 1u;  // the player backed out of a list
 constexpr std::uint32_t kLoadDataBroken = 0x80110306u;
 constexpr std::uint32_t kLoadNoData = 0x80110307u;
 constexpr std::uint32_t kLoadParam = 0x80110308u;
@@ -117,6 +123,11 @@ constexpr std::uint32_t kFreeClusters = 0x8000u;  // 1 GiB
 struct SavedataState {
     std::filesystem::path memory_stick;
     DialogLifecycle dialog;
+    // A list shown to the player: its request, and the answer once given
+    // (the chosen save's name, or nullopt when cancelled).
+    std::uint32_t params{};
+    std::uint32_t mode{};
+    std::optional<std::optional<std::string>> answer;
 };
 
 SavedataState &state() {
@@ -365,6 +376,24 @@ bool name_matches(std::string_view pattern, std::string_view name) {
     return true;
 }
 
+// A file time as local calendar time. file_time_type's clock is not the
+// system clock everywhere, and not every standard library converts between
+// them; offset by now.
+std::tm local_time(std::filesystem::file_time_type written) {
+    const auto system_time = std::chrono::system_clock::now() +
+                             std::chrono::duration_cast<std::chrono::system_clock::duration>(
+                                 written - std::filesystem::file_time_type::clock::now());
+    const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(system_time.time_since_epoch());
+    const std::time_t time = static_cast<std::time_t>(seconds.count());
+    std::tm tm{};
+#if defined(_WIN32)
+    localtime_s(&tm, &time);
+#else
+    localtime_r(&time, &tm);
+#endif
+    return tm;
+}
+
 // LIST: which saves of this game match the save name, up to the list's
 // capacity. Each entry is a folder mode word, three 16-byte date records
 // (created, accessed, modified) and the 20-byte save name. Only the count has
@@ -395,19 +424,7 @@ std::uint32_t do_list(psprecomp::GuestMemory &memory, std::uint32_t params) {
         const std::uint32_t at = entries + count * kEntrySize;
         if (!memory.contains(at, kEntrySize)) break;
         memory.store32(at, 0x11FFu);  // a folder, readable and writable
-        // file_time_type's clock is not the system clock everywhere, and not
-        // every standard library converts between them; offset by now.
-        const auto system_time = std::chrono::system_clock::now() +
-                                 std::chrono::duration_cast<std::chrono::system_clock::duration>(
-                                     written - std::filesystem::file_time_type::clock::now());
-        const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(system_time.time_since_epoch());
-        const std::time_t time = static_cast<std::time_t>(seconds.count());
-        std::tm tm{};
-#if defined(_WIN32)
-        localtime_s(&tm, &time);
-#else
-        localtime_r(&time, &tm);
-#endif
+        const std::tm tm = local_time(written);
         for (std::uint32_t record = 0; record < 3u; ++record) {
             const std::uint32_t date = at + 4u + record * 16u;
             memory.store16(date, static_cast<std::uint16_t>(tm.tm_year + 1900));
@@ -426,6 +443,110 @@ std::uint32_t do_list(psprecomp::GuestMemory &memory, std::uint32_t params) {
         std::cerr << "[savedata] LIST " << game_name << pattern << ": " << count << " of " << found.size()
                   << " matching saves\n";
     return result::kOk;
+}
+
+bool list_mode(std::uint32_t mode) { return mode == kListLoad || mode == kListSave || mode == kListDelete; }
+
+#if defined(PORTABLEKIT_HAS_RENDERER)
+// Where a list's cursor starts (the parameter's focus field).
+enum Focus : std::uint32_t {
+    kFocusFirstListed = 1,
+    kFocusLastListed = 2,
+    kFocusLatest = 3,
+    kFocusOldest = 4,
+    kFocusFirstEmpty = 5,
+    kFocusLastEmpty = 6,
+};
+
+// Shows the list the PSP's dialog would: the listed saves that exist and, for
+// saving, the first free name before them. False when there is nothing to
+// choose from (loading or deleting with no saves), or no interface.
+bool open_save_list(psprecomp::GuestMemory &memory, std::uint32_t params, std::uint32_t mode) {
+    ui::SaveChooserRequest request;
+    request.mode = mode == kListLoad   ? ui::SaveChooserMode::Load
+                   : mode == kListSave ? ui::SaveChooserMode::Save
+                                       : ui::SaveChooserMode::Delete;
+    request.game_title = read_cstring(memory, params + param::kTitle, 128u);
+    std::optional<std::string> free_name;
+    std::vector<ui::SaveSlot> saves;
+    std::vector<std::filesystem::file_time_type> written;
+    for (const auto &name : save_name_list(memory, memory.load32(params + param::kSaveNameList))) {
+        const auto files = files_for(memory, params, name);
+        if (!savedata::save_exists(state().memory_stick, files)) {
+            if (!free_name) free_name = name;
+            continue;
+        }
+        const std::filesystem::path folder = savedata::save_folder(state().memory_stick, files);
+        ui::SaveSlot slot;
+        slot.name = name;
+        slot.exists = true;
+        std::error_code ec;
+        const std::filesystem::path sfo_path = folder / "PARAM.SFO";
+        std::ifstream in(sfo_path, std::ios::binary);
+        const std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        if (const auto sfo = savedata::ParamSfo::parse(bytes)) {
+            slot.title = sfo->string("SAVEDATA_TITLE").value_or("");
+            slot.detail = sfo->string("SAVEDATA_DETAIL").value_or("");
+            if (request.game_title.empty()) request.game_title = sfo->string("TITLE").value_or("");
+        }
+        const auto time = std::filesystem::last_write_time(std::filesystem::exists(sfo_path, ec) ? sfo_path : folder, ec);
+        const std::tm tm = local_time(time);
+        char date[32];
+        std::strftime(date, sizeof date, "%Y-%m-%d %H:%M", &tm);
+        slot.date = date;
+        if (std::filesystem::is_regular_file(folder / "ICON0.PNG", ec)) slot.icon = folder / "ICON0.PNG";
+        saves.push_back(std::move(slot));
+        written.push_back(time);
+    }
+    if (mode != kListSave && saves.empty()) return false;
+    const std::size_t first_save = mode == kListSave && free_name ? 1u : 0u;
+    if (first_save == 1u) {
+        ui::SaveSlot fresh;
+        fresh.name = *free_name;
+        fresh.title = read_cstring(memory, params + param::kSavedataTitle, 128u);
+        fresh.detail = read_cstring(memory, params + param::kDetail, 1024u);
+        request.slots.push_back(std::move(fresh));
+    }
+    request.slots.insert(request.slots.end(), saves.begin(), saves.end());
+    if (request.slots.empty()) return false;
+    const std::uint32_t focus = memory.load32(params + param::kFocus);
+    if (focus == kFocusLastListed) {
+        request.focus = request.slots.size() - 1u;
+    } else if ((focus == kFocusLatest || focus == kFocusOldest) && !written.empty()) {
+        const auto at = focus == kFocusLatest ? std::max_element(written.begin(), written.end())
+                                              : std::min_element(written.begin(), written.end());
+        request.focus = first_save + static_cast<std::size_t>(at - written.begin());
+    }
+    return ui::open_game_save_chooser(std::move(request), [](std::optional<std::string> chosen) {
+        state().answer = std::move(chosen);
+    });
+}
+#endif
+
+// The player's answer to a list: what the mode asks, done with the chosen
+// save, or a cancel.
+void deliver_choice(psprecomp::GuestMemory &memory) {
+    SavedataState &s = state();
+    if (!s.answer) return;
+    const std::optional<std::string> chosen = std::move(*s.answer);
+    s.answer.reset();
+    std::uint32_t outcome = result::kCancelled;
+    if (chosen) {
+        std::cerr << "[savedata] chosen from the list: " << *chosen << "\n";
+        write_cstring(memory, s.params + param::kSaveName, *chosen, 20u);
+        outcome = s.mode == kListLoad   ? do_load(memory, s.params, *chosen)
+                  : s.mode == kListSave ? do_save(memory, s.params, *chosen)
+                                        : do_delete(memory, s.params, *chosen);
+    } else {
+        std::cerr << "[savedata] list cancelled\n";
+    }
+    memory.store32(s.params + dialog_common::kResultOffset, outcome);
+    if (outcome != result::kOk || trace_savedata())
+        std::cerr << "[savedata] result " << psprecomp::hex32(outcome) << "\n";
+#if defined(PORTABLEKIT_HAS_RENDERER)
+    if (chosen) ui::save_chooser_report(outcome == result::kOk);
+#endif
+    s.dialog.hold(false);
 }
 
 std::uint32_t run_request(psprecomp::GuestMemory &memory, std::uint32_t params) {
@@ -507,6 +628,20 @@ void register_savedata(HleRegistrar &hle, const std::filesystem::path &memory_st
         if (state().dialog.active())
             std::cerr << "[savedata] InitStart while a dialog is active (status " << state().dialog.status() << ")\n";
         log_request(memory, params);
+#if defined(PORTABLEKIT_HAS_RENDERER)
+        if (const std::uint32_t mode = memory.load32(params + param::kMode); list_mode(mode)) {
+            SavedataState &s = state();
+            s.params = params;
+            s.mode = mode;
+            s.answer.reset();
+            if (open_save_list(memory, params, mode)) {
+                s.dialog.start();
+                s.dialog.hold(true);
+                kernel().finish(ctx, 0u);
+                return;
+            }
+        }
+#endif
         const std::uint32_t outcome = run_request(memory, params);
         memory.store32(params + dialog_common::kResultOffset, outcome);
         if (outcome != result::kOk || trace_savedata())
@@ -515,12 +650,14 @@ void register_savedata(HleRegistrar &hle, const std::filesystem::path &memory_st
         kernel().finish(ctx, 0u);
     });
 
-    hle.add("sceUtility", "sceUtilitySavedataUpdate", [](Runtime &, AllegrexContext &ctx) {
+    hle.add("sceUtility", "sceUtilitySavedataUpdate", [](Runtime &rt, AllegrexContext &ctx) {
+        deliver_choice(rt.memory());
         (void)state().dialog.poll();
         kernel().finish(ctx, 0u);
     });
 
-    hle.add("sceUtility", "sceUtilitySavedataGetStatus", [](Runtime &, AllegrexContext &ctx) {
+    hle.add("sceUtility", "sceUtilitySavedataGetStatus", [](Runtime &rt, AllegrexContext &ctx) {
+        deliver_choice(rt.memory());
         const std::uint32_t status = state().dialog.poll();
         if (trace_savedata()) std::cerr << "[savedata] status " << status << "\n";
         kernel().finish(ctx, status);
