@@ -203,7 +203,15 @@ private:
     std::unordered_map<std::string, HleLibrary,
                        TransparentStringHash, std::equal_to<>> hle_;
     std::unordered_map<std::uint32_t, NativeFastPath> native_fast_paths_;
-    std::vector<const HleFunction *> import_bindings_;
+    // Import slots are per-corpus ordinals: two corpora reuse the same slot
+    // numbers for different imports, so a cached entry names the (library,
+    // nid) it was resolved for and is only reused for that pair.
+    struct ImportBinding {
+        const HleFunction *function{};
+        std::string library;
+        std::uint32_t nid{};
+    };
+    std::vector<ImportBinding> import_bindings_;
     std::filesystem::path game_root_;
     bool stopped_{};
     std::string stop_reason_;
